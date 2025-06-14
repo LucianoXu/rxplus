@@ -125,7 +125,7 @@ class RxWSServer(Subject):
         super().on_completed()
 
 
-    async def handle_client(self, websocket: websockets.WebSocketServerProtocol, path):
+    async def handle_client(self, websocket: websockets.WebSocketServerProtocol):
         
         super().on_next(LogItem(f"Client connection attempt from {websocket.remote_address}.", "INFO", self.name))
 
