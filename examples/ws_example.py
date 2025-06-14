@@ -3,7 +3,7 @@ import reactivex as rx
 from reactivex.scheduler.eventloop import AsyncIOScheduler
 from reactivex import operators as ops
 
-from src.ws import *
+from rxplus.ws import *
 
 # this test demonstrates that the WSSender and WSReceiver can be used to send and receive messages across the network.
 
