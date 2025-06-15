@@ -16,7 +16,7 @@ def server():
                 'port' : 8888,
                 'password' :'1234'
             }, 
-            datatype=WSPyObj
+            datatype=WSStr
         )
         sender.subscribe(print)
         
@@ -40,7 +40,7 @@ def client():
                 'port' : 8888,
                 'password' :'1234'
             },
-            datatype=WSPyObj)
+            datatype=WSStr)
         receiver.subscribe(print, on_error=print)
 
         while True:
