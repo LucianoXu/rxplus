@@ -14,9 +14,9 @@ def server():
             {
                 'host' : '0.0.0.0', 
                 'port' : 8888,
-                'password' :'1234'
             }, 
-            datatype=WSStr
+            logcomp=NamedLogComp("RxWSServer"),
+            datatype='string'
         )
         sender.subscribe(print)
         
@@ -38,9 +38,9 @@ def client():
             {
                 'host' : 'localhost', 
                 'port' : 8888,
-                'password' :'1234'
             },
-            datatype=WSStr)
+            logcomp=NamedLogComp("RxWSReceiver"),
+            datatype='string')
         receiver.subscribe(print, on_error=print)
 
         while True:

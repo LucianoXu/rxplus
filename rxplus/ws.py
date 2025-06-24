@@ -20,56 +20,45 @@ from abc import ABC, abstractmethod
 
 class WSDatatype(ABC):
 
-    @staticmethod
     @abstractmethod
-    def package(value) -> Any:
+    def package(self, value) -> Any:
         ...
 
-    @staticmethod
     @abstractmethod
-    def unpackage(value) -> Any:
+    def unpackage(self, value) -> Any:
         ...
-
-class WSPyObj(WSDatatype):
-
-    @staticmethod
-    def package(value):
-        return pickle.dumps(value)
-    
-    @staticmethod
-    def unpackage(value):
-        return pickle.loads(value)
     
 class WSStr(WSDatatype):
 
-    @staticmethod
-    def package(value):
+    def package(self, value):
         return str(value)
     
-    @staticmethod
-    def unpackage(value):
+    def unpackage(self, value):
         return value
     
 
-class WSRawBytes(WSDatatype):
-    """
-    • package(value): 直接返回 bytes/bytearray，给 websockets 发送
-    • unpackage(value): 直接把收到的 payload 还给上层；确保类型为 bytes
-    """
-    @staticmethod
-    def package(value):
+class WSBytes(WSDatatype):
+    def package(self, value):
         if not isinstance(value, (bytes, bytearray)):
             raise TypeError("WSRawBytes expects a bytes-like object")
-        return value                # websockets 会按 binary frame 发送
+        return value
 
-    @staticmethod
-    def unpackage(value):
+    def unpackage(self, value):
         # websockets binary frame → bytes ；text frame → str
         if isinstance(value, str):
-            # 若 Unity 误发文本，可按需处理或抛错
-            # return value.encode()   # 或者: raise TypeError
             raise TypeError(f"WSRawBytes expects a bytes-like object, got str '{value}'")
         return bytes(value)
+    
+def wsdt_factory(datatype: Literal['string', 'byte']) -> WSDatatype:
+    '''
+    Factory function to create a WSDatatype instance based on the datatype parameter.
+    '''
+    if datatype == 'string':
+        return WSStr()
+    elif datatype == 'byte':
+        return WSBytes()
+    else:
+        raise ValueError(f"Unsupported datatype '{datatype}'.")
 
     
 # we use dictionary to serve as connection configuration
@@ -77,7 +66,6 @@ class WSRawBytes(WSDatatype):
 # {
 #   host : 'localhost',
 #   port : 1492,
-#   password : 'turbo'
 # }
 
 class RxWSServer(Subject):
@@ -88,26 +76,27 @@ class RxWSServer(Subject):
     '''
     def __init__(self,
                  conn_cfg: dict, 
-                 name: str = "RxWSServer", 
-                 recv_timeout: float = 0.001, 
-                 pwd_timeout: float = 5, 
-                 datatype: type[WSDatatype] = WSPyObj,
+                 logcomp: LogComp,
+                 recv_timeout: float = 0.001,
+                 datatype: Literal['string', 'byte'] = 'string',
                  ping_interval: Optional[int] = 20,
                  ping_timeout: Optional[int] = 20):
         
         super().__init__()
         self.host = conn_cfg['host']
         self.port = int(conn_cfg['port'])
-        self.password = str(conn_cfg['password'])
 
-        self.name = name
+        # setup the log source
+        self.logcomp = logcomp
+        self.logcomp.set_super(super())
+
         self.datatype = datatype
+        self.adapter: WSDatatype = wsdt_factory(datatype)
 
         # Store connected clients
         self.connections: set[websockets.WebSocketServerProtocol] = set()
         self.connected_queue : set[asyncio.Queue] = set()
         self.recv_timeout = recv_timeout
-        self.pwd_timeout = pwd_timeout
 
         self.ping_interval = ping_interval
         self.ping_timeout = ping_timeout
@@ -126,7 +115,7 @@ class RxWSServer(Subject):
         for queue in self.connected_queue:
             queue.put_nowait(error)
 
-        super().on_next(LogItem(f"{self.name} Error: {error}.", "ERROR", self.name))
+        self.logcomp.log(f"Error: {error}.", "ERROR")
         super().on_error(error)
 
     def on_completed(self) -> None:
@@ -134,7 +123,7 @@ class RxWSServer(Subject):
 
     async def async_completing(self):
         # close all connections
-        super().on_next(LogItem(f"{self.name} Closing...", "INFO", self.name))
+        self.logcomp.log(f"Closing...", "INFO")
 
         if not self.stop.done():
             self.stop.set_result(None)
@@ -143,38 +132,16 @@ class RxWSServer(Subject):
             self.serve.close(True)
             self.serve = None
 
-        super().on_next(LogItem(f"{self.name} Closed.", "INFO", self.name))
+        self.logcomp.log(f"Closed.", "INFO")
         super().on_completed()
 
 
     async def handle_client(self, websocket: websockets.WebSocketServerProtocol):
         
-        super().on_next(LogItem(f"Client connection attempt from {websocket.remote_address}.", "INFO", self.name))
-
+        self.logcomp.log(f"Client established from {websocket.remote_address}.", "INFO")
 
         try:
             queue = asyncio.Queue()
-
-            # wait for the password
-            while True:
-                await asyncio.sleep(0)
-                try:
-                    pwd = await asyncio.wait_for(websocket.recv(), self.pwd_timeout)
-                except asyncio.TimeoutError:
-                    super().on_next(LogItem(f"Client {websocket.remote_address} password timeout after {self.pwd_timeout}(s).", "INFO", self.name))
-                    await websocket.close()
-                    return
-
-                if pwd == self.password:
-                    await websocket.send("PASS")
-                    break
-                else:
-                    super().on_next(LogItem(f"Client {websocket.remote_address} password rejected.", "INFO", self.name))
-                    await websocket.send("REJECT")
-                    await websocket.close()
-                    return
-
-            super().on_next(LogItem(f"Client {websocket.remote_address} password verified. Connection established.", "INFO", self.name))
 
             # Register client
             self.connections.add(websocket)
@@ -186,22 +153,22 @@ class RxWSServer(Subject):
                 if not queue.empty():
                     value = queue.get_nowait()
                     # Broadcast message to all connected clients
-                    await websocket.send(self.datatype.package(value))
+                    await websocket.send(self.adapter.package(value))
 
                 try:
                     # try to recieve from the client
                     data = await asyncio.wait_for(websocket.recv(), self.recv_timeout)
 
-                    super().on_next(self.datatype.unpackage(data))
+                    super().on_next(self.adapter.unpackage(data))
 
                 except asyncio.TimeoutError:
                     pass
 
         except websockets.exceptions.ConnectionClosedError as e:
-            super().on_next(LogItem(f"Client {websocket.remote_address} disconnected with error: {e}.", "WARNING", self.name))
+            self.logcomp.log(f"Client {websocket.remote_address} disconnected with error: {e}.", "WARNING")
 
         except websockets.exceptions.ConnectionClosedOK:
-            super().on_next(LogItem(f"Client {websocket.remote_address} disconnected successfully.", "INFO", self.name))
+            self.logcomp.log(f"Client {websocket.remote_address} disconnected gracefully.", "INFO")
 
         finally:
             # Unregister client
@@ -230,10 +197,9 @@ class RxWSServer(Subject):
 class RxWSClient(Subject):
     def __init__(self,
         conn_cfg: dict,
+        logcomp: LogComp,
         recv_timeout: float = 0.001,
-        pwd_response_timeout: float = 5,
-        name: str = "RxWSClient",
-        datatype: type[WSDatatype] = WSPyObj,
+        datatype: Literal['string', 'byte'] = 'string',
         conn_retry_timeout: float = 0.5,
         ping_interval: Optional[int] = 20,
         ping_timeout: Optional[int] = 20):
@@ -242,11 +208,15 @@ class RxWSClient(Subject):
 
         self.host = conn_cfg['host']
         self.port = int(conn_cfg['port'])
-        self.password = str(conn_cfg['password'])
         self.recv_timeout = recv_timeout
-        self.pwd_response_timeout = pwd_response_timeout
-        self.name = name
+
+        # setup the log source
+        self.logcomp = logcomp
+        self.logcomp.set_super(super())
+        
+
         self.datatype = datatype
+        self.adapter: WSDatatype = wsdt_factory(datatype)
 
         self.ping_interval = ping_interval
         self.ping_timeout = ping_timeout
@@ -264,7 +234,7 @@ class RxWSClient(Subject):
     def on_error(self, error):
         self.queue.put_nowait(error)
 
-        super().on_next(LogItem(f"{self.name} Error: {error}.", "ERROR", self.name))
+        self.logcomp.log(f"Error: {error}.", "ERROR")
         super().on_error(error)
 
     def on_completed(self) -> None:
@@ -273,13 +243,13 @@ class RxWSClient(Subject):
 
     async def async_completing(self):
         # close all connections
-        super().on_next(LogItem(f"{self.name} Closing...", "INFO", self.name))
+        self.logcomp.log(f"Closing...", "INFO")
 
         if self.ws is not None:
             await self.ws.close()
             self.ws = None
 
-        super().on_next(LogItem(f"{self.name} Closed.", "INFO", self.name))
+        self.logcomp.log(f"Closed.", "INFO")
         super().on_completed()
 
 
@@ -301,44 +271,28 @@ class RxWSClient(Subject):
                     
                 except asyncio.TimeoutError:
                     pass
-
-            # check for password
-            await self.ws.send(self.password)
-            # wait for response
-            try:
-                result = await asyncio.wait_for(self.ws.recv(), self.pwd_response_timeout)
-                
-            except asyncio.TimeoutError:
-                super().on_next(LogItem(f"Password response timeout after {self.pwd_response_timeout}(s).", "ERROR", self.name))
-                super().on_error(Exception(f"Password response timeout."))
-                return
             
-            if result != "PASS":
-                super().on_next(LogItem(f"Password rejected.", "ERROR", self.name))
-                super().on_error(Exception(f"Password rejected."))
-                return
-            
-            super().on_next(LogItem(f"Server {self.ws.remote_address} Connected.", "INFO", self.name))
+            self.logcomp.log(f"Server {self.host}:{self.port} Connected.", "INFO")
 
             while True:
                 await asyncio.sleep(0)
                 try:
                     if not self.queue.empty():
                         value = self.queue.get_nowait()
-                        await self.ws.send(self.datatype.package(value))
+                        await self.ws.send(self.adapter.package(value))
 
                     data = await asyncio.wait_for(self.ws.recv(), self.recv_timeout)
-                    super().on_next(self.datatype.unpackage(data))
+                    super().on_next(self.adapter.unpackage(data))
             
                 except asyncio.TimeoutError:
                     pass
 
         except websockets.ConnectionClosedOK:
-            super().on_next(LogItem(f"Server ({self.host}:{self.port}) Connection closed.", "INFO", self.name))
+            self.logcomp.log(f"Server ({self.host}:{self.port}) Connection closed gracefully.", "INFO")
             super().on_completed()
 
         except websockets.ConnectionClosedError as e:
-            super().on_next(LogItem(f"Server ({self.host}:{self.port}) Connection Error: {type(e)} '{e}'.", "ERROR", self.name))
+            self.logcomp.log(f"Server ({self.host}:{self.port}) Connection closed with error: {e}.", "ERROR")
             super().on_error(e)
 
         except asyncio.CancelledError:

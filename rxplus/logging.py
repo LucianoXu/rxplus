@@ -1,4 +1,5 @@
 
+from abc import ABC, abstractmethod
 from typing import Any, Callable, Literal, Optional
 import time
 import os
@@ -97,6 +98,47 @@ def log_redirect_to(log_observer: Observer, levels: set[LOG_LEVEL] = {"DEBUG", "
         return Observable(subscribe)
     
     return _log_redirect_to
+
+
+class LogComp(ABC):
+    '''
+    The abstract class for the log source, a component that can log messages.
+    '''
+    @abstractmethod
+    def set_super(self, obs: Observer):
+        ...
+
+    @abstractmethod
+    def log(self, msg: Any, level: LOG_LEVEL = "INFO"):
+        ...
+
+class EmptyLogComp(LogComp):
+    def set_super(self, obs: Observer):
+        pass
+
+    def log(self, msg: Any, level: LOG_LEVEL = "INFO"):
+        pass
+
+class NamedLogComp(LogComp):
+    def __init__(self, name: str = "LogSource"):
+        self.name = name
+        self.super_obs: Optional[Observer] = None
+
+    def set_super(self, obs: Observer):
+        '''
+        Set the super observer to redirect the log messages.
+        '''
+        self.super_obs = obs
+
+    def log(self, msg: Any, level: LOG_LEVEL = "INFO"):
+        '''
+        Log a message with the specified level.
+        '''
+        log_item = LogItem(self.name + ": " + msg, level, self.name)
+        if self.super_obs is None:
+            raise Exception("Super observer is not set. Please call set_super() first.")
+        self.super_obs.on_next(log_item)
+        
 
 class Logger(Subject):
     '''
