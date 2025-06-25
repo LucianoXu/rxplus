@@ -10,13 +10,14 @@ import websockets
 import pickle
 import os
 
+from abc import ABC, abstractmethod
+
 import reactivex as rx
 from reactivex import Observable, Observer, Subject, create, operators as ops
 
 from .logging import *
+from .utils import get_short_error_info, get_full_error_info
 
-
-from abc import ABC, abstractmethod
 
 class WSDatatype(ABC):
 
@@ -150,27 +151,47 @@ class RxWSServer(Subject):
             
             while True:
                 await asyncio.sleep(0)
-                if not queue.empty():
-                    value = queue.get_nowait()
-                    # Broadcast message to all connected clients
-                    await websocket.send(self.adapter.package(value))
-
                 try:
+                    if not queue.empty():
+                        value = queue.get_nowait()
+                        # Broadcast message to all connected clients
+                        await websocket.send(self.adapter.package(value))
+
                     # try to recieve from the client
                     data = await asyncio.wait_for(websocket.recv(), self.recv_timeout)
-
+                    # process the received data
                     super().on_next(self.adapter.unpackage(data))
 
                 except asyncio.TimeoutError:
                     pass
 
-        except websockets.exceptions.ConnectionClosedError as e:
-            self.logcomp.log(f"Client {websocket.remote_address} disconnected with error: {e}.", "WARNING")
+                except ConnectionResetError as e:
+                    self.logcomp.log(f"Connection reset (ConnectionResetError): {get_short_error_info(e)}", "WARNING")
+                    break
 
-        except websockets.exceptions.ConnectionClosedOK:
-            self.logcomp.log(f"Client {websocket.remote_address} disconnected gracefully.", "INFO")
+                except OSError as e:
+                    self.logcomp.log(f"Network error or connection lost (OSError): {get_short_error_info(e)}", "WARNING")
+                    break
+
+                except websockets.exceptions.ConnectionClosedError as e:
+                    self.logcomp.log(f"Client {websocket.remote_address} disconnected with error: {get_short_error_info(e)}.", "WARNING")
+                    break
+
+                except websockets.exceptions.ConnectionClosedOK:
+                    self.logcomp.log(f"Client {websocket.remote_address} disconnected gracefully.", "INFO")
+                    break
+                
+
+        except Exception as e:
+            self.logcomp.log(f"Error while handling client {websocket.remote_address}:\n{get_full_error_info(e)}", "ERROR")
+            super().on_error(e)
+
 
         finally:
+
+            await websocket.close()
+            self.logcomp.log(f"Client {websocket.remote_address} resources released.", "INFO")
+
             # Unregister client
             if queue in self.connected_queue:
                 self.connected_queue.remove(queue)
@@ -195,6 +216,9 @@ class RxWSServer(Subject):
 
 
 class RxWSClient(Subject):
+    '''
+    The client only recieves data from one server.
+    '''
     def __init__(self,
         conn_cfg: dict,
         logcomp: LogComp,
@@ -255,45 +279,103 @@ class RxWSClient(Subject):
 
     async def setup_client(self):
         try:
+            # Repeatedly attempt to connect to the server
             while True:
-                await asyncio.sleep(0)
-                try:
-                    self.ws = await asyncio.wait_for(
-                        websockets.connect(
-                            f"ws://{self.host}:{self.port}",
-                            ping_interval=self.ping_interval,
-                            ping_timeout=self.ping_timeout,
-                            max_size=None
-                        ), 
-                        self.conn_retry_timeout
-                    )
-                    break
-                    
-                except asyncio.TimeoutError:
-                    pass
-            
-            self.logcomp.log(f"Server {self.host}:{self.port} Connected.", "INFO")
 
-            while True:
-                await asyncio.sleep(0)
-                try:
-                    if not self.queue.empty():
-                        value = self.queue.get_nowait()
-                        await self.ws.send(self.adapter.package(value))
+                # Attempt to connect to the server
+                self.logcomp.log(f"Connecting to server {self.host}:{self.port}...", "INFO")
 
-                    data = await asyncio.wait_for(self.ws.recv(), self.recv_timeout)
-                    super().on_next(self.adapter.unpackage(data))
-            
-                except asyncio.TimeoutError:
-                    pass
+                while True:
+                    await asyncio.sleep(0)
+                    try:
+                        '''
+                        According to the documentation of websockets.connect:
+                        Raises
+                            InvalidURI
+                            If uri isn't a valid WebSocket URI.
 
-        except websockets.ConnectionClosedOK:
-            self.logcomp.log(f"Server ({self.host}:{self.port}) Connection closed gracefully.", "INFO")
-            super().on_completed()
+                            OSError
+                            If the TCP connection fails.
 
-        except websockets.ConnectionClosedError as e:
-            self.logcomp.log(f"Server ({self.host}:{self.port}) Connection closed with error: {e}.", "ERROR")
+                            InvalidHandshake
+                            If the opening handshake fails.
+
+                            ~asyncio.TimeoutError
+                            If the opening handshake times out.
+                        '''
+                        self.ws = await asyncio.wait_for(
+                            websockets.connect(
+                                f"ws://{self.host}:{self.port}",
+                                ping_interval=self.ping_interval,
+                                ping_timeout=self.ping_timeout,
+                                max_size=None
+                            ), 
+                            self.conn_retry_timeout
+                        )
+                        break
+
+                        
+                    except asyncio.TimeoutError:
+                        pass
+
+                    except OSError as e:
+                        self.logcomp.log(f"Network error or connection failed (OSError): {get_short_error_info(e)}", "WARNING")
+                        await asyncio.sleep(self.conn_retry_timeout)
+                        pass
+
+                    except websockets.InvalidHandshake as e:
+                        self.logcomp.log(f"Invalid handshake with server ({self.host}:{self.port}): {get_short_error_info(e)}", "WARNING")
+                        await asyncio.sleep(self.conn_retry_timeout)
+                        pass
+
+                    # Catch invalid URI errors
+                    except websockets.InvalidURI as e:
+                        self.logcomp.log(f"Invalid URI for server ({self.host}:{self.port}): {get_short_error_info(e)}", "ERROR")
+                        super().on_error(e)
+                        return
+                
+                self.logcomp.log(f"Server {self.host}:{self.port} Connected.", "INFO")
+
+
+                # Start receiving messages
+                while True:
+                    await asyncio.sleep(0)
+                    try:
+                        if not self.queue.empty():
+                            value = self.queue.get_nowait()
+                            await self.ws.send(self.adapter.package(value))
+
+                        data = await asyncio.wait_for(self.ws.recv(), self.recv_timeout)
+                        super().on_next(self.adapter.unpackage(data))
+                
+                    except asyncio.TimeoutError:
+                        pass
+
+                    except OSError as e:
+                        self.logcomp.log(f"Network error or connection lost (OSError): {get_short_error_info(e)}", "WARNING")
+                        break
+
+                    except websockets.ConnectionClosedError as e:
+                        self.logcomp.log(f"Server ({self.host}:{self.port}) Connection closed with error: {get_short_error_info(e)}.", "WARNING")
+                        break
+
+                    except websockets.ConnectionClosedOK:
+                        self.logcomp.log(f"Server ({self.host}:{self.port}) Connection closed gracefully.", "INFO")
+                        break
+    
+        except Exception as e:
+            self.logcomp.log(f"Error while connecting to server ({self.host}:{self.port}):\n{get_full_error_info(e)}", "ERROR")
             super().on_error(e)
 
         except asyncio.CancelledError:
             asyncio.create_task(self.async_completing())
+            
+
+        finally:
+            if self.ws is not None:
+                await self.ws.close()
+                self.ws = None
+
+                self.logcomp.log(f"Connection to server ({self.host}:{self.port}) resources released.", "INFO")
+
+        

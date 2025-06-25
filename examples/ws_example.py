@@ -20,9 +20,11 @@ def server():
         )
         sender.subscribe(print)
         
+        i = 0
         while True:
             await asyncio.sleep(1)
-            sender.on_next("Hello")
+            sender.on_next("Hello " + str(i))
+            i += 1
 
     try:
         asyncio.run(test_rxws_S())
@@ -43,9 +45,11 @@ def client():
             datatype='string')
         receiver.subscribe(print, on_error=print)
 
+        i = 0
         while True:
-            await asyncio.sleep(0.3)
-            receiver.on_next("Ping")
+            await asyncio.sleep(0.5)
+            receiver.on_next("Ping " + str(i))
+            i += 1
 
     try:
         asyncio.run(test_rxws_C())

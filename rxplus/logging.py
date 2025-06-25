@@ -7,6 +7,8 @@ import os
 import reactivex as rx
 from reactivex import Observable, Observer, Subject, create, operators as ops
 
+from .utils import get_full_error_info
+
 
 
 def stream_print_out(name: str = "Stream-Print-Out"):
@@ -144,13 +146,14 @@ class Logger(Subject):
     '''
     Logger is a subject, filter and redirect logging items forward. The typical usage is to be subscribed by `print` method.
     '''
-    def __init__(self, logfile_prefix: str = "log", name: str = "logger"):
+    def __init__(self, 
+            logcomp: LogComp,
+            logfile_prefix: str = "log"):
         super().__init__()
         self.logfile_prefix = logfile_prefix
-        self.name = name
+        self.logcomp = logcomp
+        self.logcomp.set_super(super())
         self.pfile = None
-
-        self.on_next(LogItem("Logging started.", "INFO", self.name))
     
     def on_next(self, value: Any) -> None:
         if isinstance(value, LogItem):
@@ -169,9 +172,7 @@ class Logger(Subject):
                 super().on_next(value)
 
             except Exception as e:
-                print("-----------------------------------------------")
-                print(LogItem(f"Logger Error: {e}", "ERROR", self.name))
-                print("-----------------------------------------------")
+                self.logcomp.log(f"Error in Logger:\n{get_full_error_info(e)}", "ERROR")
                 super().on_error(e)
 
     def on_completed(self) -> None:
@@ -181,5 +182,5 @@ class Logger(Subject):
         pass
 
     def on_error(self, error: Exception) -> None:
-        self.on_next(LogItem(f"Error Observed: {error}", "ERROR", self.name))
+        self.logcomp.log(f"Error Observed:\n{get_full_error_info(error)}", "ERROR")
         super().on_error(error)
