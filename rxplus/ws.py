@@ -72,8 +72,9 @@ def wsdt_factory(datatype: Literal['string', 'byte']) -> WSDatatype:
 class RxWSServer(Subject):
     '''
     The websocket server for bi-directional communication between ReactiveX components.
-    The server can be connected by multiple clients with password checked.
+    The server can be connected by multiple clients.
     Use datatype parameter to control the data type sent through the websocket.
+    The server will be closed upon receiving on_completed signal.
     '''
     def __init__(self,
                  conn_cfg: dict, 
@@ -116,25 +117,30 @@ class RxWSServer(Subject):
         for queue in self.connected_queue:
             queue.put_nowait(error)
 
-        self.logcomp.log(f"Error: {error}.", "ERROR")
         super().on_error(error)
 
     def on_completed(self) -> None:
         asyncio.create_task(self.async_completing())
 
     async def async_completing(self):
-        # close all connections
-        self.logcomp.log(f"Closing...", "INFO")
 
-        if not self.stop.done():
-            self.stop.set_result(None)
+        try:
+            # close all connections
+            self.logcomp.log(f"Closing...", "INFO")
 
-        if self.serve is not None:
-            self.serve.close(True)
-            self.serve = None
+            if not self.stop.done():
+                self.stop.set_result(None)
 
-        self.logcomp.log(f"Closed.", "INFO")
-        super().on_completed()
+            if self.serve is not None:
+                self.serve.close(True)
+                self.serve = None
+
+            self.logcomp.log(f"Closed.", "INFO")
+            super().on_completed()
+
+        except asyncio.CancelledError:
+            self.logcomp.log(f"Async completing cancelled.", "INFO")
+            raise
 
 
     async def handle_client(self, websocket: websockets.WebSocketServerProtocol):
@@ -151,12 +157,23 @@ class RxWSServer(Subject):
             
             while True:
                 await asyncio.sleep(0)
-                try:
-                    if not queue.empty():
-                        value = queue.get_nowait()
+                # try to send data to the client
+                if not queue.empty():
+                    value = queue.get_nowait()
+
+                    try:
                         # Broadcast message to all connected clients
                         await websocket.send(self.adapter.package(value))
 
+                    except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                        self.logcomp.log(f"Failed to send data to client {websocket.remote_address}, connection may be broken: {get_short_error_info(e)}", "WARNING")
+                        break
+                        
+                    except websockets.exceptions.ConnectionClosed as e:
+                        self.logcomp.log(f"Failed to send data to client {websocket.remote_address}, connection closed: {get_short_error_info(e)}", "WARNING")
+                        break
+
+                try:
                     # try to recieve from the client
                     data = await asyncio.wait_for(websocket.recv(), self.recv_timeout)
                     # process the received data
@@ -180,6 +197,10 @@ class RxWSServer(Subject):
                 except websockets.exceptions.ConnectionClosedOK:
                     self.logcomp.log(f"Client {websocket.remote_address} disconnected gracefully.", "INFO")
                     break
+
+        except asyncio.CancelledError:
+            self.logcomp.log(f"Client {websocket.remote_address} connection cancelled.", "INFO")
+            raise
                 
 
         except Exception as e:
@@ -212,7 +233,8 @@ class RxWSServer(Subject):
             await self.stop
 
         except asyncio.CancelledError:
-            asyncio.create_task(self.async_completing())
+            self.logcomp.log(f"WebSocket server initialization cancelled.", "INFO")
+            raise
 
 
 class RxWSClient(Subject):
@@ -250,7 +272,7 @@ class RxWSClient(Subject):
 
         self.conn_retry_timeout = conn_retry_timeout
 
-        asyncio.create_task(self.setup_client())
+        asyncio.create_task(self.connect_client())
 
     def on_next(self, value):
         self.queue.put_nowait(value)
@@ -266,18 +288,23 @@ class RxWSClient(Subject):
 
 
     async def async_completing(self):
-        # close all connections
-        self.logcomp.log(f"Closing...", "INFO")
+        try:
+            # close all connections
+            self.logcomp.log(f"Closing...", "INFO")
 
-        if self.ws is not None:
-            await self.ws.close()
-            self.ws = None
+            if self.ws is not None:
+                await self.ws.close()
+                self.ws = None
 
-        self.logcomp.log(f"Closed.", "INFO")
-        super().on_completed()
+            self.logcomp.log(f"Closed.", "INFO")
+            super().on_completed()
+
+        except asyncio.CancelledError:
+            self.logcomp.log(f"Async completing cancelled.", "INFO")
+            raise
 
 
-    async def setup_client(self):
+    async def connect_client(self):
         try:
             # Repeatedly attempt to connect to the server
             while True:
@@ -340,11 +367,22 @@ class RxWSClient(Subject):
                 # Start receiving messages
                 while True:
                     await asyncio.sleep(0)
-                    try:
-                        if not self.queue.empty():
+                    
+                    # try to send data to the server
+                    if not self.queue.empty():
+                        try:
                             value = self.queue.get_nowait()
                             await self.ws.send(self.adapter.package(value))
-
+                            
+                        except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                            self.logcomp.log(f"Failed to send data to server {self.ws.remote_address}, connection may be broken: {get_short_error_info(e)}", "WARNING")
+                            break
+                            
+                        except websockets.exceptions.ConnectionClosed as e:
+                            self.logcomp.log(f"Failed to send data to server {self.ws.remote_address}, connection closed: {get_short_error_info(e)}", "WARNING")
+                            break
+                        
+                    try:
                         data = await asyncio.wait_for(self.ws.recv(), self.recv_timeout)
                         super().on_next(self.adapter.unpackage(data))
                 
@@ -362,14 +400,15 @@ class RxWSClient(Subject):
                     except websockets.ConnectionClosedOK:
                         self.logcomp.log(f"Server ({self.host}:{self.port}) Connection closed gracefully.", "INFO")
                         break
-    
+
+
+        except asyncio.CancelledError:
+            self.logcomp.log(f"WebSocket client connection cancelled.", "INFO")
+            raise    
+
         except Exception as e:
             self.logcomp.log(f"Error while connecting to server ({self.host}:{self.port}):\n{get_full_error_info(e)}", "ERROR")
             super().on_error(e)
-
-        except asyncio.CancelledError:
-            asyncio.create_task(self.async_completing())
-            
 
         finally:
             if self.ws is not None:
