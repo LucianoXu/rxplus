@@ -145,12 +145,14 @@ class NamedLogComp(LogComp):
 class Logger(Subject):
     '''
     Logger is a subject, filter and redirect logging items forward. The typical usage is to be subscribed by `print` method.
+
+    The log file will be created when the first log item is received.
     '''
     def __init__(self, 
             logcomp: Optional[LogComp] = None,
             logfile_prefix: str = "log"):
         super().__init__()
-        self.logfile_prefix = logfile_prefix
+        self.logfile_prefix = logfile_prefix + time.strftime("_%Y%m%d_%H%M%S", time.gmtime())
 
         if logcomp is None:
             self.logcomp = EmptyLogComp()
