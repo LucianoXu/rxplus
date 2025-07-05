@@ -1,4 +1,25 @@
+
 import traceback
+
+from typing import Any
+
+class TaggedData:
+    """
+    A class to hold data with a tag.
+    
+    Attributes:
+        tag (str): The tag of the data.
+        data (any): The data itself.
+    """
+    def __init__(self, tag: str, data: Any):
+        self.tag = tag
+        self.data = data
+
+    def __repr__(self) -> str:
+        return f"(tag={self.tag}, {repr(self.data)})"
+    
+    def __str__(self) -> str:
+        return f"(tag={self.tag}, {str(self.data)})"
 
 def get_short_error_info(e: Exception) -> str:
     """

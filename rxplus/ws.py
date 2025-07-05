@@ -16,7 +16,7 @@ import reactivex as rx
 from reactivex import Observable, Observer, Subject, create, operators as ops
 
 from .logging import *
-from .utils import get_short_error_info, get_full_error_info
+from .utils import TaggedData, get_short_error_info, get_full_error_info
 
 
 class WSDatatype(ABC):
@@ -70,20 +70,6 @@ def wsdt_factory(datatype: Literal['string', 'byte']) -> WSDatatype:
 #   path : '/',
 # }
 
-class WSPathMessage:
-    '''
-    The message containing the path and the data.
-    '''
-    def __init__(self, path: str, data: Any):
-        self.path = path
-        self.data = data
-
-    def __repr__(self):
-        return f"WSPathMessage(path={self.path}, data={self.data})"
-
-    def __str__(self):
-        return f"WSPathMessage(path={self.path}, data={self.data})"    
-    
 class WS_Channels:
     '''
     The class to manage the websocket channels of the same path.
@@ -102,9 +88,9 @@ class RxWSServer(Subject):
     
     The server can handle connections from multiple clients on different paths. Here different paths means the original URI path.
 
-    For the channels without the path, it will call `on_next` on received data directly. For the channels with the path, it will wrap the data in a `WSPathMessage` object, and call `on_next`.
+    For the channels without the path, it will call `on_next` on received data directly. For the channels with the path, it will wrap the data in a `TaggedData` object, and call `on_next`.
 
-    When `on_next` is called, it will check whether the value is a `WSPathMessage`. If it is, it will send the data to the corresponding path's channels. If it is not, it will send the data to the default path's channels (i.e., the empty path).
+    When `on_next` is called, it will check whether the value is a `TaggedData`. If it is, it will send the data to the corresponding path's channels. If it is not, it will send the data to the default path's channels (i.e., the empty path).
 
     Use datatype parameter to control the data type sent through the websocket.
     The server will be closed upon receiving on_completed signal.
@@ -166,9 +152,9 @@ class RxWSServer(Subject):
 
 
     def on_next(self, value):
-        if isinstance(value, WSPathMessage):
+        if isinstance(value, TaggedData):
             # get the channels for the given path
-            ws_channels = self._get_path_channels(value.path)
+            ws_channels = self._get_path_channels(value.tag)
             
             for queue in ws_channels.queues:
                 queue.put_nowait(value.data)
@@ -251,7 +237,7 @@ class RxWSServer(Subject):
                     # process the received data
                     data = ws_channels.adapter.unpackage(data)
                     if websocket.path != '/':
-                        data = WSPathMessage(websocket.path, data)
+                        data = TaggedData(websocket.path, data)
                         
                     super().on_next(data)
 

@@ -8,6 +8,11 @@ To install the latest version from GitHub, run the following command:
 pip install git+https://github.com/LucianoXu/rxplus.git
 ```
 
+To install directly from the source, enter the project root and execute:
+```
+python -m build && pip install .
+```
+
 ## Content
 
 #### Python objects
