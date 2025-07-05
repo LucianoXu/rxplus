@@ -113,7 +113,7 @@ class RxWSServer(Subject):
                  conn_cfg: dict, 
                  logcomp: Optional[LogComp] = None,
                  recv_timeout: float = 0.001,
-                 datatype_func: Callable[[str], Literal['string', 'byte']] = lambda x: 'string',
+                 datatype: Callable[[str], Literal['string', 'byte']] | Literal['string', 'byte'] = 'string',
                  ping_interval: Optional[int] = 20,
                  ping_timeout: Optional[int] = 20):
         
@@ -133,7 +133,13 @@ class RxWSServer(Subject):
         self.recv_timeout = recv_timeout
 
         # the function to determine the datatype of the path
-        self.datatype_func = datatype_func
+        self.datatype_func: Callable[[str], Literal['string', 'byte']]
+        if datatype in ['string', 'byte']:
+            self.datatype_func = lambda path: datatype # type: ignore
+        elif callable(datatype):
+            self.datatype_func = datatype
+        else:
+            raise ValueError(f"Unsupported datatype '{datatype}'. Expected 'string', 'byte', or a callable function.")
 
         self.ping_interval = ping_interval
         self.ping_timeout = ping_timeout

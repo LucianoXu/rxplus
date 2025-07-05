@@ -16,7 +16,7 @@ def server():
                 'port' : 8888,
             }, 
             logcomp=NamedLogComp("RxWSServer"),
-            datatype_func= lambda x: 'string'
+            datatype='string'
         )
         sender.subscribe(print)
         
