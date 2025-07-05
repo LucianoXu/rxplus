@@ -1,10 +1,13 @@
 
+from abc import ABC, abstractmethod
 from typing import Any, Callable, Literal, Optional
 import time
 import os
 
 import reactivex as rx
 from reactivex import Observable, Observer, Subject, create, operators as ops
+
+from .utils import get_full_error_info
 
 
 
@@ -98,17 +101,62 @@ def log_redirect_to(log_observer: Observer, levels: set[LOG_LEVEL] = {"DEBUG", "
     
     return _log_redirect_to
 
+
+class LogComp(ABC):
+    '''
+    The abstract class for the log source, a component that can log messages.
+    '''
+    @abstractmethod
+    def set_super(self, obs: Observer):
+        ...
+
+    @abstractmethod
+    def log(self, msg: Any, level: LOG_LEVEL = "INFO"):
+        ...
+
+class EmptyLogComp(LogComp):
+    def set_super(self, obs: Observer):
+        pass
+
+    def log(self, msg: Any, level: LOG_LEVEL = "INFO"):
+        pass
+
+class NamedLogComp(LogComp):
+    def __init__(self, name: str = "LogSource"):
+        self.name = name
+        self.super_obs: Optional[Observer] = None
+
+    def set_super(self, obs: Observer):
+        '''
+        Set the super observer to redirect the log messages.
+        '''
+        self.super_obs = obs
+
+    def log(self, msg: Any, level: LOG_LEVEL = "INFO"):
+        '''
+        Log a message with the specified level.
+        '''
+        log_item = LogItem(self.name + ": " + msg, level, self.name)
+        if self.super_obs is None:
+            raise Exception("Super observer is not set. Please call set_super() first.")
+        self.super_obs.on_next(log_item)
+        
+
 class Logger(Subject):
     '''
     Logger is a subject, filter and redirect logging items forward. The typical usage is to be subscribed by `print` method.
     '''
-    def __init__(self, logfile_prefix: str = "log", name: str = "logger"):
+    def __init__(self, 
+            logcomp: Optional[LogComp] = None,
+            logfile_prefix: str = "log"):
         super().__init__()
         self.logfile_prefix = logfile_prefix
-        self.name = name
+        if logcomp is None:
+            logcomp = EmptyLogComp()
+        else:
+            self.logcomp = logcomp
+        self.logcomp.set_super(super())
         self.pfile = None
-
-        self.on_next(LogItem("Logging started.", "INFO", self.name))
     
     def on_next(self, value: Any) -> None:
         if isinstance(value, LogItem):
@@ -127,9 +175,7 @@ class Logger(Subject):
                 super().on_next(value)
 
             except Exception as e:
-                print("-----------------------------------------------")
-                print(LogItem(f"Logger Error: {e}", "ERROR", self.name))
-                print("-----------------------------------------------")
+                self.logcomp.log(f"Error in Logger:\n{get_full_error_info(e)}", "ERROR")
                 super().on_error(e)
 
     def on_completed(self) -> None:
@@ -139,5 +185,5 @@ class Logger(Subject):
         pass
 
     def on_error(self, error: Exception) -> None:
-        self.on_next(LogItem(f"Error Observed: {error}", "ERROR", self.name))
+        self.logcomp.log(f"Error Observed:\n{get_full_error_info(error)}", "ERROR")
         super().on_error(error)
