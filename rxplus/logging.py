@@ -151,10 +151,12 @@ class Logger(Subject):
             logfile_prefix: str = "log"):
         super().__init__()
         self.logfile_prefix = logfile_prefix
+
         if logcomp is None:
-            logcomp = EmptyLogComp()
+            self.logcomp = EmptyLogComp()
         else:
             self.logcomp = logcomp
+            
         self.logcomp.set_super(super())
         self.pfile = None
     
