@@ -147,11 +147,14 @@ class Logger(Subject):
     Logger is a subject, filter and redirect logging items forward. The typical usage is to be subscribed by `print` method.
     '''
     def __init__(self, 
-            logcomp: LogComp,
+            logcomp: Optional[LogComp] = None,
             logfile_prefix: str = "log"):
         super().__init__()
         self.logfile_prefix = logfile_prefix
-        self.logcomp = logcomp
+        if logcomp is None:
+            logcomp = EmptyLogComp()
+        else:
+            self.logcomp = logcomp
         self.logcomp.set_super(super())
         self.pfile = None
     

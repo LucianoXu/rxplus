@@ -78,7 +78,7 @@ class RxWSServer(Subject):
     '''
     def __init__(self,
                  conn_cfg: dict, 
-                 logcomp: LogComp,
+                 logcomp: Optional[LogComp] = None,
                  recv_timeout: float = 0.001,
                  datatype: Literal['string', 'byte'] = 'string',
                  ping_interval: Optional[int] = 20,
@@ -89,7 +89,11 @@ class RxWSServer(Subject):
         self.port = int(conn_cfg['port'])
 
         # setup the log source
-        self.logcomp = logcomp
+        if logcomp is None:
+            logcomp = EmptyLogComp()
+        else:
+            self.logcomp = logcomp
+
         self.logcomp.set_super(super())
 
         self.datatype = datatype
@@ -240,10 +244,12 @@ class RxWSServer(Subject):
 class RxWSClient(Subject):
     '''
     The client only recieves data from one server.
+    When connection fails, it will repeatedly retry to connect to the server.
+    The client will be closed upon receiving on_completed signal.
     '''
     def __init__(self,
         conn_cfg: dict,
-        logcomp: LogComp,
+        logcomp: Optional[LogComp] = None,
         recv_timeout: float = 0.001,
         datatype: Literal['string', 'byte'] = 'string',
         conn_retry_timeout: float = 0.5,
@@ -257,7 +263,11 @@ class RxWSClient(Subject):
         self.recv_timeout = recv_timeout
 
         # setup the log source
-        self.logcomp = logcomp
+        if logcomp is None:
+            logcomp = EmptyLogComp()
+        else:
+            self.logcomp = logcomp
+            
         self.logcomp.set_super(super())
         
 
