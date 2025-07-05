@@ -16,7 +16,7 @@ def server():
                 'port' : 8888,
             }, 
             logcomp=NamedLogComp("RxWSServer"),
-            datatype='string'
+            datatype_func= lambda x: 'string'
         )
         sender.subscribe(print)
         
@@ -40,6 +40,7 @@ def client():
             {
                 'host' : 'localhost', 
                 'port' : 8888,
+                'path' : '//',
             },
             logcomp=NamedLogComp("RxWSReceiver"),
             datatype='string')
