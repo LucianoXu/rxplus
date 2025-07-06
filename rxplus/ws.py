@@ -110,9 +110,8 @@ class RxWSServer(Subject):
         # setup the log source
         if logcomp is None:
             logcomp = EmptyLogComp()
-        else:
-            self.logcomp = logcomp
 
+        self.logcomp = logcomp
         self.logcomp.set_super(super())
 
         # Store connected clients
@@ -322,9 +321,8 @@ class RxWSClient(Subject):
         # setup the log source
         if logcomp is None:
             logcomp = EmptyLogComp()
-        else:
-            self.logcomp = logcomp
 
+        self.logcomp = logcomp
         self.logcomp.set_super(super())
         
 
