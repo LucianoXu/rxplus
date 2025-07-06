@@ -5,15 +5,26 @@ from reactivex import operators as ops
 
 from rxplus.ws import *
 
-# this test demonstrates that the WSSender and WSReceiver can be used to send and receive messages across the network.
+import argparse
 
-# run this on the server side
-def server():
+import asyncio
+
+from rxplus import RxWSServer, NamedLogComp, drop_log
+
+
+def build_parser(subparsers: argparse._SubParsersAction):
+    parser = subparsers.add_parser("wsserver", help="start the ws server.")
+    parser.add_argument("--host", type=str, default="::")
+    parser.add_argument("--port", type=int, default=8888)
+    parser.set_defaults(func=task)
+
+def task(parsed_args: argparse.Namespace):
+
     async def test_rxws_S():
         sender = RxWSServer(
             {
-                'host' : '0.0.0.0', 
-                'port' : 8888,
+                'host' : parsed_args.host, 
+                'port' : parsed_args.port,
             }, 
             logcomp=NamedLogComp("RxWSServer"),
             datatype='string'
@@ -31,6 +42,7 @@ def server():
 
     except KeyboardInterrupt:
         print("\nKeyboard Interrupt.")
+
 
 
 # run this on the client side

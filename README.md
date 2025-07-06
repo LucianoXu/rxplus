@@ -36,6 +36,10 @@ The `utils` module provides various utility functions, including `TaggedData` fo
 
 The `ws` module offers a reactive wrapper around the `websockets` library, providing `RxWSServer` and `RxWSClient` classes for building real-time, bidirectional WebSocket applications.
 
+### CLI
+
+The `cli` module provides the `from_cli` operator, which creates an observable that emits strings from the command-line interface. This is useful for creating interactive command-line applications.
+
 ## Usage
 
 Here is a simple example of how to use the WebSocket component in `rxplus`:

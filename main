@@ -1,0 +1,30 @@
+#! /usr/bin/env python3
+
+'''
+The main entry for all tasks.
+'''
+
+import argparse
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Main entry for multiple functions.")
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    from tasks import task_wsserver
+    task_wsserver.build_parser(subparsers)
+    # ./main wsserver
+
+    from tasks import task_wsclient
+    task_wsclient.build_parser(subparsers)
+    # ./main wsclient
+
+    from tasks import task_cli
+    task_cli.build_parser(subparsers)
+    # ./main cli
+
+    # Parse arguments
+    args = parser.parse_args()
+    
+    # Call the function associated with the chosen command
+    args.func(args)
