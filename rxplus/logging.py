@@ -10,38 +10,6 @@ from reactivex import Observable, Observer, Subject, create, operators as ops
 from .utils import get_full_error_info
 
 
-
-def stream_print_out(name: str = "Stream-Print-Out"):
-    '''
-    Print out and forward the data stream. For debug or info output purpose.
-    '''
-    def _stream_print_out(source):
-
-        def subscribe(observer, scheduler=None):
-            def on_next(value) -> None:
-                print(f"{name}:")
-                print(value)
-                observer.on_next(value)
-
-            def on_error(error):
-                print(f"{name}: {type(error)} Error: {error}")
-                observer.on_error(error)
-
-            def on_completed():
-                print(f"{name}: Completed.")
-                observer.on_completed()
-
-            return source.subscribe(
-                on_next=on_next,
-                on_error=on_error,
-                on_completed=on_completed,
-                scheduler=scheduler
-            )
-        
-        return Observable(subscribe)
-    
-    return _stream_print_out
-
 '''
 The objects to deal with loggings.
 '''
