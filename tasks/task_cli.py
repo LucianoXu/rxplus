@@ -1,4 +1,5 @@
-
+import asyncio
+import threading
 import reactivex as rx
 from reactivex.scheduler.eventloop import AsyncIOScheduler
 from reactivex import operators as ops
@@ -15,17 +16,25 @@ def build_parser(subparsers: argparse._SubParsersAction):
     parser.set_defaults(func=task)
 
 def task(parsed_args: argparse.Namespace):
-    
-    # Create an observable that emits values every 1 second
-    source = rx.interval(2.0)
 
-    source.pipe(
-        from_cli()
-    ).subscribe(
-        on_next=lambda value: print(f"Received from CLI: {value}\n"),
-        on_error=lambda error: print(f"Error: {error}"),
-        on_completed=lambda: print("CLI input completed")
-    )
+    async def test_cli():
+        
+        # Create an observable that emits values every 2 seconds
+        source = rx.interval(2.0)
 
-    while True:
-        time.sleep(1.0)
+        source.pipe(
+            from_cli(preserve=False)
+        ).subscribe(
+            on_next=lambda value: print(f"Received from CLI: {value}\n"),
+            on_error=lambda error: print(f"Error: {error}"),
+            on_completed=lambda: print("CLI input completed")
+        )
+
+        while True:
+            await asyncio.sleep(0.5)
+
+    try:
+        asyncio.run(test_cli())
+
+    except KeyboardInterrupt:
+        print("\nKeyboard Interrupt.")

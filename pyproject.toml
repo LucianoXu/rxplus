@@ -20,6 +20,7 @@ requires-python = ">=3.7"
 dependencies = [
     "reactivex",
     "websockets",
+    "prompt-toolkit",
 ]
 
 [project.optional-dependencies]
