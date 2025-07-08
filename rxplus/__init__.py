@@ -6,6 +6,6 @@ from .opt import redirect_to
 
 from .ws import WSDatatype, WSStr, RxWSServer, RxWSClient
 
-from .duplex import Duplex, make_duplex
+from .duplex import Duplex, make_duplex, connect_adapter
 
 from .cli import from_cli
