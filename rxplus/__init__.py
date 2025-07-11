@@ -9,3 +9,5 @@ from .ws import WSDatatype, WSStr, RxWSServer, RxWSClient
 from .duplex import Duplex, make_duplex, connect_adapter
 
 from .cli import from_cli
+
+from .audio import create_wavfile, RxMicrophone, RxSpeaker
