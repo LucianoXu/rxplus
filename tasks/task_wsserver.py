@@ -42,31 +42,3 @@ def task(parsed_args: argparse.Namespace):
 
     except KeyboardInterrupt:
         print("\nKeyboard Interrupt.")
-
-
-
-# run this on the client side
-def client():
-    async def test_rxws_C():
-        receiver = RxWSClient(
-            {
-                'host' : 'localhost', 
-                'port' : 8888,
-                'path' : '//',
-            },
-            logcomp=NamedLogComp("RxWSReceiver"),
-            datatype='string')
-        receiver.subscribe(print, on_error=print)
-
-        i = 0
-        while True:
-            await asyncio.sleep(0.5)
-            receiver.on_next("Ping " + str(i))
-            i += 1
-
-    try:
-        asyncio.run(test_rxws_C())
-
-    except KeyboardInterrupt:
-        print("\nKeyboard Interrupt.")
-

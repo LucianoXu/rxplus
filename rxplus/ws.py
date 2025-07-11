@@ -22,6 +22,14 @@ from .utils import TaggedData, get_short_error_info, get_full_error_info
 class WSDatatype(ABC):
 
     @abstractmethod
+    def package_type_check(self, value) -> None:
+        '''
+        Check whether the value can be sent through this datatype.
+        If not, an error will be rased.
+        '''
+        ...
+
+    @abstractmethod
     def package(self, value) -> Any:
         ...
 
@@ -31,6 +39,9 @@ class WSDatatype(ABC):
     
 class WSStr(WSDatatype):
 
+    def package_type_check(self, value) -> None:
+        pass
+
     def package(self, value):
         return str(value)
     
@@ -39,9 +50,12 @@ class WSStr(WSDatatype):
     
 
 class WSBytes(WSDatatype):
-    def package(self, value):
+
+    def package_type_check(self, value) -> None:
         if not isinstance(value, (bytes, bytearray)):
             raise TypeError("WSRawBytes expects a bytes-like object")
+
+    def package(self, value):
         return value
 
     def unpackage(self, value):
@@ -151,18 +165,22 @@ class RxWSServer(Subject):
 
 
     def on_next(self, value):
+
+        # determine channel and data
         if isinstance(value, TaggedData):
             # get the channels for the given path
             ws_channels = self._get_path_channels(value.tag)
-            
-            for queue in ws_channels.queues:
-                queue.put_nowait(value.data)
-
+            data = value.data
         else:
             ws_channels = self._get_path_channels('/')
+            data = value
+        
+        # type check data
+        ws_channels.adapter.package_type_check(data)
 
-            for queue in ws_channels.queues:
-                queue.put_nowait(value)
+        # push the data
+        for queue in ws_channels.queues:
+            queue.put_nowait(data)
         
     def on_error(self, error):
         self.logcomp.log(f"Error: {error}.", "ERROR")
