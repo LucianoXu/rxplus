@@ -84,7 +84,7 @@ def _load_wav_resample(
     return audio. audio is float32 with shape [samples, channels]
     The returned array is also converted to **target_format**.
     """
-    audio, orig_sr = sf.read(path, always_2d=True)        # 保留多声道
+    audio, orig_sr = sf.read(path, always_2d=True)
     audio = audio.astype(np.float32)
 
     # transform to target sample rate
