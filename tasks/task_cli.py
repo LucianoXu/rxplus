@@ -13,6 +13,8 @@ from rxplus import RxWSServer, NamedLogComp, drop_log, from_cli
 
 def build_parser(subparsers: argparse._SubParsersAction):
     parser = subparsers.add_parser("cli", help="try the cli operator")
+    parser.add_argument("--mode", type=str, default="loop", choices=["loop", "queue", "update"], 
+                        help="Mode for CLI interaction: 'loop' for continuous prompts, 'queue' for queuing questions, 'update' for replacing prompt text.")
     parser.set_defaults(func=task)
 
 def task(parsed_args: argparse.Namespace):
@@ -23,7 +25,7 @@ def task(parsed_args: argparse.Namespace):
         source = rx.interval(2.0)
 
         source.pipe(
-            from_cli(preserve=False)
+            from_cli(mode=parsed_args.mode)
         ).subscribe(
             on_next=lambda value: print(f"Received from CLI: {value}\n"),
             on_error=lambda error: print(f"Error: {error}"),

@@ -1,4 +1,5 @@
 import asyncio
+from typing import Literal
 from reactivex import Observable
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
@@ -7,7 +8,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 def from_cli(
     loop: asyncio.AbstractEventLoop | None = None,
     *,
-    preserve: bool = True,          # True = queue every question; False = only keep the latest
+    mode: Literal["queue", "update", "loop"] = "loop",          # True = queue every question; False = only keep the latest
 ):
     """
     Turn each element from the source Observable into an interactive prompt,
@@ -17,13 +18,17 @@ def from_cli(
     ----------
     loop : asyncio.AbstractEventLoop | None
         Event loop to schedule tasks on.  If None, the current running loop is used.
-    preserve : bool, default True
-        * True  – Every incoming value is queued; the user answers them in order.
-                  If the user is already typing, the prompt text is NOT changed.
-        * False – Only the most recent value is shown; older ones are discarded.
-                  If the user is typing, the prompt text is simply replaced.
+    mode : Literal["queue", "update", "loop"], default "loop"
+        * "queue"  – Every incoming value is queued; the user answers them in order.
+                     If the user is already typing, the prompt text is NOT changed.
+        * "update" – Only the most recent value is shown; older ones are discarded.
+                     If the user is typing, the prompt text is simply replaced.
+        * "loop"   – Continuously loop through prompts with the latest value.
     """
     def _from_cli(source: Observable) -> Observable:
+        if mode not in ["queue", "update", "loop"]:
+            raise ValueError(f"Invalid mode: {mode}. Choose from 'queue', 'update', or 'loop'.")
+        
         def subscribe(observer, scheduler=None):
             # Runtime state ---------------------------------------------------
             session           = PromptSession()
@@ -36,7 +41,8 @@ def from_cli(
             # Background coroutine: serially handles queued questions ----------
             async def prompt_loop():
                 while not done.is_set():
-                    current_prompt["text"] = await waiting_prompts.get()
+                    if mode != "loop":
+                        current_prompt["text"] = await waiting_prompts.get()
                     awaiting_input["flag"] = True
                     try:
                         with patch_stdout():
@@ -59,7 +65,7 @@ def from_cli(
             # Upstream on_next handler ----------------------------------------
             def _on_next(value):
                 async def _handle():
-                    if preserve:
+                    if mode == "queue":
                         # Always queue the question; do not replace prompt while typing
                         await waiting_prompts.put(value)
                         if not awaiting_input["flag"] and session.app:

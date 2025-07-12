@@ -21,7 +21,7 @@ if __name__ == '__main__':
 
     from tasks import task_cli
     task_cli.build_parser(subparsers)
-    # ./main cli
+    # ./main cli --mode=loop
 
     from tasks import task_mic_server
     task_mic_server.build_parser(subparsers)
