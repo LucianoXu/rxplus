@@ -121,4 +121,6 @@ if __name__ == "__main__":
 ### Development
 
 Run the test suite with `pytest` after installing the optional `dev` dependencies.
-Code style is enforced using `black` and `isort`.
+
+### TODO
+Check the code and make sure that error will not be raised in rx nodes, but pushed forward.
