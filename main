@@ -25,15 +25,19 @@ if __name__ == '__main__':
 
     from tasks import task_mic_server
     task_mic_server.build_parser(subparsers)
-    # ./main mic_server --format=32 --sr=48000 --ch=1
+    # ./main mic_server --format=Int32 --sr=48000 --ch=1
 
     from tasks import task_speaker_client
     task_speaker_client.build_parser(subparsers)
-    # ./main speaker_client --format=32 --sr=48000 --ch=1
+    # ./main speaker_client --format=Int32 --sr=48000 --ch=1
 
     from tasks import task_wavfile_server
     task_wavfile_server.build_parser(subparsers)
     # ./main wavfile_server --path=record.wav --sr=48000 --ch=1
+    
+    from tasks import task_wavfile_client
+    task_wavfile_client.build_parser(subparsers)
+    # ./main wavfile_client --path=output.wav --format=Float32 --sr=48000 --ch=1
 
     # Parse arguments
     args = parser.parse_args()

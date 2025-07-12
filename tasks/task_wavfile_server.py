@@ -1,4 +1,4 @@
-import asyncio
+from typing import Literal, get_args
 import reactivex as rx
 from reactivex.scheduler.eventloop import AsyncIOScheduler
 from reactivex import Subject
@@ -46,7 +46,7 @@ def task(parsed_args: argparse.Namespace):
         wavfile = create_wavfile(
             wav_path=parsed_args.path,
             target_sample_rate=parsed_args.sr,
-            target_channel=parsed_args.ch
+            target_channels=parsed_args.ch
         ).pipe(
             ops.map(lambda d: d.tobytes()),
             ops.repeat()
@@ -56,7 +56,7 @@ def task(parsed_args: argparse.Namespace):
         wavfile.subscribe(data)
 
         while True:
-                await asyncio.sleep(1)
+            await asyncio.sleep(1)
 
     try:
         asyncio.run(test_microphone_server())

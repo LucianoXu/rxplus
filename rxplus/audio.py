@@ -18,6 +18,43 @@ from reactivex.scheduler import ThreadPoolScheduler
 from .logging import *
 from .utils import TaggedData, get_short_error_info, get_full_error_info
 
+PCMFormat = Literal["UInt8", "Int16", "Int24", "Int32", "Float32"]
+
+def get_pyaudio_format(format: PCMFormat) -> int:
+    """
+    Get the pyaudio format from the PCMFormat.
+    """
+    if format == "UInt8":
+        return pyaudio.paUInt8
+    elif format == "Int16":
+        return pyaudio.paInt16
+    elif format == "Int24":
+        return pyaudio.paInt24
+    elif format == "Int32":
+        return pyaudio.paInt32
+    elif format == "Float32":
+        return pyaudio.paFloat32
+    else:
+        raise ValueError(f"Unexpected PCMFormat: {format}")
+    
+def get_sf_format(format: PCMFormat) -> tuple[str, str]:
+    '''
+    Mapping from PyAudio format constants to (numpy dtype, libsndfile subtype)
+    '''
+    if format == "UInt8":
+        return ("uint8", "PCM_U8")
+    elif format == "Int16":
+        return ("int16", "PCM_16")
+    elif format == "Int24":
+        return ("int24", "PCM_24")
+    elif format == "Int32":
+        return ("int32", "PCM_32")
+    elif format == "Float32":
+        return ("float32", "FLOAT")
+    else:
+        raise ValueError(f"Unexpected PCMFormat: {format}")
+
+
 
 def _load_wav_resample(path: str,
                       target_sr: int,
@@ -47,7 +84,7 @@ def _load_wav_resample(path: str,
 def create_wavfile(
     wav_path: str,
     target_sample_rate: int = 48_000,
-    target_channel: int = 1,
+    target_channels: int = 1,
     frames_per_chunk: int = 1_024,
     scheduler: Optional[rx.abc.SchedulerBase] = None,
 ):
@@ -64,7 +101,7 @@ def create_wavfile(
         # TODO: check whether it is the best choice to use ThreadPoolScheduler as default here
         _scheduler = scheduler or scheduler_ or ThreadPoolScheduler(1)
 
-        audio = _load_wav_resample(wav_path, target_sample_rate, target_ch=target_channel)
+        audio = _load_wav_resample(wav_path, target_sample_rate, target_ch=target_channels)
 
         disposed = False
 
@@ -103,7 +140,7 @@ class RxMicrophone(Subject):
 
     def __init__(
         self,
-        format: int | None = None,
+        format: PCMFormat = "Float32",
         sample_rate: int = 48_000,
         channels: int = 1,
         frames_per_buffer: int = 1_024,
@@ -114,13 +151,13 @@ class RxMicrophone(Subject):
         # ---------- Audio config ------------------------------------------------
         self.sample_rate = sample_rate
         self.channels = channels
-        self.format = format or pyaudio.paInt16
+        self.format = format
         self.frames_per_buffer = frames_per_buffer
 
         # ---------- PyAudio setup ----------------------------------------------
         self._pa = pyaudio.PyAudio()
         self._stream = self._pa.open(
-            format=self.format,
+            format=get_pyaudio_format(self.format),
             channels=self.channels,
             rate=self.sample_rate,
             input=True,
@@ -197,7 +234,7 @@ class RxSpeaker(Subject):
     '''
     '''
     def __init__(self, 
-        format: int | None = None,
+        format: PCMFormat = "Float32",
         sample_rate: int = 48_000,
         channels: int = 1,
         ):
@@ -207,12 +244,12 @@ class RxSpeaker(Subject):
         # ---------- Audio config ------------------------------------------------
         self.sample_rate = sample_rate
         self.channels = channels
-        self.format = format or pyaudio.paInt16
+        self.format = format
 
         # ---------- PyAudio setup ----------------------------------------------
         self._pa = pyaudio.PyAudio()
         self._stream = self._pa.open(
-            format=self.format,
+            format=get_pyaudio_format(self.format),
             channels=self.channels,
             rate=self.sample_rate,
             output=True
@@ -236,3 +273,89 @@ class RxSpeaker(Subject):
 
     def on_next(self, chunk):
         self._play_to_soundcard(chunk=chunk)
+
+
+# --------------------------------------------------------------------------
+#                       WAV file saving observer
+# --------------------------------------------------------------------------
+class SaveWavFile:
+    """
+    Observer that saves incoming audio byte chunks to a WAV file **using
+    the `soundfile` library**.
+
+    Each ``on_next`` call writes the raw PCM bytes directly to disk with
+    ``SoundFile.buffer_write`` so it works well for streaming audio.
+
+    Parameters
+    ----------
+    path
+        Destination file path.
+    format
+        PyAudio sample format constant (defaults to ``pyaudio.paFloat32``).
+    sample_rate
+        Sampling rate in Hz.
+    channels
+        Number of interleaved channels.
+    """
+
+    # Mapping from PyAudio format constants to (numpy dtype, libsndfile subtype)
+
+    def __init__(
+        self,
+        path: str,
+        format: PCMFormat = "Float32",
+        sample_rate: int = 48_000,
+        channels: int = 1,
+    ):
+        # Resolve dtype / subtype from the format table (fallback to float32)
+        dtype, subtype = get_sf_format(format)
+
+        # Open file for streaming writes
+        self._sf = sf.SoundFile(
+            path,
+            mode="w",
+            samplerate=sample_rate,
+            channels=channels,
+            subtype=subtype,
+            format="WAV",
+        )
+        self._dtype = dtype
+
+    # ------------------------------------------------------------------ #
+    #                  Observer interface implementation                  #
+    # ------------------------------------------------------------------ #
+    def on_next(self, chunk: bytes):
+        """Write the next audio chunk."""
+        self._sf.buffer_write(chunk, dtype=self._dtype)
+
+    def on_completed(self):
+        """Flush buffers and close the WAV file gracefully."""
+        if getattr(self, "_sf", None):
+            self._sf.flush()
+            self._sf.close()
+
+    def on_error(self, error: Exception):
+        """Close the file on error and propagate."""
+        if getattr(self, "_sf", None):
+            self._sf.close()
+        raise error
+
+
+def save_wavfile(
+    path: str,
+    format: PCMFormat = "Float32",
+    sample_rate: int = 48_000,
+    channels: int = 1,
+):
+    """
+    Factory helper that returns a :class:`SaveWavFile` observer.
+
+    Mirrors the naming of `create_wavfile` (observable) with a
+    complementary *save* side (observer).
+    """
+    return SaveWavFile(
+        path,
+        format=format,
+        sample_rate=sample_rate,
+        channels=channels,
+    )

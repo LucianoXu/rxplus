@@ -1,24 +1,20 @@
+from typing import Literal, get_args
 import asyncio
 import reactivex as rx
 from reactivex.scheduler.eventloop import AsyncIOScheduler
 from reactivex import operators as ops
 
 import argparse
-
-import asyncio
-
 import pyaudio
 
-import threading
-import time
-
+import rxplus
 from rxplus import RxMicrophone, NamedLogComp, log_filter, drop_log, RxWSServer
 from reactivex.scheduler import ThreadPoolScheduler
 
 
 def build_parser(subparsers: argparse._SubParsersAction):
     parser = subparsers.add_parser("mic_server", help="start the microphone node.")
-    parser.add_argument("--format", help="the format of sound", type=str, default="16") # TODO: turn the type into Literal["32", "16"]
+    parser.add_argument("--format", help="the format of sound", type=str, choices=get_args(rxplus.PCMFormat), default="Float32") # TODO: turn the type into Literal["32", "16"]
     parser.add_argument("--sr", type=int, help="target sampling rate", default=48000)
     parser.add_argument("--ch", type=int, help="target channel number", default=1)
     parser.add_argument("--host", type=str, default="::")
@@ -38,16 +34,8 @@ def task(parsed_args: argparse.Namespace):
             datatype='byte'
         )
 
-
-        if parsed_args.format == "16":
-            format = pyaudio.paInt16
-        elif parsed_args.format == "32":
-            format = pyaudio.paFloat32
-        else:
-            raise ValueError(f"Unexpected format argument: {parsed_args.format}")
-        
         mic = RxMicrophone(
-            format = format,
+            format = parsed_args.format,
             sample_rate = parsed_args.sr,
             channels = parsed_args.ch,
         )

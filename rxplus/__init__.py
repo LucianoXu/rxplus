@@ -10,4 +10,4 @@ from .duplex import Duplex, make_duplex, connect_adapter
 
 from .cli import from_cli
 
-from .audio import create_wavfile, RxMicrophone, RxSpeaker
+from .audio import PCMFormat, create_wavfile, RxMicrophone, RxSpeaker, save_wavfile
