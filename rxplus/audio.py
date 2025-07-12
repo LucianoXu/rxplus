@@ -9,6 +9,7 @@ import time
 import numpy as np
 
 from abc import ABC, abstractmethod
+import math
 
 import reactivex as rx
 from reactivex import Observable, Observer, Subject, create, operators as ops
@@ -56,6 +57,21 @@ def get_sf_format(format: PCMFormat) -> tuple[str, str]:
         raise ValueError(f"Unexpected PCMFormat: {format}")
 
 
+def resample_audio(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
+    """Resample audio to a new sample rate using ``scipy.signal.resample_poly``."""
+    if orig_sr == target_sr:
+        return audio
+
+    up = target_sr
+    down = orig_sr
+    factor = math.gcd(up, down)
+    up //= factor
+    down //= factor
+
+    resampled = scipy.signal.resample_poly(audio, up, down, axis=0)
+    return resampled.astype(audio.dtype, copy=False)
+
+
 
 def _load_wav_resample(
     path: str,
@@ -72,9 +88,7 @@ def _load_wav_resample(
     audio = audio.astype(np.float32)
 
     # transform to target sample rate
-    if orig_sr != target_sr:
-        n_target = int(round(len(audio) * target_sr / orig_sr)) # TODO: this resampling is very primitive. There should be the algorithm that support arbitrary rate.
-        audio = scipy.signal.resample(audio, n_target, axis=0)
+    audio = resample_audio(audio, orig_sr, target_sr)
 
     # transform to target channel
     # TODO: there should be a protocol to transform the wav array between different channel numbers.
