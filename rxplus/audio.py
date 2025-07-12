@@ -14,6 +14,7 @@ import reactivex as rx
 from reactivex import Observable, Observer, Subject, create, operators as ops
 from reactivex.disposable import Disposable, CompositeDisposable
 from reactivex.scheduler import ThreadPoolScheduler
+from reactivex.scheduler.eventloop import AsyncIOScheduler
 
 from .logging import *
 from .utils import TaggedData, get_short_error_info, get_full_error_info
@@ -138,8 +139,16 @@ def create_wavfile(
         scheduler_: Optional[rx.abc.SchedulerBase] = None
     ) -> rx.abc.DisposableBase:
         
-        # TODO: check whether it is the best choice to use ThreadPoolScheduler as default here
-        _scheduler = scheduler or scheduler_ or ThreadPoolScheduler(1)
+        try:
+            loop = asyncio.get_running_loop()
+            running = loop.is_running()
+        except RuntimeError:
+            loop = None
+            running = False
+
+        _scheduler = scheduler or scheduler_ or (
+            AsyncIOScheduler(loop) if running else ThreadPoolScheduler(1)
+        )
 
         audio = _load_wav_resample(
             wav_path,
