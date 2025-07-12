@@ -253,6 +253,7 @@ class RxMicrophone(Subject):
     #                           PyAudio callback                            #
     # --------------------------------------------------------------------- #
     def _pyaudio_callback(self, in_data, frame_count, time_info, status):
+        """Forward audio frames from PyAudio to observers."""
         try:
             super().on_next(in_data)
         except Exception as exc:
@@ -264,6 +265,7 @@ class RxMicrophone(Subject):
     #                       Async / thread-based watcher                    #
     # --------------------------------------------------------------------- #
     async def _watch_stream(self):
+        """Watch the PyAudio stream from the asyncio event loop."""
         try:
             assert self._stream is not None, "Stream is not initialized."
             while self._stream.is_active():
@@ -272,6 +274,7 @@ class RxMicrophone(Subject):
             self._shutdown()
 
     def _watch_stream_sync(self):
+        """Synchronous watcher used when no running loop is available."""
         try:
             assert self._stream is not None, "Stream is not initialized."
             while self._stream.is_active():
@@ -283,6 +286,7 @@ class RxMicrophone(Subject):
     #                          Cleanup / teardown                           #
     # --------------------------------------------------------------------- #
     def _shutdown(self):
+        """Stop the PyAudio stream and notify observers of completion."""
         assert self._stream is not None, "Stream is not initialized."
         assert self._pa is not None, "PyAudio is not initialized."
         if getattr(self, "_stream", None):
@@ -299,8 +303,7 @@ class RxMicrophone(Subject):
 
 
 class RxSpeaker(Subject):
-    '''
-    '''
+    """Play incoming audio chunks through the system sound device."""
     def __init__(self, 
         format: PCMFormat = "Float32",
         sample_rate: int = 48_000,
