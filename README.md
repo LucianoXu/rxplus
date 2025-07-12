@@ -14,6 +14,12 @@ To install directly from the source, enter the project root and execute:
 python -m build && pip install .
 ```
 
+The `pyaudio` module installation requires some configuration. For example, on `Ubuntu` it requires `portaudio` installed in advance. The corresponding shell command is:
+```
+sudo apt update
+sudo apt install portaudio19-dev -y
+```
+
 ## Components
 
 ### Duplex

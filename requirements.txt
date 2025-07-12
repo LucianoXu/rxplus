@@ -1,5 +1,6 @@
 reactivex
 websockets
 soundfile
-pyaudio
 scipy
+prompt_toolkit
+pyaudio
