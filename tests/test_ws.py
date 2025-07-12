@@ -26,3 +26,5 @@ def test_wsstr_and_wsbytes():
         b.package_type_check("x")
     with pytest.raises(TypeError):
         b.unpackage("x")
+
+# TODO: more sophisticated tests for WSServer and WSClient are needed here.
