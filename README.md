@@ -42,6 +42,13 @@ The `utils` module provides various utility functions, including `TaggedData` fo
 
 The `ws` module offers a reactive wrapper around the `websockets` library, providing `RxWSServer` and `RxWSClient` classes for building real-time, bidirectional WebSocket applications.
 
+### Audio
+
+The `audio` module contains helpers for working with sound. `RxMicrophone` and
+`RxSpeaker` stream audio from the microphone or to the speaker. The
+`create_wavfile` observable loads a WAV file chunk by chunk, while the
+`save_wavfile` observer makes it easy to record audio streams.
+
 ### CLI
 
 The `cli` module provides the `from_cli` operator, which creates an observable that emits strings from the command-line interface. This is useful for creating interactive command-line applications.
@@ -110,3 +117,10 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nKeyboard Interrupt.")
 ```
+
+### Development
+
+Run the test suite with `pytest` after installing the optional `dev` dependencies.
+
+### TODO
+Check the code and make sure that error will not be raised in rx nodes, but pushed forward.

@@ -110,13 +110,13 @@ class RxWSServer(Subject):
     The server will be closed upon receiving on_completed signal.
     '''
     def __init__(self,
-                 conn_cfg: dict, 
+                 conn_cfg: dict,
                  logcomp: Optional[LogComp] = None,
                  recv_timeout: float = 0.001,
                  datatype: Callable[[str], Literal['string', 'byte']] | Literal['string', 'byte'] = 'string',
                  ping_interval: Optional[int] = 20,
                  ping_timeout: Optional[int] = 20):
-        
+        """Initialize the WebSocket server and start listening."""
         super().__init__()
         self.host = conn_cfg['host']
         self.port = int(conn_cfg['port'])
@@ -165,7 +165,7 @@ class RxWSServer(Subject):
 
 
     def on_next(self, value):
-
+        """Route outbound messages to the proper channel queues."""
         # determine channel and data
         if isinstance(value, TaggedData):
             # get the channels for the given path
@@ -183,13 +183,16 @@ class RxWSServer(Subject):
             queue.put_nowait(data)
         
     def on_error(self, error):
+        """Forward errors to subscribers and log them."""
         self.logcomp.log(f"Error: {error}.", "ERROR")
         super().on_error(error)
 
     def on_completed(self) -> None:
+        """Complete the server after closing all connections."""
         asyncio.create_task(self.async_completing())
 
     async def async_completing(self):
+        """Async helper to close connections and finish the server."""
 
         try:
             # close all connections
@@ -211,7 +214,7 @@ class RxWSServer(Subject):
 
 
     async def handle_client(self, websocket: websockets.WebSocketServerProtocol):
-        
+        """Serve a connected WebSocket client until the link closes."""
 
         remote_desc = f"[{websocket.remote_address} on path {websocket.path}]"
 
@@ -297,7 +300,7 @@ class RxWSServer(Subject):
             ws_channels.queues.discard(queue)
 
     async def start_server(self):
-        # Start WebSocket server
+        """Spin up the asyncio WebSocket server."""
         try:
             self.serve = await websockets.serve(
                 self.handle_client, 
@@ -327,7 +330,7 @@ class RxWSClient(Subject):
         conn_retry_timeout: float = 0.5,
         ping_interval: Optional[int] = 20,
         ping_timeout: Optional[int] = 20):
-
+        """Create a reconnecting WebSocket client."""
         super().__init__()
 
         self.host = conn_cfg['host']
@@ -361,18 +364,22 @@ class RxWSClient(Subject):
         self._connected = False
 
     def on_next(self, value):
+        """Send a message to the server when connected."""
         if self._connected:
             self.queue.put_nowait(value)
 
     def on_error(self, error):
+        """Report connection errors."""
         self.logcomp.log(f"Error: {error}.", "ERROR")
         super().on_error(error)
 
     def on_completed(self) -> None:
+        """Close the connection before completing."""
         asyncio.create_task(self.async_completing())
 
 
     async def async_completing(self):
+        """Async helper to close the WebSocket client."""
         try:
             # close all connections
             self.logcomp.log(f"Closing...", "INFO")
@@ -390,6 +397,7 @@ class RxWSClient(Subject):
 
 
     async def connect_client(self):
+        """Connect to the remote server and forward messages."""
         # calculate the url
         url = f"ws://{self.host}:{self.port}{self.path}"
         remote_desc = f"[{url}]"
