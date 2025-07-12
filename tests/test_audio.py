@@ -1,12 +1,19 @@
 import asyncio
-import threading
 import sys
+import threading
 import types
 
 import numpy as np
+import pyaudio
+import pytest
 import soundfile as sf
 
-from rxplus.audio import create_wavfile
+from rxplus.audio import (
+    create_wavfile,
+    get_pyaudio_format,
+    get_sf_format,
+    resample_audio,
+)
 
 
 def _make_wav(path):
@@ -24,6 +31,7 @@ def test_create_wavfile_outside_loop(tmp_path):
 
     # give scheduler time to emit
     import time
+
     time.sleep(0.1)
 
     assert thread_ids, "no data emitted"
@@ -46,3 +54,18 @@ def test_create_wavfile_inside_loop(tmp_path):
 
     assert thread_ids, "no data emitted"
     assert all(tid == threading.get_ident() for tid in thread_ids)
+
+
+def test_resample_audio_changes_rate():
+    audio = np.arange(8, dtype=np.float32).reshape(-1, 1)
+    res = resample_audio(audio, 8, 4)
+    assert res.shape[0] == 4
+
+
+def test_get_pyaudio_format_and_sf_format():
+    assert get_pyaudio_format("Float32") == pyaudio.paFloat32
+    assert get_sf_format("Int16") == ("int16", "PCM_16")
+    with pytest.raises(ValueError):
+        get_pyaudio_format("bad")
+    with pytest.raises(ValueError):
+        get_sf_format("bad")
