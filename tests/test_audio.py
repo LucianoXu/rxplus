@@ -6,18 +6,6 @@ import types
 import numpy as np
 import soundfile as sf
 
-sys.modules.setdefault(
-    "pyaudio",
-    types.SimpleNamespace(
-        PyAudio=lambda *a, **k: None,
-        paFloat32=0,
-        paInt32=0,
-        paInt24=0,
-        paInt16=0,
-        paUInt8=0,
-    ),
-)
-
 from rxplus.audio import create_wavfile
 
 
