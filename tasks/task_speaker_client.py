@@ -13,7 +13,7 @@ from reactivex.scheduler import ThreadPoolScheduler
 
 def build_parser(subparsers: argparse._SubParsersAction):
     parser = subparsers.add_parser("speaker_client", help="start the speaker client.")
-    parser.add_argument("--format", help="the format of sound", type=str, choices=get_args(rxplus.PCMFormat), default="Float32") # TODO: turn the type into Literal["Int16", "Int32", "Float32"]
+    parser.add_argument("--format", help="the format of sound", type=str, choices=get_args(rxplus.PCMFormat), default="Float32")
     parser.add_argument("--sr", type=int, help="target sampling rate", default=48000)
     parser.add_argument("--ch", type=int, help="target channel number", default=1)
     parser.add_argument("--host", type=str, default="localhost")

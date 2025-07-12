@@ -56,12 +56,16 @@ def get_sf_format(format: PCMFormat) -> tuple[str, str]:
 
 
 
-def _load_wav_resample(path: str,
-                      target_sr: int,
-                      target_ch: int) -> np.ndarray:
+def _load_wav_resample(
+    path: str,
+    target_format: PCMFormat = "Float32",
+    target_sr: int = 48_000,
+    target_ch: int = 1,
+) -> np.ndarray:
     """
     load wave file, and resample to target_sr if necessary
     return audio. audio is float32 with shape [samples, channels]
+    The returned array is also converted to **target_format**.
     """
     audio, orig_sr = sf.read(path, always_2d=True)        # 保留多声道
     audio = audio.astype(np.float32)
@@ -79,19 +83,55 @@ def _load_wav_resample(path: str,
     elif current_ch < target_ch:
         audio = np.concatenate((audio[:, 0],)*target_ch, 1)
 
+    # ------------------------------------------------------------------ #
+    #                   Convert to the target PCM dtype                  #
+    # ------------------------------------------------------------------ #
+    if target_format != "Float32":
+        if target_format == "Int32":
+            audio = np.clip(
+                audio * np.iinfo(np.int32).max,
+                np.iinfo(np.int32).min,
+                np.iinfo(np.int32).max,
+            ).astype(np.int32)
+
+        elif target_format == "Int24":
+            max24 = 2 ** 23 - 1
+            audio = np.clip(audio * max24, -max24 - 1, max24).astype(np.int32)
+
+        elif target_format == "Int16":
+            audio = np.clip(
+                audio * np.iinfo(np.int16).max,
+                np.iinfo(np.int16).min,
+                np.iinfo(np.int16).max,
+            ).astype(np.int16)
+
+        elif target_format == "UInt8":
+            audio = np.clip((audio * 127.5) + 127.5, 0, 255).astype(np.uint8)
+
+        else:
+            raise ValueError(f"Unexpected PCMFormat: {target_format}")
+
     return audio
 
 def create_wavfile(
     wav_path: str,
     target_sample_rate: int = 48_000,
     target_channels: int = 1,
+    target_format: PCMFormat = "Float32",
     frames_per_chunk: int = 1_024,
     scheduler: Optional[rx.abc.SchedulerBase] = None,
 ):
     """
-    Create the observable that loads the local wav file and push the np array. 
-    The wav will be automatically transformed to the target sampling rate and channel.
-    The np array will always be 2D of shape [sample, channel], in float32 form.
+    Create an Observable that loads a local WAV file and emits it chunk‑by‑chunk.
+
+    The loader automatically:
+      1. Resamples to *target_sample_rate* (Hz),
+      2. Converts to *target_channels* interleaved channels, **and**
+      3. Casts the samples to the requested *target_format* (UInt8 / Int16 /
+         Int24 / Int32 / Float32).
+
+    The emitted NumPy array is always 2‑D with shape ``[samples, channels]`` and
+    uses the dtype implied by *target_format*.
     """
     def subscribe(
         observer: rx.abc.ObserverBase, 
@@ -101,7 +141,12 @@ def create_wavfile(
         # TODO: check whether it is the best choice to use ThreadPoolScheduler as default here
         _scheduler = scheduler or scheduler_ or ThreadPoolScheduler(1)
 
-        audio = _load_wav_resample(wav_path, target_sample_rate, target_ch=target_channels)
+        audio = _load_wav_resample(
+            wav_path,
+            target_format=target_format,
+            target_sr=target_sample_rate,
+            target_ch=target_channels,
+        )
 
         disposed = False
 
@@ -278,7 +323,7 @@ class RxSpeaker(Subject):
 # --------------------------------------------------------------------------
 #                       WAV file saving observer
 # --------------------------------------------------------------------------
-class SaveWavFile:
+class SaveWavFile(rx.abc.ObserverBase):
     """
     Observer that saves incoming audio byte chunks to a WAV file **using
     the `soundfile` library**.

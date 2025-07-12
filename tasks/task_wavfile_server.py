@@ -11,7 +11,7 @@ import asyncio
 
 import threading
 import time
-
+import rxplus
 from rxplus import create_wavfile, NamedLogComp, drop_log, RxWSServer
 from reactivex.scheduler import ThreadPoolScheduler
 
@@ -19,6 +19,7 @@ from reactivex.scheduler import ThreadPoolScheduler
 def build_parser(subparsers: argparse._SubParsersAction):
     parser = subparsers.add_parser("wavfile_server", help="start the wavfile server.")
     parser.add_argument("--path", type=str, default="")
+    parser.add_argument("--format", help="the format of sound", type=str, choices=get_args(rxplus.PCMFormat), default="Float32")
     parser.add_argument("--sr", type=int, help="target sampling rate", default=48000)
     parser.add_argument("--ch", type=int, help="target channel number", default=1)
     parser.add_argument("--host", type=str, default="::")
@@ -45,6 +46,7 @@ def task(parsed_args: argparse.Namespace):
 
         wavfile = create_wavfile(
             wav_path=parsed_args.path,
+            target_format=parsed_args.format,
             target_sample_rate=parsed_args.sr,
             target_channels=parsed_args.ch
         ).pipe(
