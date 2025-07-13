@@ -1,27 +1,28 @@
+"""Audio helpers built on top of ReactiveX."""
 
-from typing import Any, Callable, Literal, Optional
-import scipy
-import soundfile as sf
-import pyaudio
 import asyncio
+import math
 import threading
 import time
-import numpy as np
-
 from abc import ABC, abstractmethod
-import math
+from typing import Any, Callable, Literal, Optional
 
+import numpy as np
+import pyaudio
 import reactivex as rx
-from reactivex import Observable, Observer, Subject, create, operators as ops
-from reactivex.disposable import Disposable, CompositeDisposable
+import scipy
+import soundfile as sf
+from reactivex import Observable, Observer, Subject, create
+from reactivex import operators as ops
+from reactivex.disposable import CompositeDisposable, Disposable
 from reactivex.scheduler import ThreadPoolScheduler
 from reactivex.scheduler.eventloop import AsyncIOScheduler
 
 from .mechanism import RxException
-from .logging import *
-from .utils import TaggedData, get_short_error_info, get_full_error_info
+from .utils import TaggedData, get_full_error_info, get_short_error_info
 
 PCMFormat = Literal["UInt8", "Int16", "Int24", "Int32", "Float32"]
+
 
 def get_pyaudio_format(format: PCMFormat) -> int:
     """
@@ -39,11 +40,10 @@ def get_pyaudio_format(format: PCMFormat) -> int:
         return pyaudio.paFloat32
     else:
         raise ValueError(f"Unexpected PCMFormat: {format}")
-    
+
+
 def get_sf_format(format: PCMFormat) -> tuple[str, str]:
-    '''
-    Mapping from PyAudio format constants to (numpy dtype, libsndfile subtype)
-    '''
+    """Return ``(numpy dtype, libsndfile subtype)`` for the given format."""
     if format == "UInt8":
         return ("uint8", "PCM_U8")
     elif format == "Int16":
@@ -73,7 +73,6 @@ def resample_audio(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarra
     return resampled.astype(audio.dtype, copy=False)
 
 
-
 def _load_wav_resample(
     path: str,
     target_format: PCMFormat = "Float32",
@@ -97,7 +96,7 @@ def _load_wav_resample(
     if current_ch > target_ch:
         audio = audio[:, :target_ch]
     elif current_ch < target_ch:
-        audio = np.concatenate((audio[:, 0],)*target_ch, 1)
+        audio = np.concatenate((audio[:, 0],) * target_ch, 1)
 
     # ------------------------------------------------------------------ #
     #                   Convert to the target PCM dtype                  #
@@ -111,7 +110,7 @@ def _load_wav_resample(
             ).astype(np.int32)
 
         elif target_format == "Int24":
-            max24 = 2 ** 23 - 1
+            max24 = 2**23 - 1
             audio = np.clip(audio * max24, -max24 - 1, max24).astype(np.int32)
 
         elif target_format == "Int16":
@@ -128,6 +127,7 @@ def _load_wav_resample(
             raise ValueError(f"Unexpected PCMFormat: {target_format}")
 
     return audio
+
 
 def create_wavfile(
     wav_path: str,
@@ -149,11 +149,11 @@ def create_wavfile(
     The emitted NumPy array is always 2‑D with shape ``[samples, channels]`` and
     uses the dtype implied by *target_format*.
     """
+
     def subscribe(
-        observer: rx.abc.ObserverBase, 
-        scheduler_: Optional[rx.abc.SchedulerBase] = None
+        observer: rx.abc.ObserverBase, scheduler_: Optional[rx.abc.SchedulerBase] = None
     ) -> rx.abc.DisposableBase:
-        
+
         try:
             loop = asyncio.get_running_loop()
             running = loop.is_running()
@@ -161,9 +161,14 @@ def create_wavfile(
             loop = None
             running = False
 
-        _scheduler = scheduler or scheduler_ or (
-            AsyncIOScheduler(loop) if running # type: ignore[assignment]
-            else ThreadPoolScheduler(1)
+        _scheduler = (
+            scheduler
+            or scheduler_
+            or (
+                AsyncIOScheduler(loop)
+                if running  # type: ignore[assignment]
+                else ThreadPoolScheduler(1)
+            )
         )
 
         audio = _load_wav_resample(
@@ -182,14 +187,18 @@ def create_wavfile(
                 count = 0
                 while not disposed and count * frames_per_chunk <= len(audio):
                     # slice the wav and push
-                    observer.on_next(audio[count * frames_per_chunk: (count+1) * frames_per_chunk])
+                    observer.on_next(
+                        audio[count * frames_per_chunk : (count + 1) * frames_per_chunk]
+                    )
 
                     count += 1
 
                 observer.on_completed()
-            
+
             except Exception as error:
-                rx_exception = RxException(error, note=f"Error while loading WAV file {wav_path}")
+                rx_exception = RxException(
+                    error, note=f"Error while loading WAV file {wav_path}"
+                )
                 observer.on_error(rx_exception)
 
         def dispose() -> None:
@@ -205,7 +214,7 @@ def create_wavfile(
 class RxMicrophone(Subject):
     """
     A reactivex Subject that emits audio data from the microphone.
-    
+
     This class is a Subject that emits audio data from the microphone. It can be used to create a stream of audio data.
     """
 
@@ -241,7 +250,11 @@ class RxMicrophone(Subject):
         self._loop = (
             loop
             if loop is not None
-            else (asyncio.get_event_loop() if asyncio.get_event_loop().is_running() else None)
+            else (
+                asyncio.get_event_loop()
+                if asyncio.get_event_loop().is_running()
+                else None
+            )
         )
 
         if self._loop and self._loop.is_running():
@@ -264,7 +277,7 @@ class RxMicrophone(Subject):
             rx_exception = RxException(exc, note="Error in PyAudio callback")
             super().on_error(rx_exception)
             return (None, pyaudio.paAbort)
-        
+
         return (None, pyaudio.paContinue)
 
     # --------------------------------------------------------------------- #
@@ -310,11 +323,13 @@ class RxMicrophone(Subject):
 
 class RxSpeaker(Subject):
     """Play incoming audio chunks through the system sound device."""
-    def __init__(self, 
+
+    def __init__(
+        self,
         format: PCMFormat = "Float32",
         sample_rate: int = 48_000,
         channels: int = 1,
-        ):
+    ):
 
         super().__init__()
 
@@ -329,7 +344,7 @@ class RxSpeaker(Subject):
             format=get_pyaudio_format(self.format),
             channels=self.channels,
             rate=self.sample_rate,
-            output=True
+            output=True,
         )
         self._stream.start_stream()
 
@@ -337,14 +352,14 @@ class RxSpeaker(Subject):
         """
         Send audio chunk to sound card using PyAudio.
         Requires: pip install pyaudio
-        
+
         Parameters:
             chunk: Audio data, shape [samples, channels]
         """
-        
+
         # Play the chunk
         self._stream.write(chunk)
-        
+
         # Print status like the demo function
         # print(f"Playing {len(chunk)} samples @ {self.sample_rate} Hz through sound card")
 

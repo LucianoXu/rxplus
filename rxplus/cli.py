@@ -1,14 +1,19 @@
+"""Command-line interface utilities."""
+
 import asyncio
 from typing import Literal
-from reactivex import Observable
+
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
+from reactivex import Observable
 
 
 def from_cli(
     loop: asyncio.AbstractEventLoop | None = None,
     *,
-    mode: Literal["queue", "update", "loop"] = "loop",          # True = queue every question; False = only keep the latest
+    mode: Literal[
+        "queue", "update", "loop"
+    ] = "loop",  # True = queue every question; False = only keep the latest
 ):
     """
     Turn each element from the source Observable into an interactive prompt,
@@ -25,20 +30,22 @@ def from_cli(
                      If the user is typing, the prompt text is simply replaced.
         * "loop"   – Continuously loop through prompts with the latest value.
     """
-    
+
     if mode not in ["queue", "update", "loop"]:
-        raise ValueError(f"Invalid mode: {mode}. Choose from 'queue', 'update', or 'loop'.")
-    
+        raise ValueError(
+            f"Invalid mode: {mode}. Choose from 'queue', 'update', or 'loop'."
+        )
+
     def _from_cli(source: Observable) -> Observable:
-        
+
         def subscribe(observer, scheduler=None):
             # Runtime state ---------------------------------------------------
-            session           = PromptSession()
-            _loop             = loop or asyncio.get_running_loop()
-            waiting_prompts   = asyncio.Queue()           # All pending questions
-            current_prompt    = {"text": ""}               # Mutable reference for live updates
-            awaiting_input    = {"flag": False}            # True while prompt_async is waiting
-            done              = asyncio.Event()            # Signals graceful shutdown
+            session = PromptSession()
+            _loop = loop or asyncio.get_running_loop()
+            waiting_prompts = asyncio.Queue()  # All pending questions
+            current_prompt = {"text": ""}  # Mutable reference for live updates
+            awaiting_input = {"flag": False}  # True while prompt_async is waiting
+            done = asyncio.Event()  # Signals graceful shutdown
 
             # Background coroutine: serially handles queued questions ----------
             async def prompt_loop():
