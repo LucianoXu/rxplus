@@ -1,9 +1,11 @@
-from typing import Optional
+from typing import Callable, Optional
 import reactivex as rx
 from reactivex.disposable import CompositeDisposable
 from reactivex.subject import Subject
 from reactivex import Observable, Observer
 from dataclasses import dataclass
+
+
 
 @dataclass(frozen=True)
 class Duplex:
@@ -28,9 +30,13 @@ def get_sink_stream(adapter: Duplex|Subject):
 def connect_adapter(
     adapterA: Duplex|Subject,
     adapterB: Duplex|Subject,
+    A_to_B_pipeline: Optional[tuple[Callable[[Observable], Observable], ...]] = None,
+    B_to_A_pipeline: Optional[tuple[Callable[[Observable], Observable], ...]] = None,
     ) -> CompositeDisposable:
     """
     Connect two duplex adapters or subjects together.
+    The data from adapterA will be sent to adapterB, and vice versa.
+    If `A_to_B_pipeline` is provided, it will be applied to the stream of adapterA before sending to adapterB. Same for `B_to_A_pipeline`.
 
     Return a `CompositeDisposable` that can be used to manage the subscriptions. 
     To disconnect the adapters, call `dispose()` on the returned `CompositeDisposable`.
@@ -38,6 +44,12 @@ def connect_adapter(
 
     sinkA, streamA = get_sink_stream(adapterA)
     sinkB, streamB = get_sink_stream(adapterB)
+
+    if A_to_B_pipeline is not None:
+        streamA = streamA.pipe(*A_to_B_pipeline)
+
+    if B_to_A_pipeline is not None:
+        streamB = streamB.pipe(*B_to_A_pipeline)
 
     # Create a composite disposable to manage the subscriptions
     cd = CompositeDisposable()
