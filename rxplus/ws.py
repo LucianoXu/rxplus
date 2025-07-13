@@ -15,6 +15,7 @@ from abc import ABC, abstractmethod
 import reactivex as rx
 from reactivex import Observable, Observer, Subject, create, operators as ops
 
+from .mechanism import RxException
 from .logging import *
 from .utils import TaggedData, get_short_error_info, get_full_error_info
 
@@ -183,8 +184,7 @@ class RxWSServer(Subject):
             queue.put_nowait(data)
         
     def on_error(self, error):
-        """Forward errors to subscribers and log them."""
-        self.logcomp.log(f"Error: {error}.", "ERROR")
+        """Forward errors to subscribers."""
         super().on_error(error)
 
     def on_completed(self) -> None:
@@ -286,8 +286,8 @@ class RxWSServer(Subject):
                 
 
         except Exception as e:
-            self.logcomp.log(f"Error while handling client {remote_desc}:\n{get_full_error_info(e)}", "ERROR")
-            super().on_error(e)
+            rx_exception = self.logcomp.get_rx_exception(e, note=f"Error while handling client {remote_desc}")
+            super().on_error(rx_exception)
 
 
         finally:
@@ -370,8 +370,8 @@ class RxWSClient(Subject):
 
     def on_error(self, error):
         """Report connection errors."""
-        self.logcomp.log(f"Error: {error}.", "ERROR")
-        super().on_error(error)
+        rx_exception = self.logcomp.get_rx_exception(error, note="Error")
+        super().on_error(rx_exception)
 
     def on_completed(self) -> None:
         """Close the connection before completing."""

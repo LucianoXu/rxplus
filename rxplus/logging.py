@@ -7,6 +7,7 @@ import os
 import reactivex as rx
 from reactivex import Observable, Observer, Subject, create, operators as ops
 
+from .mechanism import RxException
 from .utils import get_full_error_info
 
 
@@ -20,7 +21,7 @@ class LogItem:
     '''
     Use this term to represent the emitted log information.
     '''
-    def __init__(self, msg: Any, level: LOG_LEVEL = "INFO", source: str = 'UNKNOWN'):
+    def __init__(self, msg: Any, level: LOG_LEVEL = "INFO", source: str = 'Unknown'):
         self.level = level
         self.timestamp_str = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         self.source = source
@@ -82,12 +83,21 @@ class LogComp(ABC):
     def log(self, msg: Any, level: LOG_LEVEL = "INFO"):
         ...
 
+    @abstractmethod
+    def get_rx_exception(self, error: Exception, note: str="") -> RxException:
+        ...
+        
+
 class EmptyLogComp(LogComp):
     def set_super(self, obs: Observer):
         pass
 
     def log(self, msg: Any, level: LOG_LEVEL = "INFO"):
         pass
+
+    def get_rx_exception(self, error: Exception, note: str="") -> RxException:
+        return RxException(error, note=note)
+
 
 class NamedLogComp(LogComp):
     def __init__(self, name: str = "LogSource"):
@@ -108,11 +118,19 @@ class NamedLogComp(LogComp):
         if self.super_obs is None:
             raise Exception("Super observer is not set. Please call set_super() first.")
         self.super_obs.on_next(log_item)
-        
+
+    def get_rx_exception(self, error: Exception, note: str="") -> RxException:
+        '''
+        Get a RxException with the specified source and note.
+        '''
+        return RxException(error, source=self.name, note=note)
+
 
 class Logger(Subject):
     '''
     Logger is a subject, filter and redirect logging items forward. The typical usage is to be subscribed by `print` method.
+
+    The logger is not an observer, because it cannot be the terminal of handling errors. It will record the errors and forward them to the subscribers.
 
     The log file will be created when the first log item is received.
     '''
@@ -147,8 +165,8 @@ class Logger(Subject):
                 super().on_next(value)
 
             except Exception as e:
-                self.logcomp.log(f"Error in Logger:\n{get_full_error_info(e)}", "ERROR")
-                super().on_error(e)
+                rx_exception = RxException(e, note="Error in Logger")
+                super().on_error(rx_exception)
 
     def on_completed(self) -> None:
         '''
@@ -157,5 +175,11 @@ class Logger(Subject):
         pass
 
     def on_error(self, error: Exception) -> None:
-        self.logcomp.log(f"Error Observed:\n{get_full_error_info(error)}", "ERROR")
+        if isinstance(error, RxException):
+            logitem = LogItem(str(error), "ERROR", source=error.source)
+        else:
+            logitem = LogItem(str(error), "ERROR")
+
+        # log the error
+        self.on_next(logitem)
         super().on_error(error)

@@ -20,6 +20,10 @@ sudo apt update
 sudo apt install portaudio19-dev -y
 ```
 
+## Principles
+About exception handling: normal exceptions will be catched and passed on through `on_error`. The node that generates the error is responsible for  annotating the environment of the error, including the creator information.
+Error observed by `on_error` should be handled or passed on directly.
+
 ## Components
 
 ### Duplex

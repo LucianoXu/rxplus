@@ -25,9 +25,11 @@ def from_cli(
                      If the user is typing, the prompt text is simply replaced.
         * "loop"   – Continuously loop through prompts with the latest value.
     """
+    
+    if mode not in ["queue", "update", "loop"]:
+        raise ValueError(f"Invalid mode: {mode}. Choose from 'queue', 'update', or 'loop'.")
+    
     def _from_cli(source: Observable) -> Observable:
-        if mode not in ["queue", "update", "loop"]:
-            raise ValueError(f"Invalid mode: {mode}. Choose from 'queue', 'update', or 'loop'.")
         
         def subscribe(observer, scheduler=None):
             # Runtime state ---------------------------------------------------

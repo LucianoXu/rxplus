@@ -17,6 +17,7 @@ from reactivex.disposable import Disposable, CompositeDisposable
 from reactivex.scheduler import ThreadPoolScheduler
 from reactivex.scheduler.eventloop import AsyncIOScheduler
 
+from .mechanism import RxException
 from .logging import *
 from .utils import TaggedData, get_short_error_info, get_full_error_info
 
@@ -161,7 +162,8 @@ def create_wavfile(
             running = False
 
         _scheduler = scheduler or scheduler_ or (
-            AsyncIOScheduler(loop) if running else ThreadPoolScheduler(1)
+            AsyncIOScheduler(loop) if running # type: ignore[assignment]
+            else ThreadPoolScheduler(1)
         )
 
         audio = _load_wav_resample(
@@ -187,7 +189,8 @@ def create_wavfile(
                 observer.on_completed()
             
             except Exception as error:
-                observer.on_error(error)
+                rx_exception = RxException(error, note=f"Error while loading WAV file {wav_path}")
+                observer.on_error(rx_exception)
 
         def dispose() -> None:
             nonlocal disposed
@@ -256,9 +259,12 @@ class RxMicrophone(Subject):
         """Forward audio frames from PyAudio to observers."""
         try:
             super().on_next(in_data)
+
         except Exception as exc:
-            super().on_error(exc)
+            rx_exception = RxException(exc, note="Error in PyAudio callback")
+            super().on_error(rx_exception)
             return (None, pyaudio.paAbort)
+        
         return (None, pyaudio.paContinue)
 
     # --------------------------------------------------------------------- #
@@ -409,6 +415,8 @@ class SaveWavFile(rx.abc.ObserverBase):
         """Close the file on error and propagate."""
         if getattr(self, "_sf", None):
             self._sf.close()
+
+        # raise the error because it is an observer
         raise error
 
 

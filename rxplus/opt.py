@@ -5,7 +5,7 @@ import os
 
 import reactivex as rx
 from reactivex import Observable, Observer, Subject, create, operators as ops
-
+from .mechanism import RxException
 
 def stream_print_out(prompt: str = "Stream-Print-Out"):
     '''
@@ -19,7 +19,7 @@ def stream_print_out(prompt: str = "Stream-Print-Out"):
                 observer.on_next(value)
 
             def on_error(error):
-                print(f"{prompt}: {type(error)} Error: {error}")
+                print(f"Error observed: {error}")
                 observer.on_error(error)
 
             def on_completed():
