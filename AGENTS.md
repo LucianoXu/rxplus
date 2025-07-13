@@ -13,3 +13,6 @@ You can help maintain the repository in the following way:
 
 ### check and fix linter
 For interpreter languages like Python, you should run the linter on the code and investigate the errors. Then you should suggest ways to fix the linter errors while preserving the function of the code.
+
+### check TODO
+You should scan the repository and search for the `TODO` comment, understand the target, and provide code fix or suggestions.
