@@ -1,6 +1,6 @@
 from .mechanism import RxException
 
-from .utils import TaggedData, untag, tag
+from .utils import TaggedData, untag, tag, tag_filter
 
 from .logging import LogItem, LOG_LEVEL, keep_log, log_filter, drop_log, log_redirect_to, LogComp, EmptyLogComp, NamedLogComp, Logger
 

@@ -681,6 +681,12 @@ class RxWSClientGroup(Subject):
     # ============ Observable interface ============ #
     def _subscribe_core(self, observer, scheduler=None):
         return self._bus.subscribe(observer, scheduler=scheduler)
+    
+    def open_path(self, path: str) -> None:
+        '''
+        Open a new path for the client group.
+        '''
+        self._ensure_client(path)
 
     # ============ internal helpers ============ #
     def _ensure_client(self, tag: str):

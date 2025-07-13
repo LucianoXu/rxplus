@@ -42,6 +42,18 @@ def tag(tag: str):
     """
     return ops.map(lambda x: TaggedData(tag, x))
 
+def tag_filter(tag: str):
+    """
+    An operator to filter the data by the specified tag.
+    
+    Args:
+        tag (str): The tag to filter by.
+    
+    Returns:
+        Callable[[TaggedData], bool]: A function that takes TaggedData and returns True if the tag matches.
+    """
+    return ops.filter(lambda x: isinstance(x, TaggedData) and x.tag == tag)
+
 def get_short_error_info(e: Exception) -> str:
     """
     Get a short error information from an exception.
