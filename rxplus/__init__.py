@@ -1,3 +1,5 @@
+from .mechanism import RxException
+
 from .utils import TaggedData
 
 from .logging import LogItem, LOG_LEVEL, log_filter, drop_log, log_redirect_to, LogComp, EmptyLogComp, NamedLogComp, Logger
