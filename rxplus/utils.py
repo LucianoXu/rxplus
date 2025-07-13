@@ -2,6 +2,7 @@
 import traceback
 
 from typing import Any
+from reactivex import operators as ops
 
 class TaggedData:
     """
@@ -20,6 +21,26 @@ class TaggedData:
     
     def __str__(self) -> str:
         return f"(tag={self.tag}, {str(self.data)})"
+    
+def untag():
+    """
+    An operator to untag the data.
+    Returns:
+        Callable[[TaggedData], Any]: A function that takes TaggedData and returns the data.
+    """
+    return ops.map(lambda x: x.data) # type: ignore
+
+def tag(tag: str):
+    """
+    An operator to tag the data with the specified tag.
+    
+    Args:
+        tag (str): The tag to be added to the data.
+    
+    Returns:
+        Callable[[Any], Any]: A function that takes data and returns TaggedData.
+    """
+    return ops.map(lambda x: TaggedData(tag, x))
 
 def get_short_error_info(e: Exception) -> str:
     """

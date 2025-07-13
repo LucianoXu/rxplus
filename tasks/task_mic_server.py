@@ -8,7 +8,7 @@ import argparse
 import pyaudio
 
 import rxplus
-from rxplus import RxMicrophone, NamedLogComp, log_filter, drop_log, RxWSServer
+from rxplus import TaggedData, RxMicrophone, NamedLogComp, log_filter, drop_log, RxWSServer, tag
 from reactivex.scheduler import ThreadPoolScheduler
 
 
@@ -31,7 +31,7 @@ def task(parsed_args: argparse.Namespace):
                 'port' : parsed_args.port,
             }, 
             logcomp=NamedLogComp("RxWSServer"),
-            datatype='byte'
+            datatype='bytes'
         )
 
         mic = RxMicrophone(
@@ -40,7 +40,9 @@ def task(parsed_args: argparse.Namespace):
             channels = parsed_args.ch,
         )
 
-        mic.subscribe(sender)
+        mic.pipe(
+            tag("/"),
+        ).subscribe(sender)
 
         sender.pipe(log_filter()).subscribe(print)
 

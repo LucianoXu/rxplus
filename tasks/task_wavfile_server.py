@@ -12,7 +12,7 @@ import asyncio
 import threading
 import time
 import rxplus
-from rxplus import create_wavfile, NamedLogComp, drop_log, RxWSServer
+from rxplus import create_wavfile, NamedLogComp, drop_log, RxWSServer, TaggedData, untag, tag
 from reactivex.scheduler import ThreadPoolScheduler
 
 
@@ -36,13 +36,16 @@ def task(parsed_args: argparse.Namespace):
                 'port' : parsed_args.port,
             }, 
             logcomp=NamedLogComp("RxWSServer"),
-            datatype='byte'
+            datatype='bytes'
         )
 
         # create the network with some cli output
         data = Subject()
         data.subscribe(lambda x: print(x[:5]))
-        data.subscribe(sender)
+
+        data.pipe(
+            tag("/"),
+        ).subscribe(sender)
 
         wavfile = create_wavfile(
             wav_path=parsed_args.path,
@@ -53,6 +56,8 @@ def task(parsed_args: argparse.Namespace):
             ops.map(lambda d: d.tobytes()),
             ops.repeat()
         )
+
+        sender.subscribe()
 
         # create the source
         wavfile.subscribe(data)

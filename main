@@ -19,17 +19,21 @@ if __name__ == '__main__':
     task_wsclient.build_parser(subparsers)
     # ./main wsclient
 
+    from tasks import task_wsclient_group
+    task_wsclient_group.build_parser(subparsers)
+    # ./main wsclient_group --path=/test
+
     from tasks import task_cli
     task_cli.build_parser(subparsers)
     # ./main cli --mode=loop
 
     from tasks import task_mic_server
     task_mic_server.build_parser(subparsers)
-    # ./main mic_server --format=Int32 --sr=48000 --ch=1
+    # ./main mic_server --format=Float32 --sr=48000 --ch=1
 
     from tasks import task_speaker_client
     task_speaker_client.build_parser(subparsers)
-    # ./main speaker_client --format=Int32 --sr=48000 --ch=1
+    # ./main speaker_client --format=Float32 --sr=48000 --ch=1
 
     from tasks import task_wavfile_server
     task_wavfile_server.build_parser(subparsers)

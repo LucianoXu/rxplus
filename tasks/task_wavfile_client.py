@@ -33,7 +33,7 @@ def task(parsed_args: argparse.Namespace):
                 'port' : parsed_args.port,
             }, 
             logcomp=NamedLogComp("RxWSClient"),
-            datatype='byte'
+            datatype='bytes'
         )
 
         

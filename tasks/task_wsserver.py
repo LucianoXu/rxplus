@@ -34,7 +34,7 @@ def task(parsed_args: argparse.Namespace):
         i = 0
         while True:
             await asyncio.sleep(1)
-            sender.on_next("Hello " + str(i))
+            sender.on_next(TaggedData("/", "Hello " + str(i)))
             i += 1
 
     try:

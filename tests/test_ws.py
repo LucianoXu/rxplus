@@ -5,7 +5,7 @@ from rxplus.ws import WSBytes, WSStr, wsdt_factory
 
 def test_wsdt_factory_valid():
     assert isinstance(wsdt_factory("string"), WSStr)
-    assert isinstance(wsdt_factory("byte"), WSBytes)
+    assert isinstance(wsdt_factory("bytes"), WSBytes)
 
 
 def test_wsdt_factory_invalid():

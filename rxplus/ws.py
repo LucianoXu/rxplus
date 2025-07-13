@@ -65,13 +65,13 @@ class WSBytes(WSDatatype):
             raise TypeError(f"WSRawBytes expects a bytes-like object, got str '{value}'")
         return bytes(value)
     
-def wsdt_factory(datatype: Literal['string', 'byte']) -> WSDatatype:
+def wsdt_factory(datatype: Literal['string', 'bytes']) -> WSDatatype:
     '''
     Factory function to create a WSDatatype instance based on the datatype parameter.
     '''
     if datatype == 'string':
         return WSStr()
-    elif datatype == 'byte':
+    elif datatype == 'bytes':
         return WSBytes()
     else:
         raise ValueError(f"Unsupported datatype '{datatype}'.")
@@ -91,7 +91,7 @@ class WS_Channels:
     '''
     def __init__(
         self, 
-        datatype: Literal['string', 'byte'] = 'string'):
+        datatype: Literal['string', 'bytes'] = 'string'):
         self.adapter: WSDatatype = wsdt_factory(datatype)
         self.channels: set[websockets.WebSocketServerProtocol] = set()
         self.queues: set[asyncio.Queue] = set()
@@ -103,7 +103,7 @@ class RxWSServer(Subject):
     
     The server can handle connections from multiple clients on different paths. Here different paths means the original URI path.
 
-    For the channels without the path, it will call `on_next` on received data directly. For the channels with the path, it will wrap the data in a `TaggedData` object, and call `on_next`.
+    It will wrap the data in a `TaggedData` object with the path, and call `on_next`.
 
     When `on_next` is called, it will check whether the value is a `TaggedData`. If it is, it will send the data to the corresponding path's channels. If it is not, it will send the data to the default path's channels (i.e., the empty path).
 
@@ -114,7 +114,7 @@ class RxWSServer(Subject):
                  conn_cfg: dict,
                  logcomp: Optional[LogComp] = None,
                  recv_timeout: float = 0.001,
-                 datatype: Callable[[str], Literal['string', 'byte']] | Literal['string', 'byte'] = 'string',
+                 datatype: Callable[[str], Literal['string', 'bytes']] | Literal['string', 'bytes'] = 'string',
                  ping_interval: Optional[int] = 20,
                  ping_timeout: Optional[int] = 20):
         """Initialize the WebSocket server and start listening."""
@@ -133,13 +133,13 @@ class RxWSServer(Subject):
         self.recv_timeout = recv_timeout
 
         # the function to determine the datatype of the path
-        self.datatype_func: Callable[[str], Literal['string', 'byte']]
-        if datatype in ['string', 'byte']:
+        self.datatype_func: Callable[[str], Literal['string', 'bytes']]
+        if datatype in ['string', 'bytes']:
             self.datatype_func = lambda path: datatype # type: ignore
         elif callable(datatype):
             self.datatype_func = datatype
         else:
-            raise ValueError(f"Unsupported datatype '{datatype}'. Expected 'string', 'byte', or a callable function.")
+            raise ValueError(f"Unsupported datatype '{datatype}'. Expected 'string', 'bytes', or a callable function.")
 
         self.ping_interval = ping_interval
         self.ping_timeout = ping_timeout
@@ -173,9 +173,14 @@ class RxWSServer(Subject):
             ws_channels = self._get_path_channels(value.tag)
             data = value.data
         else:
-            ws_channels = self._get_path_channels('/')
-            data = value
-        
+            rx_exception = self.logcomp.get_rx_exception(
+                ValueError(f"Expected TaggedData, but got {type(value)}"),
+                note=f"RxWSServer.on_next",
+            )
+            super().on_error(rx_exception)
+            return
+            
+            
         # type check data
         ws_channels.adapter.package_type_check(data)
 
@@ -256,10 +261,9 @@ class RxWSServer(Subject):
 
                     # process the received data
                     data = ws_channels.adapter.unpackage(data)
-                    if websocket.path != '/':
-                        data = TaggedData(websocket.path, data)
+                    wrapped_data = TaggedData(websocket.path, data)
                         
-                    super().on_next(data)
+                    super().on_next(wrapped_data)
 
                 except asyncio.TimeoutError:
                     pass
@@ -317,16 +321,65 @@ class RxWSServer(Subject):
 
 
 class RxWSClient(Subject):
-    '''
-    The client only recieves data from one server.
-    When connection fails, it will repeatedly retry to connect to the server.
-    The client will be closed upon receiving on_completed signal.
-    '''
+    """
+    A resilient ReactiveX‑compatible WebSocket **client**.
+
+    This subject behaves as both an *Observable*—emitting messages arriving
+    _from_ the remote WebSocket endpoint—and an *Observer*—accepting messages
+    that you want to _send_ to the endpoint.
+
+    Key Features
+    ------------
+    * **Auto‑reconnect** – repeatedly attempts to reconnect every
+      ``conn_retry_timeout`` seconds until the server becomes reachable.
+    * **Back‑pressure friendly** – outbound messages are buffered in an
+      ``asyncio.Queue`` while the socket is unavailable.
+    * **Typed frames** – payloads are (de)serialized by a ``WSDatatype``
+      adapter chosen via the ``datatype`` argument (``"string"`` or
+      ``"bytes"``).
+
+    Typical Usage
+    -------------
+    ```python
+    cfg = {"host": "localhost", "port": 8888, "path": "/chat"}
+    client = RxWSClient(cfg, datatype="string")
+
+    # outbound (Observer side)
+    rx.from_(["hello", "world"]).subscribe(client)
+
+    # inbound (Observable side)
+    client.subscribe(print)
+    ```
+
+    Parameters
+    ----------
+    conn_cfg : dict
+        ``{"host": str, "port": int, "path": str}`` describing the remote
+        WebSocket endpoint.
+    logcomp : LogComp | None
+        Optional logger component; defaults to :class:`EmptyLogComp`.
+    recv_timeout : float
+        Seconds to wait for incoming data before yielding control to the event
+        loop.
+    datatype : Literal["string", "bytes"]
+        Frame representation handled by :func:`wsdt_factory`.
+    conn_retry_timeout : float
+        Delay between automatic reconnection attempts in seconds.
+    ping_interval, ping_timeout : int | None
+        Values forwarded to :pyfunc:`websockets.connect` for heartbeat
+        management.
+
+    Raises
+    ------
+    RxException
+        Wrapped lower‑level exceptions forwarded through the ReactiveX error
+        channel.
+    """
     def __init__(self,
         conn_cfg: dict,
         logcomp: Optional[LogComp] = None,
         recv_timeout: float = 0.001,
-        datatype: Literal['string', 'byte'] = 'string',
+        datatype: Literal['string', 'bytes'] = 'string',
         conn_retry_timeout: float = 0.5,
         ping_interval: Optional[int] = 20,
         ping_timeout: Optional[int] = 20):
@@ -520,3 +573,125 @@ class RxWSClient(Subject):
                 self.logcomp.log(f"Connection to server {remote_desc} resources released.", "INFO")
 
         
+
+class RxWSClientGroup(Subject):
+    """
+    A **multiplexing** subject that manages a dynamic set of
+    :class:`RxWSClient` instances—one per WebSocket *path*—behind a single
+    ReactiveX interface.
+
+    Observer Side
+    -------------
+    Expects :class:`TaggedData` instances whose ``tag`` field contains the
+    desired WebSocket path and whose ``data`` field holds the payload to send.
+    A new client is lazily created the first time a path is encountered; later
+    messages with the same path reuse the existing connection.
+
+    Observable Side
+    ---------------
+    Emits the union of all inbound messages from every underlying client.  Each
+    message is wrapped back into a :class:`TaggedData`, preserving its source
+    path so downstream operators can demultiplex as needed.
+
+    Example
+    -------
+    ```python
+    group = RxWSClientGroup({"host": "localhost", "port": 8888})
+
+    # Send audio frames to two different endpoints
+    group.on_next(TaggedData("/mic/left",  left_bytes))
+    group.on_next(TaggedData("/mic/right", right_bytes))
+
+    # Filter to only left‑channel data
+    group.pipe(
+        ops.filter(lambda t: t.tag == "/mic/left")
+    ).subscribe(handle_left)
+    ```
+
+    Parameters
+    ----------
+    conn_cfg : dict
+        Base connection information (``host`` and ``port``).  The ``path`` for
+        each connection is supplied by individual :class:`TaggedData` items.
+    logcomp : LogComp | None
+        Logger component shared by all spawned clients.
+    recv_timeout, datatype, conn_retry_timeout, ping_interval, ping_timeout
+        Passed through to the per‑path :class:`RxWSClient` factory.
+
+    Notes
+    -----
+    Closed or errored clients are removed from the internal ``_clients`` cache,
+    allowing their resources to be garbage‑collected.
+    """
+
+    def __init__(self,
+        conn_cfg: dict,
+        logcomp: Optional[LogComp] = None,
+        recv_timeout: float = 0.001,
+        datatype: Callable[[str], Literal['string', 'bytes']] | Literal['string', 'bytes'] = 'string',
+        conn_retry_timeout: float = 0.5,
+        ping_interval: Optional[int] = 20,
+        ping_timeout: Optional[int] = 20):
+        super().__init__()
+
+        self.datatype_func: Callable[[str], Literal['string', 'bytes']]
+        if datatype in ['string', 'bytes']:
+            self.datatype_func = lambda path: datatype # type: ignore
+        elif callable(datatype):
+            self.datatype_func = datatype
+        else:
+            raise ValueError(f"Unsupported datatype '{datatype}'. Expected 'string', 'bytes', or a callable function.")
+
+
+        def make_client(path: str) -> RxWSClient:
+            new_conn_cfg = conn_cfg.copy()
+            new_conn_cfg['path'] = path
+            
+            return RxWSClient(
+                conn_cfg=new_conn_cfg,
+                logcomp=logcomp,
+                recv_timeout=recv_timeout,
+                datatype=self.datatype_func(path),
+                conn_retry_timeout=conn_retry_timeout,
+                ping_interval=ping_interval,
+                ping_timeout=ping_timeout
+            )
+        
+        self._client_factory = make_client
+        self._clients = {}              # tag -> RxWSClient
+        self._bus = Subject()          # merged inbound stream
+
+    # ============ Observer interface ============ #
+    def on_next(self, tagged: TaggedData):
+        client = self._ensure_client(tagged.tag)
+        # Push upstream – API depends on RxWSClient; assume it is Observer-like
+        client.on_next(tagged.data)
+
+    def on_error(self, err):
+        # propagate error to every open client and downstream
+        for c in self._clients.values():
+            c.on_error(err)
+        self._bus.on_error(err)
+
+    def on_completed(self):
+        for c in self._clients.values():
+            c.on_completed()
+        self._bus.on_completed()
+
+    # ============ Observable interface ============ #
+    def _subscribe_core(self, observer, scheduler=None):
+        return self._bus.subscribe(observer, scheduler=scheduler)
+
+    # ============ internal helpers ============ #
+    def _ensure_client(self, tag: str):
+        if tag not in self._clients:
+            # build new client and bridge its inbound traffic
+            client = self._client_factory(tag)
+
+            # When the client emits, wrap again with tag and push to bus
+            client.pipe(
+                ops.map(keep_log(lambda data: TaggedData(tag, data)))
+            ).subscribe(self._bus)
+
+            self._clients[tag] = client
+        return self._clients[tag]

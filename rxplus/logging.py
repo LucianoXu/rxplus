@@ -30,6 +30,18 @@ class LogItem:
     def __str__(self) -> str:
         return f"[{self.level}] {self.timestamp_str} {self.source}\t: {self.msg}\n"
     
+def keep_log(func: Callable[[Any], Any]) -> Callable[[Any], Any]:
+    '''
+    A decorator to keep the log item type. Can be used to monkey-patch the function to keep the log item type.
+    '''
+    def wrapper(x):
+        if isinstance(x, LogItem):
+            return x
+        else:
+            return func(x)
+        
+    return wrapper
+    
 def log_filter(levels: set[LOG_LEVEL] = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}):
     '''
     The operator to filter the log items by the level.
