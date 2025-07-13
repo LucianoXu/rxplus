@@ -1,43 +1,41 @@
-'''
+"""
 Communication by websocket.
-'''
-
-from typing import Any, Callable, Literal, Optional
+"""
 
 import asyncio
-import time
-import websockets
-import pickle
 import os
-
+import pickle
+import time
 from abc import ABC, abstractmethod
+from typing import Any, Callable, Literal, Optional
 
 import reactivex as rx
-from reactivex import Observable, Observer, Subject, create, operators as ops
+import websockets
+from reactivex import Observable, Observer, Subject, create
+from reactivex import operators as ops
 
-from .mechanism import RxException
 from .logging import *
-from .utils import TaggedData, get_short_error_info, get_full_error_info
+from .mechanism import RxException
+from .utils import TaggedData, get_full_error_info, get_short_error_info
 
 
 class WSDatatype(ABC):
 
     @abstractmethod
     def package_type_check(self, value) -> None:
-        '''
+        """
         Check whether the value can be sent through this datatype.
         If not, an error will be rased.
-        '''
+        """
         ...
 
     @abstractmethod
-    def package(self, value) -> Any:
-        ...
+    def package(self, value) -> Any: ...
 
     @abstractmethod
-    def unpackage(self, value) -> Any:
-        ...
-    
+    def unpackage(self, value) -> Any: ...
+
+
 class WSStr(WSDatatype):
 
     def package_type_check(self, value) -> None:
@@ -45,10 +43,10 @@ class WSStr(WSDatatype):
 
     def package(self, value):
         return str(value)
-    
+
     def unpackage(self, value):
         return value
-    
+
 
 class WSBytes(WSDatatype):
 
@@ -62,21 +60,24 @@ class WSBytes(WSDatatype):
     def unpackage(self, value):
         # websockets binary frame → bytes ；text frame → str
         if isinstance(value, str):
-            raise TypeError(f"WSRawBytes expects a bytes-like object, got str '{value}'")
+            raise TypeError(
+                f"WSRawBytes expects a bytes-like object, got str '{value}'"
+            )
         return bytes(value)
-    
-def wsdt_factory(datatype: Literal['string', 'bytes']) -> WSDatatype:
-    '''
+
+
+def wsdt_factory(datatype: Literal["string", "bytes"]) -> WSDatatype:
+    """
     Factory function to create a WSDatatype instance based on the datatype parameter.
-    '''
-    if datatype == 'string':
+    """
+    if datatype == "string":
         return WSStr()
-    elif datatype == 'bytes':
+    elif datatype == "bytes":
         return WSBytes()
     else:
         raise ValueError(f"Unsupported datatype '{datatype}'.")
 
-    
+
 # we use dictionary to serve as connection configuration
 # example:
 # {
@@ -85,22 +86,23 @@ def wsdt_factory(datatype: Literal['string', 'bytes']) -> WSDatatype:
 #   path : '/',
 # }
 
+
 class WS_Channels:
-    '''
+    """
     The class to manage the websocket channels of the same path.
-    '''
-    def __init__(
-        self, 
-        datatype: Literal['string', 'bytes'] = 'string'):
+    """
+
+    def __init__(self, datatype: Literal["string", "bytes"] = "string"):
         self.adapter: WSDatatype = wsdt_factory(datatype)
         self.channels: set[websockets.WebSocketServerProtocol] = set()
         self.queues: set[asyncio.Queue] = set()
 
+
 class RxWSServer(Subject):
-    '''
+    """
     The websocket server for bi-directional communication between ReactiveX components.
     The server can be connected by multiple clients.
-    
+
     The server can handle connections from multiple clients on different paths. Here different paths means the original URI path.
 
     It will wrap the data in a `TaggedData` object with the path, and call `on_next`.
@@ -109,18 +111,23 @@ class RxWSServer(Subject):
 
     Use datatype parameter to control the data type sent through the websocket.
     The server will be closed upon receiving on_completed signal.
-    '''
-    def __init__(self,
-                 conn_cfg: dict,
-                 logcomp: Optional[LogComp] = None,
-                 recv_timeout: float = 0.001,
-                 datatype: Callable[[str], Literal['string', 'bytes']] | Literal['string', 'bytes'] = 'string',
-                 ping_interval: Optional[int] = 20,
-                 ping_timeout: Optional[int] = 20):
+    """
+
+    def __init__(
+        self,
+        conn_cfg: dict,
+        logcomp: Optional[LogComp] = None,
+        recv_timeout: float = 0.001,
+        datatype: (
+            Callable[[str], Literal["string", "bytes"]] | Literal["string", "bytes"]
+        ) = "string",
+        ping_interval: Optional[int] = 20,
+        ping_timeout: Optional[int] = 20,
+    ):
         """Initialize the WebSocket server and start listening."""
         super().__init__()
-        self.host = conn_cfg['host']
-        self.port = int(conn_cfg['port'])
+        self.host = conn_cfg["host"]
+        self.port = int(conn_cfg["port"])
 
         # setup the log source
         if logcomp is None:
@@ -133,37 +140,37 @@ class RxWSServer(Subject):
         self.recv_timeout = recv_timeout
 
         # the function to determine the datatype of the path
-        self.datatype_func: Callable[[str], Literal['string', 'bytes']]
-        if datatype in ['string', 'bytes']:
-            self.datatype_func = lambda path: datatype # type: ignore
+        self.datatype_func: Callable[[str], Literal["string", "bytes"]]
+        if datatype in ["string", "bytes"]:
+            self.datatype_func = lambda path: datatype  # type: ignore
         elif callable(datatype):
             self.datatype_func = datatype
         else:
-            raise ValueError(f"Unsupported datatype '{datatype}'. Expected 'string', 'bytes', or a callable function.")
+            raise ValueError(
+                f"Unsupported datatype '{datatype}'. Expected 'string', 'bytes', or a callable function."
+            )
 
         self.ping_interval = ping_interval
         self.ping_timeout = ping_timeout
 
         self.path_channels: dict[str, WS_Channels] = {}
 
-
         asyncio.create_task(self.start_server())
 
-        self.serve : Optional[websockets.WebSocketServer] = None
+        self.serve: Optional[websockets.WebSocketServer] = None
         self.stop = asyncio.Future()
 
     def _get_path_channels(self, path: str) -> WS_Channels:
-        '''
+        """
         Get the WS_Channels instance for the given path.
         If the path does not exist, create a new WS_Channels instance.
-        '''
+        """
         if path not in self.path_channels:
             datatype = self.datatype_func(path)
 
             self.path_channels[path] = WS_Channels(datatype=datatype)
-        
-        return self.path_channels[path]
 
+        return self.path_channels[path]
 
     def on_next(self, value):
         """Route outbound messages to the proper channel queues."""
@@ -179,15 +186,14 @@ class RxWSServer(Subject):
             )
             super().on_error(rx_exception)
             return
-            
-            
+
         # type check data
         ws_channels.adapter.package_type_check(data)
 
         # push the data
         for queue in ws_channels.queues:
             queue.put_nowait(data)
-        
+
     def on_error(self, error):
         """Forward errors to subscribers."""
         super().on_error(error)
@@ -217,7 +223,6 @@ class RxWSServer(Subject):
             self.logcomp.log(f"Async completing cancelled.", "INFO")
             raise
 
-
     async def handle_client(self, websocket: websockets.WebSocketServerProtocol):
         """Serve a connected WebSocket client until the link closes."""
 
@@ -233,9 +238,9 @@ class RxWSServer(Subject):
             # Register client
             ws_channels.channels.add(websocket)
             ws_channels.queues.add(queue)
-            
+
             # the connection information is received
-            
+
             while True:
                 await asyncio.sleep(0)
                 # try to send data to the client
@@ -248,11 +253,17 @@ class RxWSServer(Subject):
                         queue.task_done()
 
                     except (ConnectionResetError, BrokenPipeError, OSError) as e:
-                        self.logcomp.log(f"Failed to send data to client {remote_desc}, connection may be broken: {get_short_error_info(e)}", "WARNING")
+                        self.logcomp.log(
+                            f"Failed to send data to client {remote_desc}, connection may be broken: {get_short_error_info(e)}",
+                            "WARNING",
+                        )
                         break
-                        
+
                     except websockets.exceptions.ConnectionClosed as e:
-                        self.logcomp.log(f"Failed to send data to client {remote_desc}, connection closed: {get_short_error_info(e)}", "WARNING")
+                        self.logcomp.log(
+                            f"Failed to send data to client {remote_desc}, connection closed: {get_short_error_info(e)}",
+                            "WARNING",
+                        )
                         break
 
                 try:
@@ -262,37 +273,48 @@ class RxWSServer(Subject):
                     # process the received data
                     data = ws_channels.adapter.unpackage(data)
                     wrapped_data = TaggedData(websocket.path, data)
-                        
+
                     super().on_next(wrapped_data)
 
                 except asyncio.TimeoutError:
                     pass
 
                 except ConnectionResetError as e:
-                    self.logcomp.log(f"Connection reset (ConnectionResetError): {get_short_error_info(e)}", "WARNING")
+                    self.logcomp.log(
+                        f"Connection reset (ConnectionResetError): {get_short_error_info(e)}",
+                        "WARNING",
+                    )
                     break
 
                 except OSError as e:
-                    self.logcomp.log(f"Network error or connection lost (OSError): {get_short_error_info(e)}", "WARNING")
+                    self.logcomp.log(
+                        f"Network error or connection lost (OSError): {get_short_error_info(e)}",
+                        "WARNING",
+                    )
                     break
 
                 except websockets.exceptions.ConnectionClosedError as e:
-                    self.logcomp.log(f"Client {remote_desc} disconnected with error: {get_short_error_info(e)}.", "WARNING")
+                    self.logcomp.log(
+                        f"Client {remote_desc} disconnected with error: {get_short_error_info(e)}.",
+                        "WARNING",
+                    )
                     break
 
                 except websockets.exceptions.ConnectionClosedOK:
-                    self.logcomp.log(f"Client {remote_desc} disconnected gracefully.", "INFO")
+                    self.logcomp.log(
+                        f"Client {remote_desc} disconnected gracefully.", "INFO"
+                    )
                     break
 
         except asyncio.CancelledError:
             self.logcomp.log(f"Client {remote_desc} connection cancelled.", "INFO")
             raise
-                
 
         except Exception as e:
-            rx_exception = self.logcomp.get_rx_exception(e, note=f"Error while handling client {remote_desc}")
+            rx_exception = self.logcomp.get_rx_exception(
+                e, note=f"Error while handling client {remote_desc}"
+            )
             super().on_error(rx_exception)
-
 
         finally:
 
@@ -307,12 +329,13 @@ class RxWSServer(Subject):
         """Spin up the asyncio WebSocket server."""
         try:
             self.serve = await websockets.serve(
-                self.handle_client, 
-                self.host, 
+                self.handle_client,
+                self.host,
                 self.port,
                 ping_interval=self.ping_interval,
                 ping_timeout=self.ping_timeout,
-                max_size=None)
+                max_size=None,
+            )
             await self.stop
 
         except asyncio.CancelledError:
@@ -375,20 +398,23 @@ class RxWSClient(Subject):
         Wrapped lower‑level exceptions forwarded through the ReactiveX error
         channel.
     """
-    def __init__(self,
+
+    def __init__(
+        self,
         conn_cfg: dict,
         logcomp: Optional[LogComp] = None,
         recv_timeout: float = 0.001,
-        datatype: Literal['string', 'bytes'] = 'string',
+        datatype: Literal["string", "bytes"] = "string",
         conn_retry_timeout: float = 0.5,
         ping_interval: Optional[int] = 20,
-        ping_timeout: Optional[int] = 20):
+        ping_timeout: Optional[int] = 20,
+    ):
         """Create a reconnecting WebSocket client."""
         super().__init__()
 
-        self.host = conn_cfg['host']
-        self.port = int(conn_cfg['port'])
-        self.path = conn_cfg.get('path', '/')
+        self.host = conn_cfg["host"]
+        self.port = int(conn_cfg["port"])
+        self.path = conn_cfg.get("path", "/")
 
         self.recv_timeout = recv_timeout
 
@@ -398,7 +424,6 @@ class RxWSClient(Subject):
 
         self.logcomp = logcomp
         self.logcomp.set_super(super())
-        
 
         self.datatype = datatype
         self.adapter: WSDatatype = wsdt_factory(datatype)
@@ -407,7 +432,7 @@ class RxWSClient(Subject):
         self.ping_timeout = ping_timeout
 
         self.queue = asyncio.Queue()
-        self.ws : Optional[websockets.WebSocketClientProtocol] = None
+        self.ws: Optional[websockets.WebSocketClientProtocol] = None
 
         self.conn_retry_timeout = conn_retry_timeout
 
@@ -430,7 +455,6 @@ class RxWSClient(Subject):
         """Close the connection before completing."""
         asyncio.create_task(self.async_completing())
 
-
     async def async_completing(self):
         """Async helper to close the WebSocket client."""
         try:
@@ -447,7 +471,6 @@ class RxWSClient(Subject):
         except asyncio.CancelledError:
             self.logcomp.log(f"Async completing cancelled.", "INFO")
             raise
-
 
     async def connect_client(self):
         """Connect to the remote server and forward messages."""
@@ -466,7 +489,7 @@ class RxWSClient(Subject):
                 while True:
                     await asyncio.sleep(0)
                     try:
-                        '''
+                        """
                         According to the documentation of websockets.connect:
                         Raises
                             InvalidURI
@@ -480,47 +503,54 @@ class RxWSClient(Subject):
 
                             ~asyncio.TimeoutError
                             If the opening handshake times out.
-                        '''
+                        """
 
                         self.ws = await asyncio.wait_for(
                             websockets.connect(
                                 url,
                                 ping_interval=self.ping_interval,
                                 ping_timeout=self.ping_timeout,
-                                max_size=None
-                            ), 
-                            self.conn_retry_timeout
+                                max_size=None,
+                            ),
+                            self.conn_retry_timeout,
                         )
                         break
 
-                        
                     except asyncio.TimeoutError:
                         pass
 
                     except OSError as e:
-                        self.logcomp.log(f"Network error or connection failed (OSError): {get_short_error_info(e)}", "WARNING")
+                        self.logcomp.log(
+                            f"Network error or connection failed (OSError): {get_short_error_info(e)}",
+                            "WARNING",
+                        )
                         await asyncio.sleep(self.conn_retry_timeout)
                         pass
 
                     except websockets.InvalidHandshake as e:
-                        self.logcomp.log(f"Invalid handshake with server {remote_desc}: {get_short_error_info(e)}", "WARNING")
+                        self.logcomp.log(
+                            f"Invalid handshake with server {remote_desc}: {get_short_error_info(e)}",
+                            "WARNING",
+                        )
                         await asyncio.sleep(self.conn_retry_timeout)
                         pass
 
                     # Catch invalid URI errors
                     except websockets.InvalidURI as e:
-                        self.logcomp.log(f"Invalid URI for server {remote_desc}: {get_short_error_info(e)}", "ERROR")
+                        self.logcomp.log(
+                            f"Invalid URI for server {remote_desc}: {get_short_error_info(e)}",
+                            "ERROR",
+                        )
                         super().on_error(e)
                         return
-                
+
                 self.logcomp.log(f"Server {remote_desc} Connected.", "INFO")
                 self._connected = True
-
 
                 # Start receiving messages
                 while True:
                     await asyncio.sleep(0)
-                    
+
                     # try to send data to the server
                     if not self.queue.empty():
                         try:
@@ -528,41 +558,57 @@ class RxWSClient(Subject):
                             await self.ws.send(self.adapter.package(value))
                             self.queue.task_done()
 
-                            
                         except (ConnectionResetError, BrokenPipeError, OSError) as e:
-                            self.logcomp.log(f"Failed to send data to server {remote_desc}, connection may be broken: {get_short_error_info(e)}", "WARNING")
+                            self.logcomp.log(
+                                f"Failed to send data to server {remote_desc}, connection may be broken: {get_short_error_info(e)}",
+                                "WARNING",
+                            )
                             break
-                            
+
                         except websockets.exceptions.ConnectionClosed as e:
-                            self.logcomp.log(f"Failed to send data to server {remote_desc}, connection closed: {get_short_error_info(e)}", "WARNING")
+                            self.logcomp.log(
+                                f"Failed to send data to server {remote_desc}, connection closed: {get_short_error_info(e)}",
+                                "WARNING",
+                            )
                             break
-                        
+
                     try:
                         data = await asyncio.wait_for(self.ws.recv(), self.recv_timeout)
                         super().on_next(self.adapter.unpackage(data))
-                
+
                     except asyncio.TimeoutError:
                         pass
 
                     except OSError as e:
-                        self.logcomp.log(f"Network error or connection lost (OSError): {get_short_error_info(e)}", "WARNING")
+                        self.logcomp.log(
+                            f"Network error or connection lost (OSError): {get_short_error_info(e)}",
+                            "WARNING",
+                        )
                         break
 
                     except websockets.ConnectionClosedError as e:
-                        self.logcomp.log(f"Server {remote_desc} Connection closed with error: {get_short_error_info(e)}.", "WARNING")
+                        self.logcomp.log(
+                            f"Server {remote_desc} Connection closed with error: {get_short_error_info(e)}.",
+                            "WARNING",
+                        )
                         break
 
                     except websockets.ConnectionClosedOK:
-                        self.logcomp.log(f"Server {remote_desc} Connection closed gracefully.", "INFO")
+                        self.logcomp.log(
+                            f"Server {remote_desc} Connection closed gracefully.",
+                            "INFO",
+                        )
                         break
-
 
         except asyncio.CancelledError:
             self.logcomp.log(f"WebSocket client connection cancelled.", "INFO")
-            raise    
+            raise
 
         except Exception as e:
-            self.logcomp.log(f"Error while connecting to server {remote_desc}:\n{get_full_error_info(e)}", "ERROR")
+            self.logcomp.log(
+                f"Error while connecting to server {remote_desc}:\n{get_full_error_info(e)}",
+                "ERROR",
+            )
             super().on_error(e)
 
         finally:
@@ -570,9 +616,10 @@ class RxWSClient(Subject):
                 await self.ws.close()
                 self.ws = None
 
-                self.logcomp.log(f"Connection to server {remote_desc} resources released.", "INFO")
+                self.logcomp.log(
+                    f"Connection to server {remote_desc} resources released.", "INFO"
+                )
 
-        
 
 class RxWSClientGroup(Subject):
     """
@@ -624,29 +671,34 @@ class RxWSClientGroup(Subject):
     allowing their resources to be garbage‑collected.
     """
 
-    def __init__(self,
+    def __init__(
+        self,
         conn_cfg: dict,
         logcomp: Optional[LogComp] = None,
         recv_timeout: float = 0.001,
-        datatype: Callable[[str], Literal['string', 'bytes']] | Literal['string', 'bytes'] = 'string',
+        datatype: (
+            Callable[[str], Literal["string", "bytes"]] | Literal["string", "bytes"]
+        ) = "string",
         conn_retry_timeout: float = 0.5,
         ping_interval: Optional[int] = 20,
-        ping_timeout: Optional[int] = 20):
+        ping_timeout: Optional[int] = 20,
+    ):
         super().__init__()
 
-        self.datatype_func: Callable[[str], Literal['string', 'bytes']]
-        if datatype in ['string', 'bytes']:
-            self.datatype_func = lambda path: datatype # type: ignore
+        self.datatype_func: Callable[[str], Literal["string", "bytes"]]
+        if datatype in ["string", "bytes"]:
+            self.datatype_func = lambda path: datatype  # type: ignore
         elif callable(datatype):
             self.datatype_func = datatype
         else:
-            raise ValueError(f"Unsupported datatype '{datatype}'. Expected 'string', 'bytes', or a callable function.")
-
+            raise ValueError(
+                f"Unsupported datatype '{datatype}'. Expected 'string', 'bytes', or a callable function."
+            )
 
         def make_client(path: str) -> RxWSClient:
             new_conn_cfg = conn_cfg.copy()
-            new_conn_cfg['path'] = path
-            
+            new_conn_cfg["path"] = path
+
             return RxWSClient(
                 conn_cfg=new_conn_cfg,
                 logcomp=logcomp,
@@ -654,12 +706,12 @@ class RxWSClientGroup(Subject):
                 datatype=self.datatype_func(path),
                 conn_retry_timeout=conn_retry_timeout,
                 ping_interval=ping_interval,
-                ping_timeout=ping_timeout
+                ping_timeout=ping_timeout,
             )
-        
+
         self._client_factory = make_client
-        self._clients = {}              # tag -> RxWSClient
-        self._bus = Subject()          # merged inbound stream
+        self._clients = {}  # tag -> RxWSClient
+        self._bus = Subject()  # merged inbound stream
 
     # ============ Observer interface ============ #
     def on_next(self, tagged: TaggedData):
@@ -681,11 +733,11 @@ class RxWSClientGroup(Subject):
     # ============ Observable interface ============ #
     def _subscribe_core(self, observer, scheduler=None):
         return self._bus.subscribe(observer, scheduler=scheduler)
-    
+
     def open_path(self, path: str) -> None:
-        '''
+        """
         Open a new path for the client group.
-        '''
+        """
         self._ensure_client(path)
 
     # ============ internal helpers ============ #
