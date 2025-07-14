@@ -11,6 +11,8 @@ import rxplus
 from rxplus import TaggedData, RxMicrophone, NamedLogComp, log_filter, drop_log, RxWSServer, tag
 from reactivex.scheduler import ThreadPoolScheduler
 
+# TODO: problem encounted when changing the microphone device. The following code observed:
+# ||PaMacCore (AUHAL)|| Error on line 2523: err='-50', msg=Unknown Error
 
 def build_parser(subparsers: argparse._SubParsersAction):
     parser = subparsers.add_parser("mic_server", help="start the microphone node.")

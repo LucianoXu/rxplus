@@ -165,8 +165,8 @@ def create_wavfile(
             scheduler
             or scheduler_
             or (
-                AsyncIOScheduler(loop)
-                if running  # type: ignore[assignment]
+                AsyncIOScheduler(loop)  # type: ignore[assignment]
+                if running
                 else ThreadPoolScheduler(1)
             )
         )
