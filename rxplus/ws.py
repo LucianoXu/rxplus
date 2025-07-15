@@ -13,14 +13,8 @@ import reactivex as rx
 import websockets
 
 # Compat helpers for newer websockets API
-try:
-    from websockets import ClientConnection, Server, ServerConnection
-except Exception:  # pragma: no cover
-    from websockets import WebSocketServer as Server  # type: ignore
-    from websockets import (
-        WebSocketServerProtocol as ServerConnection,
-        WebSocketClientProtocol as ClientConnection,
-    )
+
+from websockets import ClientConnection, Server, ServerConnection
 
 from reactivex import Observable, Observer, Subject, create
 from reactivex import operators as ops
@@ -32,9 +26,7 @@ from .utils import TaggedData, get_full_error_info, get_short_error_info
 
 def _ws_path(ws: ServerConnection | ClientConnection) -> str:
     """Return the request path of a WebSocket connection."""
-    if hasattr(ws, "path"):
-        return getattr(ws, "path")  # type: ignore[return-value]
-    req = getattr(ws, "request", None)
+    req = ws.request
     if req is not None:
         return getattr(req, "path", "")
     return ""
