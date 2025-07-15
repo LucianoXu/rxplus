@@ -4,4 +4,5 @@ soundfile=0.12.1
 scipy=1.13.1
 prompt_toolkit=3.0.51
 pyaudio=0.2.14
+pillow=11.3.0
 mss=10.0.0

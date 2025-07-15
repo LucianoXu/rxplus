@@ -4,9 +4,12 @@ import asyncio
 import time
 from typing import Any, Optional
 
+from io import BytesIO
+
 import numpy as np
 import mss
 import reactivex as rx
+from PIL import Image
 from reactivex import Observable
 from reactivex import operators as ops
 from reactivex.disposable import CompositeDisposable, Disposable
@@ -96,3 +99,17 @@ def create_screen_capture(
         return CompositeDisposable(_scheduler.schedule(action), disp)
 
     return Observable(subscribe)
+
+
+def rgb_to_jpeg(frame: np.ndarray, quality: int = 80) -> bytes:
+    
+    width, height = frame.shape[1], frame.shape[0]
+
+    img = Image.frombytes("RGB", (width, height), frame.tobytes())
+
+    # Convert to JPEG format with specified quality
+    with BytesIO() as output:
+        img.save(output, format="JPEG", quality=quality)
+        jpeg_data = output.getvalue()
+
+    return jpeg_data

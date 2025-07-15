@@ -353,7 +353,7 @@ class RxWSServer(Subject):
             await self.stop
 
         except asyncio.CancelledError:
-            self.logcomp.log(f"WebSocket server initialization cancelled.", "INFO")
+            self.logcomp.log(f"WebSocket server stopped.", "INFO")
             raise
 
 

@@ -97,3 +97,50 @@ class FPSMonitor:
             self._t0 = now
 
         return item  # important: forward original item unchanged
+
+
+# -------------------------------
+class BandwidthMonitor:
+    """Print average bandwidth every *interval* seconds.
+
+    Expects items that support ``len()`` (e.g. ``bytes``). The bandwidth is
+    computed over the last *interval* seconds.
+
+    The object is *callable* so it can be used inside ``ops.map`` /
+    ``ops.do_action``.
+    """
+
+    def __init__(self, interval: float = 1.0, scale: float = 1.0, unit: str = "B/s") -> None:
+        """
+        Args:
+            interval: Time window in seconds for computing the moving average.
+            scale:   Factor applied to convert raw bytes per second to another
+                     unit (e.g. 1/1024 for KiB/s, 1/1_048_576 for MiB/s).
+            unit:    String printed after the numeric bandwidth value.
+        """
+        self.interval = interval
+        self.scale = scale
+        self.unit = unit
+        self._bytes: int = 0
+        self._t0: float = time.perf_counter()
+
+    def __call__(self, item):
+        """Side effect: update counters, maybe log bandwidth, then pass item through."""
+        try:
+            size = len(item)
+        except TypeError:
+            # Item does not support len(); treat as zero-length for bandwidth.
+            size = 0
+
+        self._bytes += size
+        now = time.perf_counter()
+        elapsed = now - self._t0
+
+        if elapsed >= self.interval:
+            bandwidth = (self._bytes / elapsed) * self.scale
+            print(f"[Bandwidth] {bandwidth:.1f} {self.unit}")
+            self._bytes = 0
+            self._t0 = now
+
+        # Forward the original item unchanged
+        return item

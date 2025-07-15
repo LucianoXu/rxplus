@@ -2,13 +2,14 @@ import asyncio
 import threading
 import reactivex as rx
 from reactivex.scheduler.eventloop import AsyncIOScheduler
+from reactivex.scheduler import ThreadPoolScheduler
 from reactivex import operators as ops
 
 import argparse
 
 import time
 
-from rxplus import create_screen_capture, FPSMonitor
+from rxplus import create_screen_capture, rgb_to_jpeg, FPSMonitor, BandwidthMonitor
 
 
 
@@ -26,10 +27,16 @@ def task(parsed_args: argparse.Namespace):
         )
 
         fps_monitor = FPSMonitor(interval=1.0)
+        bandwidth_monitor = BandwidthMonitor(interval=1.0, scale=1/(1024.0 * 1024.0), unit="MB/s")
+
+        thread_scheduler = ThreadPoolScheduler(1)
 
         source.pipe(
-            ops.map(fps_monitor),
             ops.do_action(lambda frame: print(f"Captured frame of shape: {frame.shape}")),
+            ops.map(fps_monitor),
+            ops.observe_on(thread_scheduler),
+            ops.map(lambda frame: rgb_to_jpeg(frame, quality=80)),
+            ops.map(bandwidth_monitor),
         ).subscribe()
 
         await asyncio.Event().wait()  # run forever

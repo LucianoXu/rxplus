@@ -8,7 +8,7 @@ exclude = ["resources*"]
 
 [project]
 name = "rxplus"
-version = "0.1.4"
+version = "0.1.5"
 description = "A package for reactive programming extensions."
 readme = "README.md"
 authors = [
