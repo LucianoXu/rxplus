@@ -43,6 +43,10 @@ if __name__ == '__main__':
     task_wavfile_client.build_parser(subparsers)
     # ./main wavfile_client --path=resources/output.wav --format=Float32 --sr=48000 --ch=1
 
+    from tasks import task_screen_capture
+    task_screen_capture.build_parser(subparsers)
+    # ./main screen_capture --fps=10.0
+
     # Parse arguments
     args = parser.parse_args()
     

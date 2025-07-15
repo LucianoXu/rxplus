@@ -3,6 +3,8 @@
 import traceback
 from typing import Any
 
+import time
+
 from reactivex import operators as ops
 
 
@@ -69,3 +71,29 @@ def get_full_error_info(e: Exception) -> str:
         str: The full error information.
     """
     return "".join(traceback.format_exception(type(e), e, e.__traceback__))
+
+
+class FPSMonitor:
+    """Print average FPS every *interval* seconds.
+
+    The object is *callable* so it can be used inside `ops.map` / `ops.do_action`.
+    """
+
+    def __init__(self, interval: float = 1.0) -> None:
+        self.interval = interval
+        self._count: int = 0
+        self._t0: float = time.perf_counter()
+
+    def __call__(self, item):
+        """Side effect: update counters, maybe log FPS, then pass item through."""
+        self._count += 1
+        now = time.perf_counter()
+        elapsed = now - self._t0
+
+        if elapsed >= self.interval:
+            fps = self._count / elapsed
+            print(f"[FPS] {fps:.1f}")
+            self._count = 0
+            self._t0 = now
+
+        return item  # important: forward original item unchanged

@@ -9,6 +9,7 @@ from .audio import (  # noqa: F401
 )
 from .cli import from_cli  # noqa: F401
 from .duplex import Duplex, connect_adapter, make_duplex  # noqa: F401
+from .graphic import create_screen_capture  # noqa: F401
 from .logging import (  # noqa: F401
     LOG_LEVEL,
     EmptyLogComp,
@@ -23,7 +24,7 @@ from .logging import (  # noqa: F401
 )
 from .mechanism import RxException  # noqa: F401
 from .opt import redirect_to, stream_print_out  # noqa: F401
-from .utils import TaggedData, tag, tag_filter, untag  # noqa: F401
+from .utils import TaggedData, tag, tag_filter, untag, FPSMonitor  # noqa: F401
 from .ws import RxWSClient, RxWSClientGroup, RxWSServer, WSDatatype, WSStr  # noqa: F401
 
 __all__ = [
@@ -32,6 +33,8 @@ __all__ = [
     "tag",
     "tag_filter",
     "untag",
+    "FPSMonitor",
+    
     "LogItem",
     "LOG_LEVEL",
     "keep_log",
@@ -44,18 +47,29 @@ __all__ = [
     "Logger",
     "stream_print_out",
     "redirect_to",
+
+    # WebSocket
     "WSDatatype",
     "WSStr",
     "RxWSServer",
     "RxWSClient",
     "RxWSClientGroup",
+
+    # Duplex
     "Duplex",
     "make_duplex",
     "connect_adapter",
+
+    # CLI
     "from_cli",
+
+    # audio
     "PCMFormat",
     "create_wavfile",
     "RxMicrophone",
     "RxSpeaker",
     "save_wavfile",
+
+    # graphic
+    "create_screen_capture",
 ]

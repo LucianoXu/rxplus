@@ -1,0 +1,98 @@
+"""Graphic helpers built on top of ReactiveX."""
+
+import asyncio
+import time
+from typing import Any, Optional
+
+import numpy as np
+import mss
+import reactivex as rx
+from reactivex import Observable
+from reactivex import operators as ops
+from reactivex.disposable import CompositeDisposable, Disposable
+from reactivex.scheduler import ThreadPoolScheduler
+from reactivex.scheduler.eventloop import AsyncIOScheduler
+
+from .mechanism import RxException
+
+def create_screen_capture(
+    fps: float = 10.0,
+    scheduler: Optional[AsyncIOScheduler] = None,
+) -> Observable[np.ndarray]:
+    """
+    Create an observable that captures the screen at a specified FPS.
+    The observable will adjust the time between frames to match the desired FPS.
+
+    Args:
+        fps (float): Frames per second for capturing the screen.
+
+    Output stream: 
+        Observable emitting NumPy arrays representing RGB frames of the screen.
+    """
+
+    interval = 1.0 / fps
+
+    sleep_time = interval  # sleep time between frames, intially set to the interval
+
+    # control the time between frames
+    previous_time = 0.5 * interval
+
+    def subscribe(
+        observer: rx.abc.ObserverBase, scheduler_: Optional[rx.abc.SchedulerBase] = None
+    ) -> rx.abc.DisposableBase:
+
+        try:
+            loop = asyncio.get_running_loop()
+            running = loop.is_running()
+        except RuntimeError:
+            loop = None
+            running = False
+
+        _scheduler = (
+            scheduler
+            or scheduler_
+            or (
+                AsyncIOScheduler(loop)  # type: ignore[assignment]
+                if running
+                else ThreadPoolScheduler(1)
+            )
+        )
+
+        disposed = False
+
+
+        def action(_: rx.abc.SchedulerBase, __: Any) -> None:
+            nonlocal disposed, previous_time, sleep_time
+
+            try:
+                with mss.mss() as sct:
+                    monitor = sct.monitors[1]  # primary monitor
+
+                    while not disposed and True:
+                        rgb = np.array(sct.grab(monitor))[:, :, :3][:, :, ::-1]  # BGRA -> RGB
+                        observer.on_next(rgb)
+                        # adjust the sleep time based on the interval. experiments show that this is critical.
+                        current_time = time.time()
+                        elapsed = current_time - previous_time
+                        sleep_time += 0.5 * (interval - elapsed)
+                        previous_time = current_time
+                        # sleep for the adjusted time
+                        if sleep_time > 0:
+                            time.sleep(sleep_time)
+                        else:
+                            sleep_time = 0.
+                        
+            except Exception as error:
+                rx_exception = RxException(
+                    error, note=f"Error while capturing screen"
+                )
+                observer.on_error(rx_exception)
+            
+        def dispose() -> None:
+            nonlocal disposed
+            disposed = True
+
+        disp = Disposable(dispose)
+        return CompositeDisposable(_scheduler.schedule(action), disp)
+
+    return Observable(subscribe)
