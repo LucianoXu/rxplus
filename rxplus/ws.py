@@ -11,12 +11,33 @@ from typing import Any, Callable, Literal, Optional
 
 import reactivex as rx
 import websockets
+
+# Compat helpers for newer websockets API
+try:
+    from websockets import ClientConnection, Server, ServerConnection
+except Exception:  # pragma: no cover
+    from websockets import WebSocketServer as Server  # type: ignore
+    from websockets import (
+        WebSocketServerProtocol as ServerConnection,
+        WebSocketClientProtocol as ClientConnection,
+    )
+
 from reactivex import Observable, Observer, Subject, create
 from reactivex import operators as ops
 
 from .logging import *
 from .mechanism import RxException
 from .utils import TaggedData, get_full_error_info, get_short_error_info
+
+
+def _ws_path(ws: ServerConnection | ClientConnection) -> str:
+    """Return the request path of a WebSocket connection."""
+    if hasattr(ws, "path"):
+        return getattr(ws, "path")  # type: ignore[return-value]
+    req = getattr(ws, "request", None)
+    if req is not None:
+        return getattr(req, "path", "")
+    return ""
 
 
 class WSDatatype(ABC):
@@ -94,7 +115,7 @@ class WS_Channels:
 
     def __init__(self, datatype: Literal["string", "bytes"] = "string"):
         self.adapter: WSDatatype = wsdt_factory(datatype)
-        self.channels: set[websockets.WebSocketServerProtocol] = set()
+        self.channels: set[ServerConnection] = set()
         self.queues: set[asyncio.Queue] = set()
 
 
@@ -157,7 +178,7 @@ class RxWSServer(Subject):
 
         asyncio.create_task(self.start_server())
 
-        self.serve: Optional[websockets.WebSocketServer] = None
+        self.serve: Optional[Server] = None
         self.stop = asyncio.Future()
 
     def _get_path_channels(self, path: str) -> WS_Channels:
@@ -223,15 +244,16 @@ class RxWSServer(Subject):
             self.logcomp.log(f"Async completing cancelled.", "INFO")
             raise
 
-    async def handle_client(self, websocket: websockets.WebSocketServerProtocol):
+    async def handle_client(self, websocket: ServerConnection):
         """Serve a connected WebSocket client until the link closes."""
 
-        remote_desc = f"[{websocket.remote_address} on path {websocket.path}]"
+        path = _ws_path(websocket)
+        remote_desc = f"[{websocket.remote_address} on path {path}]"
 
         self.logcomp.log(f"Client established from {remote_desc}", "INFO")
 
         try:
-            ws_channels = self._get_path_channels(websocket.path)
+            ws_channels = self._get_path_channels(path)
 
             queue = asyncio.Queue()
 
@@ -272,7 +294,7 @@ class RxWSServer(Subject):
 
                     # process the received data
                     data = ws_channels.adapter.unpackage(data)
-                    wrapped_data = TaggedData(websocket.path, data)
+                    wrapped_data = TaggedData(path, data)
 
                     super().on_next(wrapped_data)
 
@@ -432,7 +454,7 @@ class RxWSClient(Subject):
         self.ping_timeout = ping_timeout
 
         self.queue = asyncio.Queue()
-        self.ws: Optional[websockets.WebSocketClientProtocol] = None
+        self.ws: Optional[ClientConnection] = None
 
         self.conn_retry_timeout = conn_retry_timeout
 
