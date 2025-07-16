@@ -9,7 +9,7 @@ from .audio import (  # noqa: F401
 )
 from .cli import from_cli  # noqa: F401
 from .duplex import Duplex, connect_adapter, make_duplex  # noqa: F401
-from .graphic import create_screen_capture, rgb_to_jpeg  # noqa: F401
+from .graphic import create_screen_capture, rgb_ndarray_to_jpeg_bytes, jpeg_bytes_to_rgb_ndarray  # noqa: F401
 from .logging import (  # noqa: F401
     LOG_LEVEL,
     EmptyLogComp,
@@ -73,5 +73,6 @@ __all__ = [
 
     # graphic
     "create_screen_capture",
-    "rgb_to_jpeg",
+    "rgb_ndarray_to_jpeg_bytes",
+    "jpeg_bytes_to_rgb_ndarray",
 ]

@@ -28,7 +28,7 @@ def build_parser(subparsers: argparse._SubParsersAction):
 
 def task(parsed_args: argparse.Namespace):
 
-    async def test_microphone_server():
+    async def test_wavfile_server():
 
         sender = RxWSServer(
             {
@@ -57,16 +57,13 @@ def task(parsed_args: argparse.Namespace):
             ops.repeat()
         )
 
-        sender.subscribe()
-
         # create the source
         wavfile.subscribe(data)
 
-        while True:
-            await asyncio.sleep(1)
+        await asyncio.Event().wait()  # run forever
 
     try:
-        asyncio.run(test_microphone_server())
+        asyncio.run(test_wavfile_server())
         
     except KeyboardInterrupt:
         print("\nKeyboard Interrupt.")

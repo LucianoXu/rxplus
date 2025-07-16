@@ -37,15 +37,19 @@ if __name__ == '__main__':
 
     from tasks import task_wavfile_server
     task_wavfile_server.build_parser(subparsers)
-    # ./main wavfile_server --path=resources/record.wav --format=Float32 --sr=48000 --ch=1
+    # ./main wavfile_server --path=resources/ranko.wav --format=Float32 --sr=48000 --ch=1
     
     from tasks import task_wavfile_client
     task_wavfile_client.build_parser(subparsers)
     # ./main wavfile_client --path=resources/output.wav --format=Float32 --sr=48000 --ch=1
 
-    from tasks import task_screen_capture
-    task_screen_capture.build_parser(subparsers)
-    # ./main screen_capture --fps=10.0
+    from tasks import task_screen_capture_server
+    task_screen_capture_server.build_parser(subparsers)
+    # ./main screen_capture_server --fps=10.0
+
+    from tasks import task_jpeg_client
+    task_jpeg_client.build_parser(subparsers)
+    # ./main jpeg_client
 
     # Parse arguments
     args = parser.parse_args()

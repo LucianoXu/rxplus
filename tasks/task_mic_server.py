@@ -48,8 +48,7 @@ def task(parsed_args: argparse.Namespace):
 
         sender.pipe(log_filter()).subscribe(print)
 
-        while True:
-            await asyncio.sleep(1)
+        await asyncio.Event().wait()  # run forever
 
     try:
         asyncio.run(test_microphone_server())
