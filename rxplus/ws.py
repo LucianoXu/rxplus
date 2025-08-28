@@ -79,7 +79,32 @@ class WSBytes(WSDatatype):
         return bytes(value)
 
 
-def wsdt_factory(datatype: Literal["string", "bytes"]) -> WSDatatype:
+class WSObject(WSDatatype):
+
+    def package_type_check(self, value) -> None:
+        # Accept any pickleable object; validation occurs in package().
+        pass
+
+    def package(self, value):
+        try:
+            return pickle.dumps(value)
+        except Exception as e:
+            raise TypeError(
+                f"WSObject cannot pickle value of type {type(value)}: {e}"
+            )
+
+    def unpackage(self, value):
+        if isinstance(value, str):
+            raise TypeError(
+                f"WSObject expects binary frame (bytes); got text frame: {value!r}"
+            )
+        try:
+            return pickle.loads(value)
+        except Exception as e:
+            raise TypeError(f"WSObject failed to unpickle payload: {e}")
+
+
+def wsdt_factory(datatype: Literal["string", "bytes", "object"]) -> WSDatatype:
     """
     Factory function to create a WSDatatype instance based on the datatype parameter.
     """
@@ -87,6 +112,8 @@ def wsdt_factory(datatype: Literal["string", "bytes"]) -> WSDatatype:
         return WSStr()
     elif datatype == "bytes":
         return WSBytes()
+    elif datatype == "object":
+        return WSObject()
     else:
         raise ValueError(f"Unsupported datatype '{datatype}'.")
 
@@ -105,7 +132,7 @@ class WS_Channels:
     The class to manage the websocket channels of the same path.
     """
 
-    def __init__(self, datatype: Literal["string", "bytes"] = "string"):
+    def __init__(self, datatype: Literal["string", "bytes", "object"] = "string"):
         self.adapter: WSDatatype = wsdt_factory(datatype)
         self.channels: set[ServerConnection] = set()
         self.queues: set[asyncio.Queue] = set()
@@ -132,7 +159,8 @@ class RxWSServer(Subject):
         logcomp: Optional[LogComp] = None,
         recv_timeout: float = 0.001,
         datatype: (
-            Callable[[str], Literal["string", "bytes"]] | Literal["string", "bytes"]
+            Callable[[str], Literal["string", "bytes", "object"]]
+            | Literal["string", "bytes", "object"]
         ) = "string",
         ping_interval: Optional[int] = 20,
         ping_timeout: Optional[int] = 20,
@@ -153,14 +181,14 @@ class RxWSServer(Subject):
         self.recv_timeout = recv_timeout
 
         # the function to determine the datatype of the path
-        self.datatype_func: Callable[[str], Literal["string", "bytes"]]
-        if datatype in ["string", "bytes"]:
+        self.datatype_func: Callable[[str], Literal["string", "bytes", "object"]]
+        if datatype in ["string", "bytes", "object"]:
             self.datatype_func = lambda path: datatype  # type: ignore
         elif callable(datatype):
             self.datatype_func = datatype
         else:
             raise ValueError(
-                f"Unsupported datatype '{datatype}'. Expected 'string', 'bytes', or a callable function."
+                f"Unsupported datatype '{datatype}'. Expected 'string', 'bytes', 'object', or a callable function."
             )
 
         self.ping_interval = ping_interval
@@ -372,8 +400,8 @@ class RxWSClient(Subject):
     * **Back‑pressure friendly** – outbound messages are buffered in an
       ``asyncio.Queue`` while the socket is unavailable.
     * **Typed frames** – payloads are (de)serialized by a ``WSDatatype``
-      adapter chosen via the ``datatype`` argument (``"string"`` or
-      ``"bytes"``).
+      adapter chosen via the ``datatype`` argument (``"string"``,
+      ``"bytes"``, or ``"object"`` for pickled Python objects).
 
     Typical Usage
     -------------
@@ -398,7 +426,7 @@ class RxWSClient(Subject):
     recv_timeout : float
         Seconds to wait for incoming data before yielding control to the event
         loop.
-    datatype : Literal["string", "bytes"]
+    datatype : Literal["string", "bytes", "object"]
         Frame representation handled by :func:`wsdt_factory`.
     conn_retry_timeout : float
         Delay between automatic reconnection attempts in seconds.
@@ -418,7 +446,7 @@ class RxWSClient(Subject):
         conn_cfg: dict,
         logcomp: Optional[LogComp] = None,
         recv_timeout: float = 0.001,
-        datatype: Literal["string", "bytes"] = "string",
+        datatype: Literal["string", "bytes", "object"] = "string",
         conn_retry_timeout: float = 0.5,
         ping_interval: Optional[int] = 20,
         ping_timeout: Optional[int] = 20,
@@ -691,7 +719,8 @@ class RxWSClientGroup(Subject):
         logcomp: Optional[LogComp] = None,
         recv_timeout: float = 0.001,
         datatype: (
-            Callable[[str], Literal["string", "bytes"]] | Literal["string", "bytes"]
+            Callable[[str], Literal["string", "bytes", "object"]]
+            | Literal["string", "bytes", "object"]
         ) = "string",
         conn_retry_timeout: float = 0.5,
         ping_interval: Optional[int] = 20,
@@ -699,14 +728,14 @@ class RxWSClientGroup(Subject):
     ):
         super().__init__()
 
-        self.datatype_func: Callable[[str], Literal["string", "bytes"]]
-        if datatype in ["string", "bytes"]:
+        self.datatype_func: Callable[[str], Literal["string", "bytes", "object"]]
+        if datatype in ["string", "bytes", "object"]:
             self.datatype_func = lambda path: datatype  # type: ignore
         elif callable(datatype):
             self.datatype_func = datatype
         else:
             raise ValueError(
-                f"Unsupported datatype '{datatype}'. Expected 'string', 'bytes', or a callable function."
+                f"Unsupported datatype '{datatype}'. Expected 'string', 'bytes', 'object', or a callable function."
             )
 
         def make_client(path: str) -> RxWSClient:

@@ -51,6 +51,14 @@ if __name__ == '__main__':
     task_jpeg_client.build_parser(subparsers)
     # ./main jpeg_client
 
+    from tasks import task_np_matrix_server
+    task_np_matrix_server.build_parser(subparsers)
+    # ./main np_matrix_server --rows=4 --cols=4 --dtype=float32 --fps=2.0
+
+    from tasks import task_np_matrix_client
+    task_np_matrix_client.build_parser(subparsers)
+    # ./main np_matrix_client --rows=4 --cols=4 --dtype=float32 --tx_fps=1.0
+
     # Parse arguments
     args = parser.parse_args()
     

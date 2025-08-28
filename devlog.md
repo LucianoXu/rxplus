@@ -1,0 +1,1 @@
+- 2025/08/28 Add `WSObject` datatype for websocket components, which allows it to transmit python object directly. Related testing tasks implemented.
