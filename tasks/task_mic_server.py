@@ -1,11 +1,10 @@
 from typing import Literal, get_args
-import asyncio
 import reactivex as rx
-from reactivex.scheduler.eventloop import AsyncIOScheduler
 from reactivex import operators as ops
 
 import argparse
 import pyaudio
+import time
 
 import rxplus
 from rxplus import TaggedData, RxMicrophone, NamedLogComp, log_filter, drop_log, RxWSServer, tag
@@ -24,34 +23,29 @@ def build_parser(subparsers: argparse._SubParsersAction):
     parser.set_defaults(func=task)
 
 def task(parsed_args: argparse.Namespace):
+    sender = RxWSServer(
+        {
+            'host' : parsed_args.host, 
+            'port' : parsed_args.port,
+        }, 
+        logcomp=NamedLogComp("RxWSServer"),
+        datatype='bytes'
+    )
 
-    async def test_microphone_server():
+    mic = RxMicrophone(
+        format = parsed_args.format,
+        sample_rate = parsed_args.sr,
+        channels = parsed_args.ch,
+    )
 
-        sender = RxWSServer(
-            {
-                'host' : parsed_args.host, 
-                'port' : parsed_args.port,
-            }, 
-            logcomp=NamedLogComp("RxWSServer"),
-            datatype='bytes'
-        )
+    mic.pipe(
+        tag("/"),
+    ).subscribe(sender)
 
-        mic = RxMicrophone(
-            format = parsed_args.format,
-            sample_rate = parsed_args.sr,
-            channels = parsed_args.ch,
-        )
-
-        mic.pipe(
-            tag("/"),
-        ).subscribe(sender)
-
-        sender.pipe(log_filter()).subscribe(print)
-
-        await asyncio.Event().wait()  # run forever
+    sender.pipe(log_filter()).subscribe(print)
 
     try:
-        asyncio.run(test_microphone_server())
-        
+        while True:
+            time.sleep(3600)
     except KeyboardInterrupt:
         print("\nKeyboard Interrupt.")

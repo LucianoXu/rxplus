@@ -1,13 +1,10 @@
 from typing import Literal, get_args
 import reactivex as rx
-from reactivex.scheduler.eventloop import AsyncIOScheduler
 from reactivex import Subject
 from reactivex import operators as ops
 import numpy as np
 
 import argparse
-
-import asyncio
 
 import threading
 import time
@@ -28,42 +25,38 @@ def build_parser(subparsers: argparse._SubParsersAction):
 
 def task(parsed_args: argparse.Namespace):
 
-    async def test_wavfile_server():
+    sender = RxWSServer(
+        {
+            'host' : parsed_args.host, 
+            'port' : parsed_args.port,
+        }, 
+        logcomp=NamedLogComp("RxWSServer"),
+        datatype='bytes'
+    )
 
-        sender = RxWSServer(
-            {
-                'host' : parsed_args.host, 
-                'port' : parsed_args.port,
-            }, 
-            logcomp=NamedLogComp("RxWSServer"),
-            datatype='bytes'
-        )
+    # create the network with some cli output
+    data = Subject()
+    data.subscribe(lambda x: print(x[:5]))
 
-        # create the network with some cli output
-        data = Subject()
-        data.subscribe(lambda x: print(x[:5]))
+    data.pipe(
+        tag("/"),
+    ).subscribe(sender)
 
-        data.pipe(
-            tag("/"),
-        ).subscribe(sender)
+    wavfile = create_wavfile(
+        wav_path=parsed_args.path,
+        target_format=parsed_args.format,
+        target_sample_rate=parsed_args.sr,
+        target_channels=parsed_args.ch
+    ).pipe(
+        ops.map(lambda d: d.tobytes()),
+        ops.repeat()
+    )
 
-        wavfile = create_wavfile(
-            wav_path=parsed_args.path,
-            target_format=parsed_args.format,
-            target_sample_rate=parsed_args.sr,
-            target_channels=parsed_args.ch
-        ).pipe(
-            ops.map(lambda d: d.tobytes()),
-            ops.repeat()
-        )
-
-        # create the source
-        wavfile.subscribe(data)
-
-        await asyncio.Event().wait()  # run forever
+    # create the source
+    wavfile.subscribe(data)
 
     try:
-        asyncio.run(test_wavfile_server())
-        
+        while True:
+            time.sleep(3600)
     except KeyboardInterrupt:
         print("\nKeyboard Interrupt.")

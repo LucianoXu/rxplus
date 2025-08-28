@@ -25,110 +25,12 @@ conda install -c conda-forge portaudio
 ```
 
 ## Principles
-About exception handling: normal exceptions will be catched and passed on through `on_error`. The node that generates the error is responsible for annotating the environment of the error and wrapping it using `RxException`.
-Error observed by `on_error` should be handled or passed on directly.
+- About exception handling: normal exceptions will be catched and passed on through `on_error`. The node that generates the error is responsible for annotating the environment of the error and wrapping it using `RxException`.
+- Error observed by `on_error` should be handled or passed on directly.
 
-## Components
+## TODO Next 3
+- Check the code and make sure that error will not be raised in rx nodes, but pushed forward.
 
-### Duplex
 
-The `duplex` module provides a `Duplex` class that represents a bidirectional communication channel. It consists of a `sink` for incoming data and a `stream` for outgoing data, both of which are `reactivex` Subjects.
-
-### Logging
-
-`rxplus` includes a flexible logging framework designed for reactive applications. It allows you to create loggers, filter log messages by level, and redirect logs to different observers.
-
-### Operators
-
-The `opt` module contains custom `reactivex` operators, such as `redirect_to`, which allows you to redirect items in a stream to a different observer based on a condition.
-
-### Utilities
-
-The `utils` module provides various utility functions, including `TaggedData` for wrapping data with a tag and error handling functions.
-
-### WebSocket
-
-The `ws` module offers a reactive wrapper around the `websockets` library, providing `RxWSServer` and `RxWSClient` classes for building real-time, bidirectional WebSocket applications.
-
-### Audio
-
-The `audio` module contains helpers for working with sound. `RxMicrophone` and
-`RxSpeaker` stream audio from the microphone or to the speaker. The
-`create_wavfile` observable loads a WAV file chunk by chunk, while the
-`save_wavfile` observer makes it easy to record audio streams.
-
-### CLI
-
-The `cli` module provides the `from_cli` operator, which creates an observable that emits strings from the command-line interface. This is useful for creating interactive command-line applications.
-
-## Usage
-
-Here is a simple example of how to use the WebSocket component in `rxplus`:
-
-### Server
-
-```python
-import asyncio
-from rxplus.ws import RxWSServer, NamedLogComp
-
-async def main():
-    server = RxWSServer(
-        {
-            'host': '0.0.0.0',
-            'port': 8888,
-        },
-        logcomp=NamedLogComp("RxWSServer"),
-        datatype='string'
-    )
-    server.subscribe(print)
-
-    i = 0
-    while True:
-        await asyncio.sleep(1)
-        server.on_next("Hello " + str(i))
-        i += 1
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nKeyboard Interrupt.")
-```
-
-### Client
-
-```python
-import asyncio
-from rxplus.ws import RxWSClient, NamedLogComp
-
-async def main():
-    client = RxWSClient(
-        {
-            'host': 'localhost',
-            'port': 8888,
-            'path': '/',
-        },
-        logcomp=NamedLogComp("RxWSClient"),
-        datatype='string'
-    )
-    client.subscribe(print, on_error=print)
-
-    i = 0
-    while True:
-        await asyncio.sleep(0.5)
-        client.on_next("Ping " + str(i))
-        i += 1
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nKeyboard Interrupt.")
-```
-
-### Development
-
+## Development
 Run the test suite with `pytest` after installing the optional `dev` dependencies.
-
-### TODO
-Check the code and make sure that error will not be raised in rx nodes, but pushed forward.

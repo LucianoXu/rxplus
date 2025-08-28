@@ -1,11 +1,10 @@
 from typing import Literal, get_args
-import asyncio
 import reactivex as rx
-from reactivex.scheduler.eventloop import AsyncIOScheduler
 from reactivex import operators as ops
 import pyaudio
 
 import argparse
+import time
 
 import rxplus
 from rxplus import RxSpeaker, NamedLogComp, log_filter, drop_log, RxWSClient
@@ -21,36 +20,31 @@ def build_parser(subparsers: argparse._SubParsersAction):
     parser.set_defaults(func=task)
 
 def task(parsed_args: argparse.Namespace):
+    client = RxWSClient(
+        {
+            'host' : parsed_args.host, 
+            'port' : parsed_args.port,
+        }, 
+        logcomp=NamedLogComp("RxWSClient"),
+        datatype='bytes'
+    )
 
-    async def test_speaker_client():
+    speaker = RxSpeaker(
+        format = parsed_args.format,
+        sample_rate = parsed_args.sr,
+        channels=parsed_args.ch,
+    )
 
-        client = RxWSClient(
-            {
-                'host' : parsed_args.host, 
-                'port' : parsed_args.port,
-            }, 
-            logcomp=NamedLogComp("RxWSClient"),
-            datatype='bytes'
-        )
+    client.pipe(
+        log_filter()
+    ).subscribe(print)
 
-        speaker = RxSpeaker(
-            format = parsed_args.format,
-            sample_rate = parsed_args.sr,
-            channels=parsed_args.ch,
-        )
-
-        client.pipe(
-            log_filter()
-        ).subscribe(print)
-
-        client.pipe(
-            drop_log()
-        ).subscribe(speaker)
-
-        await asyncio.Event().wait()  # run forever
+    client.pipe(
+        drop_log()
+    ).subscribe(speaker)
 
     try:
-        asyncio.run(test_speaker_client())
-        
+        while True:
+            time.sleep(3600)
     except KeyboardInterrupt:
         print("\nKeyboard Interrupt.")

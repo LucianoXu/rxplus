@@ -1,15 +1,7 @@
-import asyncio
-import reactivex as rx
-from reactivex.scheduler.eventloop import AsyncIOScheduler
-from reactivex import operators as ops
-
-from rxplus.ws import *
-
 import argparse
+import time
 
-import asyncio
-
-from rxplus import RxWSClientGroup, NamedLogComp, drop_log
+from rxplus import RxWSClientGroup, NamedLogComp, TaggedData
 
 
 def build_parser(subparsers: argparse._SubParsersAction):
@@ -20,27 +12,21 @@ def build_parser(subparsers: argparse._SubParsersAction):
     parser.set_defaults(func=task)
 
 def task(parsed_args: argparse.Namespace):
+    receiver = RxWSClientGroup(
+        {
+            'host' : parsed_args.host, 
+            'port' : parsed_args.port,
+        },
+        logcomp=NamedLogComp("RxWSReceiver"),
+        datatype='string')
+    
+    receiver.subscribe(print, on_error=print)
 
-    async def test_rxws_C():
-        receiver = RxWSClientGroup(
-            {
-                'host' : parsed_args.host, 
-                'port' : parsed_args.port,
-            },
-            logcomp=NamedLogComp("RxWSReceiver"),
-            datatype='string')
-        
-        receiver.subscribe(print, on_error=print)
-
-        i = 0
-        while True:
-            await asyncio.sleep(0.5)
-            receiver.on_next(TaggedData(parsed_args.path, "Ping " + str(i)))
-            i += 1
-
+    i = 0
     try:
-        asyncio.run(test_rxws_C())
-
+        while True:
+            time.sleep(0.5)
+            receiver.on_next(TaggedData(parsed_args.path, f"Ping {i}"))
+            i += 1
     except KeyboardInterrupt:
         print("\nKeyboard Interrupt.")
-

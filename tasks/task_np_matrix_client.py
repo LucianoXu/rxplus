@@ -1,6 +1,6 @@
 import argparse
-import asyncio
 import numpy as np
+import time
 
 from rxplus import RxWSClient, NamedLogComp
 
@@ -26,42 +26,40 @@ def build_parser(subparsers: argparse._SubParsersAction):
 
 
 def task(parsed_args: argparse.Namespace):
-    async def run_client():
-        client = RxWSClient(
-            {
-                "host": parsed_args.host,
-                "port": parsed_args.port,
-                "path": parsed_args.path,
-            },
-            logcomp=NamedLogComp("NPMatrixClient"),
-            datatype="object",
-        )
+    client = RxWSClient(
+        {
+            "host": parsed_args.host,
+            "port": parsed_args.port,
+            "path": parsed_args.path,
+        },
+        logcomp=NamedLogComp("NPMatrixClient"),
+        datatype="object",
+    )
 
-        # Print inbound matrices
-        def on_next(arr):
-            if isinstance(arr, np.ndarray):
-                print(f"Received array shape={arr.shape} dtype={arr.dtype} sum={arr.sum():.3f}")
-            else:
-                print(f"Received (non-ndarray): {type(arr)} -> {arr}")
+    # Print inbound matrices
+    def on_next(arr):
+        if isinstance(arr, np.ndarray):
+            print(f"Received array shape={arr.shape} dtype={arr.dtype} sum={arr.sum():.3f}")
+        else:
+            print(f"Received (non-ndarray): {type(arr)} -> {arr}")
 
-        client.subscribe(on_next, on_error=print)
+    client.subscribe(on_next, on_error=print)
 
-        # Periodically transmit matrices to the server as a demo
-        rng = np.random.default_rng(parsed_args.seed)
-        dt = 1.0 / max(parsed_args.tx_fps, 1e-6)
-        rows, cols = parsed_args.rows, parsed_args.cols
-        dtype = np.dtype(parsed_args.dtype)
+    # Periodically transmit matrices to the server as a demo
+    rng = np.random.default_rng(parsed_args.seed)
+    dt = 1.0 / max(parsed_args.tx_fps, 1e-6)
+    rows, cols = parsed_args.rows, parsed_args.cols
+    dtype = np.dtype(parsed_args.dtype)
 
+
+    try:    
         while True:
-            await asyncio.sleep(dt)
+            time.sleep(dt)
             if np.issubdtype(dtype, np.floating):
                 arr = rng.random((rows, cols), dtype=dtype)
             else:
                 arr = rng.integers(low=0, high=100, size=(rows, cols), dtype=dtype)
             client.on_next(arr)
-
-    try:
-        asyncio.run(run_client())
+            
     except KeyboardInterrupt:
         print("\nKeyboard Interrupt.")
-

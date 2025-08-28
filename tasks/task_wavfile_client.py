@@ -1,12 +1,10 @@
 from typing import Literal, get_args
 import reactivex as rx
-from reactivex.scheduler.eventloop import AsyncIOScheduler
 from reactivex import Subject
 from reactivex import operators as ops
 import numpy as np
 import argparse
-
-import asyncio
+import time
 
 import rxplus
 from rxplus import save_wavfile, NamedLogComp, drop_log, RxWSClient
@@ -24,35 +22,28 @@ def build_parser(subparsers: argparse._SubParsersAction):
     parser.set_defaults(func=task)
 
 def task(parsed_args: argparse.Namespace):
+    client = RxWSClient(
+        {
+            'host' : parsed_args.host, 
+            'port' : parsed_args.port,
+        }, 
+        logcomp=NamedLogComp("RxWSClient"),
+        datatype='bytes'
+    )
 
-    async def test_wavfile_client():
+    wavfile = save_wavfile(
+        path=parsed_args.path,
+        format=parsed_args.format,
+        sample_rate=parsed_args.sr,
+        channels=parsed_args.ch
+    )
 
-        client = RxWSClient(
-            {
-                'host' : parsed_args.host, 
-                'port' : parsed_args.port,
-            }, 
-            logcomp=NamedLogComp("RxWSClient"),
-            datatype='bytes'
-        )
-
-        
-        wavfile = save_wavfile(
-            path=parsed_args.path,
-            format=parsed_args.format,
-            sample_rate=parsed_args.sr,
-            channels=parsed_args.ch
-        )
-
-        # create the network
-        client.pipe(rxplus.log_filter()).subscribe(print)
-
-        client.pipe(drop_log()).subscribe(wavfile)
-
-        await asyncio.Event().wait()  # run forever
+    # create the network
+    client.pipe(rxplus.log_filter()).subscribe(print)
+    client.pipe(drop_log()).subscribe(wavfile)
 
     try:
-        asyncio.run(test_wavfile_client())
-        
+        while True:
+            time.sleep(3600)
     except KeyboardInterrupt:
         print("\nKeyboard Interrupt.")

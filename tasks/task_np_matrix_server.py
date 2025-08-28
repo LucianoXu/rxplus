@@ -1,6 +1,6 @@
 import argparse
-import asyncio
 from typing import Optional
+import time
 
 import numpy as np
 
@@ -37,30 +37,29 @@ def _make_random_matrix(rng: np.random.Generator, rows: int, cols: int, dtype: n
 
 
 def task(parsed_args: argparse.Namespace):
-    async def run_server():
-        sender = RxWSServer(
-            {
-                "host": parsed_args.host,
-                "port": parsed_args.port,
-            },
-            logcomp=NamedLogComp("NPMatrixServer"),
-            datatype="object",
-        )
 
-        # Log inbound messages from clients (if any)
-        sender.subscribe(lambda t: print(t))
+    sender = RxWSServer(
+        {
+            "host": parsed_args.host,
+            "port": parsed_args.port,
+        },
+        logcomp=NamedLogComp("NPMatrixServer"),
+        datatype="object",
+    )
 
-        rng = np.random.default_rng(parsed_args.seed)
-        dt = 1.0 / max(parsed_args.fps, 1e-6)
-        rows, cols = parsed_args.rows, parsed_args.cols
-        dtype = np.dtype(parsed_args.dtype)
+    # Log inbound messages from clients (if any)
+    sender.subscribe(lambda t: print(t))
 
+    rng = np.random.default_rng(parsed_args.seed)
+    dt = 1.0 / max(parsed_args.fps, 1e-6)
+    rows, cols = parsed_args.rows, parsed_args.cols
+    dtype = np.dtype(parsed_args.dtype)
+
+    try:
         while True:
-            await asyncio.sleep(dt)
+            time.sleep(dt)
             arr = _make_random_matrix(rng, rows, cols, dtype)
             sender.on_next(TaggedData(parsed_args.path, arr))
 
-    try:
-        asyncio.run(run_server())
     except KeyboardInterrupt:
         print("\nKeyboard Interrupt.")
