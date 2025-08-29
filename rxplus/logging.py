@@ -103,7 +103,7 @@ class LogComp(ABC):
     """
 
     @abstractmethod
-    def set_super(self, obs: Observer): ...
+    def set_super(self, obs: rx.abc.ObserverBase): ...
 
     @abstractmethod
     def log(self, msg: Any, level: LOG_LEVEL = "INFO"): ...
@@ -113,7 +113,7 @@ class LogComp(ABC):
 
 
 class EmptyLogComp(LogComp):
-    def set_super(self, obs: Observer):
+    def set_super(self, obs: rx.abc.ObserverBase):
         pass
 
     def log(self, msg: Any, level: LOG_LEVEL = "INFO"):
@@ -126,9 +126,9 @@ class EmptyLogComp(LogComp):
 class NamedLogComp(LogComp):
     def __init__(self, name: str = "LogSource"):
         self.name = name
-        self.super_obs: Optional[Observer] = None
+        self.super_obs: Optional[rx.abc.ObserverBase] = None
 
-    def set_super(self, obs: Observer):
+    def set_super(self, obs: rx.abc.ObserverBase):
         """
         Set the super observer to redirect the log messages.
         """
