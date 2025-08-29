@@ -60,21 +60,27 @@ def drop_log():
 
 
 def log_redirect_to(
-    log_observer: Observer,
+    log_observer: Observer|Callable,
     levels: set[LOG_LEVEL] = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"},
 ):
     """
-    The operator redirect the log items to the specified observer, and forward other items.
+    The operator redirect the log items to the specified observer (or function), and forward other items.
     The log items outside the specifed levels are ignored.
     """
 
     def _log_redirect_to(source):
         def subscribe(observer, scheduler=None):
 
+            # Determine the redirection function
+            if isinstance(log_observer, Observer):
+                redirect_fun = log_observer.on_next
+            else:
+                redirect_fun = log_observer
+
             def on_next(value: Any) -> None:
                 if isinstance(value, LogItem):
                     if value.level in levels:
-                        log_observer.on_next(value)
+                        redirect_fun(value)
 
                 else:
                     observer.on_next(value)
