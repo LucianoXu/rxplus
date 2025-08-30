@@ -182,8 +182,8 @@ class RxWSServer(Subject):
             Callable[[str], Literal["string", "bytes", "object"]]
             | Literal["string", "bytes", "object"]
         ) = "string",
-        ping_interval: Optional[int] = 20,
-        ping_timeout: Optional[int] = 20,
+        ping_interval: Optional[float] = 30.0,
+        ping_timeout: Optional[float] = 30.0,
     ):
         """Initialize the WebSocket server and start listening."""
         super().__init__()
@@ -480,7 +480,7 @@ class RxWSClient(Subject):
         Frame representation handled by :func:`wsdt_factory`.
     conn_retry_timeout : float
         Delay between automatic reconnection attempts in seconds.
-    ping_interval, ping_timeout : int | None
+    ping_interval, ping_timeout : float | None
         Values forwarded to :pyfunc:`websockets.connect` for heartbeat
         management.
 
@@ -498,8 +498,8 @@ class RxWSClient(Subject):
         recv_timeout: float = 0.001,
         datatype: Literal["string", "bytes", "object"] = "string",
         conn_retry_timeout: float = 0.5,
-        ping_interval: Optional[int] = 20,
-        ping_timeout: Optional[int] = 20,
+        ping_interval: Optional[float] = 30.0,
+        ping_timeout: Optional[float] = 30.0,
     ):
         """Create a reconnecting WebSocket client."""
         super().__init__()
@@ -802,8 +802,8 @@ class RxWSClientGroup(Subject):
             | Literal["string", "bytes", "object"]
         ) = "string",
         conn_retry_timeout: float = 0.5,
-        ping_interval: Optional[int] = 20,
-        ping_timeout: Optional[int] = 20,
+        ping_interval: Optional[float] = 30.0,
+        ping_timeout: Optional[float] = 30.0,
     ):
         super().__init__()
 
