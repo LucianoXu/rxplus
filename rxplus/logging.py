@@ -159,18 +159,12 @@ class Logger(Subject):
     The log file will be created when the first log item is received.
     """
 
-    def __init__(self, logcomp: Optional[LogComp] = None, logfile_prefix: str = "log"):
+    def __init__(self, logfile_prefix: str = "log"):
         super().__init__()
         self.logfile_prefix = logfile_prefix + time.strftime(
             "_%Y%m%d_%H%M%S", time.gmtime()
         )
 
-        if logcomp is None:
-            self.logcomp = EmptyLogComp()
-        else:
-            self.logcomp = logcomp
-
-        self.logcomp.set_super(super())
         self.pfile = None
 
     def on_next(self, value: Any) -> None:
@@ -180,10 +174,9 @@ class Logger(Subject):
                     # ensure the folder exists
                     dir = os.path.dirname(self.logfile_prefix)
                     if dir:
-                        os.makedirs(os.path.dirname(self.logfile_prefix), exist_ok=True)
+                        os.makedirs(dir, exist_ok=True)
 
                     self.pfile = open(f"{self.logfile_prefix}.log", "a")
-                    self.pfile.write("\n")
 
                 self.pfile.write(str(value))
                 self.pfile.flush()
@@ -207,4 +200,3 @@ class Logger(Subject):
 
         # log the error
         self.on_next(logitem)
-        super().on_error(error)
