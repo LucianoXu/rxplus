@@ -138,7 +138,7 @@ class NamedLogComp(LogComp):
         """
         Log a message with the specified level.
         """
-        log_item = LogItem(self.name + ": " + msg, level, self.name)
+        log_item = LogItem(msg, level, self.name)
         if self.super_obs is None:
             raise Exception("Super observer is not set. Please call set_super() first.")
         self.super_obs.on_next(log_item)
