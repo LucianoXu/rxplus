@@ -191,10 +191,7 @@ class RxWSServer(Subject):
         self.port = int(conn_cfg["port"])
 
         # setup the log source
-        if logcomp is None:
-            logcomp = EmptyLogComp()
-
-        self.logcomp = logcomp
+        self.logcomp = logcomp or EmptyLogComp()
         self.logcomp.set_super(super())
 
         # Store connected clients
@@ -511,10 +508,7 @@ class RxWSClient(Subject):
         self.recv_timeout = recv_timeout
 
         # setup the log source
-        if logcomp is None:
-            logcomp = EmptyLogComp()
-
-        self.logcomp = logcomp
+        self.logcomp = logcomp or EmptyLogComp()
         self.logcomp.set_super(super())
 
         self.datatype = datatype
