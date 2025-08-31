@@ -72,7 +72,7 @@ def log_redirect_to(
         def subscribe(observer, scheduler=None):
 
             # Determine the redirection function
-            if isinstance(log_observer, Observer):
+            if isinstance(log_observer, rx.abc.ObserverBase):
                 redirect_fun = log_observer.on_next
             else:
                 redirect_fun = log_observer
