@@ -1,3 +1,4 @@
+- 2025-09-01 Updated `Logger` to be multi-process safe.
 - 2025-08-29 `log_redirect_to` now support functions like `print` as the observer.
 - 2025-08-28 Update websocket components to use multi-thread.
 - 2025-08-28 Add `WSObject` datatype for websocket components, which allows it to transmit python object directly. Related testing tasks implemented.

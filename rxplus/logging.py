@@ -1,5 +1,7 @@
 import os
 import time
+import errno
+from contextlib import contextmanager
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Literal, Optional
 
@@ -152,34 +154,137 @@ class NamedLogComp(LogComp):
 
 class Logger(Subject):
     """
-    Logger is a subject, filter and redirect logging items forward. The typical usage is to be subscribed by `print` method.
+    Logger is a Subject that filters, records, and forwards LogItem entries.
 
-    The logger is not an observer, because it cannot be the terminal of handling errors. It will record the errors and forward them to the subscribers.
+    Behavior
+    - Writes logs to a file when `logfile` is provided, which is lazily created on
+      the first log item.
+    - Forwards LogItem instances to its subscribers; non‑log items pass through
+      unchanged via the stream where applicable.
+    - Conceptually not a terminal observer: errors are recorded as LogItem and
+      forwarded rather than terminating the stream.
+    - Never completes (`on_completed` is a no‑op).
 
-    The log file will be created when the first log item is received.
+    Concurrency and file locking
+    - Supports multiple processes writing to the same log file by serializing
+      writes. Acquires an exclusive cross‑process lock before writing:
+        * Uses `fcntl.flock` on POSIX platforms when available.
+        * Falls back to a lockfile (`.lock`) created with `O_EXCL` and retries
+          until acquired or a timeout occurs.
+    - The locking ensures atomic append segments and prevents open/write races
+      across processes.
+
+    Parameters
+    - logfile: Optional[str]
+        If provided, enables file logging and sets the log file path.
+    - lock_timeout: float, default 10.0
+        Maximum time to wait when acquiring the lock in the fallback mode.
+    - lock_poll_interval: float, default 0.05
+        Sleep interval between retries when waiting for the lock.
     """
 
-    def __init__(self, logfile_prefix: str = "log"):
+    def __init__(self, logfile: Optional[str] = None, *, lock_timeout: float = 10.0, lock_poll_interval: float = 0.05):
         super().__init__()
-        self.logfile_prefix = logfile_prefix + time.strftime(
-            "_%Y%m%d_%H%M%S", time.gmtime()
-        )
+        self.logfile = logfile
 
         self.pfile = None
+        self._lock_timeout = lock_timeout
+        self._lock_poll_interval = lock_poll_interval
+
+    def _lock_path(self) -> Optional[str]:
+        if self.logfile is None:
+            return None
+        return f"{self.logfile}.lock"
+
+    @contextmanager
+    def _acquire_lock(self):
+        """
+        Cross-process file lock with waiting. Uses fcntl if available,
+        otherwise falls back to a lockfile with exclusive create + retry.
+        """
+        lock_path = self._lock_path()
+        if lock_path is None:
+            # No file logging, no locking needed
+            yield
+            return
+
+        # Try fcntl-based advisory lock first (POSIX)
+        try:
+            import fcntl  # type: ignore
+
+            # Ensure directory exists for lock file as well
+            dir = os.path.dirname(lock_path)
+            if dir:
+                os.makedirs(dir, exist_ok=True)
+
+            f = open(lock_path, "a+")
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                yield
+            finally:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                finally:
+                    f.close()
+            return
+        except Exception:
+            # Fall back to portable lockfile with O_EXCL
+            pass
+
+        # Fallback: spin on exclusive create of lock file, then unlink
+        start = time.time()
+        fd = None
+        try:
+            while True:
+                try:
+                    # Ensure directory exists
+                    dir = os.path.dirname(lock_path)
+                    if dir:
+                        os.makedirs(dir, exist_ok=True)
+                    fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                    break
+                except OSError as e:
+                    if e.errno == errno.EEXIST:
+                        if time.time() - start > self._lock_timeout:
+                            raise TimeoutError(f"Timeout acquiring log lock: {lock_path}")
+                        time.sleep(self._lock_poll_interval)
+                        continue
+                    else:
+                        raise
+
+            yield
+            
+        except Exception as e:
+            print(e)
+
+        finally:
+            try:
+                if fd is not None:
+                    os.close(fd)
+                if os.path.exists(lock_path):
+                    os.unlink(lock_path)
+            except Exception:
+                # Best-effort cleanup; avoid raising from contextmanager
+                pass
 
     def on_next(self, value: Any) -> None:
         if isinstance(value, LogItem):
             try:
-                if self.pfile is None or self.pfile.closed:
-                    # ensure the folder exists
-                    dir = os.path.dirname(self.logfile_prefix)
-                    if dir:
-                        os.makedirs(dir, exist_ok=True)
+                if self.logfile is not None:
+                    # Serialize writes across processes
+                    with self._acquire_lock():
+                        if self.pfile is None or self.pfile.closed:
+                            # ensure the folder exists
+                            dir = os.path.dirname(self.logfile)
+                            if dir:
+                                os.makedirs(dir, exist_ok=True)
 
-                    self.pfile = open(f"{self.logfile_prefix}.log", "a")
+                            self.pfile = open(f"{self.logfile}", "a")
+                            self.pfile.write("\n")
 
-                self.pfile.write(str(value))
-                self.pfile.flush()
+                        self.pfile.write(str(value))
+                        self.pfile.flush()
+
                 super().on_next(value)
 
             except Exception as e:
