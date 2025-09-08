@@ -23,7 +23,7 @@ from .logging import (  # noqa: F401
     log_redirect_to,
 )
 from .mechanism import RxException  # noqa: F401
-from .opt import redirect_to, stream_print_out  # noqa: F401
+from .opt import redirect_to, stream_print_out, ErrorRestartSignal, retry_with_signal  # noqa: F401
 from .utils import TaggedData, tag, tag_filter, untag, FPSMonitor, BandwidthMonitor  # noqa: F401
 from .ws import RxWSClient, RxWSClientGroup, RxWSServer, WSDatatype, WSStr  # noqa: F401
 
@@ -48,6 +48,8 @@ __all__ = [
     "Logger",
     "stream_print_out",
     "redirect_to",
+    "ErrorRestartSignal",
+    "retry_with_signal",
 
     # WebSocket
     "WSDatatype",
