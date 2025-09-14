@@ -1,11 +1,11 @@
 """Utility helpers used across ``rxplus`` modules."""
 
 import traceback
-from typing import Any
+from typing import Any, Callable
 
 import time
 
-from reactivex import operators as ops
+from reactivex import operators as ops, Observable
 
 
 class TaggedData:
@@ -28,20 +28,20 @@ class TaggedData:
         return f"(tag={self.tag}, {str(self.data)})"
 
 
-def untag():
+def untag() -> Callable[[Observable[TaggedData]], Observable[Any]]:
     """Return an operator that extracts the ``data`` attribute."""
 
     return ops.map(lambda x: x.data)  # type: ignore
 
 
-def tag(tag: str):
+def tag(tag: str) -> Callable[[Observable[Any]], Observable[TaggedData]]:
     """Return an operator that wraps items in :class:`TaggedData`."""
 
     return ops.map(lambda x: TaggedData(tag, x))
 
 
-def tag_filter(tag: str):
-    """Return an operator that filters ``TaggedData`` by ``tag``."""
+def tag_filter(tag: str) -> Callable[[Observable[Any]], Observable[TaggedData]]:
+    """Return an operator that filters ``TaggedData`` by ``tag``. It will drop non-``TaggedData`` items."""
 
     return ops.filter(lambda x: isinstance(x, TaggedData) and x.tag == tag)
 
