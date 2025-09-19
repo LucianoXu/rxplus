@@ -13,18 +13,12 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Literal, Optional
-import queue as _q
 
 import reactivex as rx
 import websockets
 
-# Compat helpers for newer websockets API (types may vary across versions)
-try:  # pragma: no cover - typing convenience
-    from websockets import ClientConnection, Server, ServerConnection  # type: ignore
-except Exception:  # pragma: no cover - very old/new versions
-    ClientConnection = object  # type: ignore
-    Server = object  # type: ignore
-    ServerConnection = object  # type: ignore
+
+from websockets import ClientConnection, Server, ServerConnection
 
 from reactivex import Observable, Observer, Subject, create
 from reactivex import operators as ops
@@ -177,7 +171,6 @@ class RxWSServer(Subject):
         self,
         conn_cfg: dict,
         logcomp: Optional[LogComp] = None,
-        recv_timeout: float = 0.001,
         datatype: (
             Callable[[str], Literal["string", "bytes", "object"]]
             | Literal["string", "bytes", "object"]
@@ -195,7 +188,6 @@ class RxWSServer(Subject):
         self.logcomp.set_super(super())
 
         # Store connected clients
-        self.recv_timeout = recv_timeout
 
         # the function to determine the datatype of the path
         self.datatype_func: Callable[[str], Literal["string", "bytes", "object"]]
@@ -216,6 +208,7 @@ class RxWSServer(Subject):
         # Private asyncio loop in a background thread
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
+        self._loop_ready = threading.Event()
         self._stop_flag = threading.Event()
 
         self.serve: Optional[Server] = None
@@ -253,8 +246,26 @@ class RxWSServer(Subject):
         ws_channels.adapter.package_type_check(data)
 
         # push the data
+        if not self._loop_ready.wait(timeout=5.0):
+            rx_exception = self.logcomp.get_rx_exception(
+                RuntimeError("Server event loop failed to start"),
+                note="RxWSServer.on_next",
+            )
+            super().on_error(rx_exception)
+            return
+
+        loop = self._loop
+        if loop is None:
+            # Should not happen because _loop_ready is set when loop is created.
+            rx_exception = self.logcomp.get_rx_exception(
+                RuntimeError("Server event loop not available"),
+                note="RxWSServer.on_next",
+            )
+            super().on_error(rx_exception)
+            return
+
         for queue in ws_channels.queues:
-            queue.put_nowait(data)
+            loop.call_soon_threadsafe(queue.put_nowait, data)
 
     def on_error(self, error):
         """Forward errors to subscribers."""
@@ -275,78 +286,32 @@ class RxWSServer(Subject):
         try:
             ws_channels = self._get_path_channels(path)
 
-            # Use a standard queue for cross-thread communication with on_next
-            queue: _q.Queue[Any] = _q.Queue()
+            queue: asyncio.Queue[Any] = asyncio.Queue()
 
             # Register client
             ws_channels.channels.add(websocket)
             ws_channels.queues.add(queue)
 
-            # the connection information is received
+            sender_task = asyncio.create_task(
+                self._server_sender(queue, websocket, ws_channels.adapter, remote_desc)
+            )
+            receiver_task = asyncio.create_task(
+                self._server_receiver(websocket, path, ws_channels.adapter, remote_desc)
+            )
 
-            while True:
-                await asyncio.sleep(0)
-                # try to send data to the client
-                try:
-                    value = queue.get_nowait()
-                except Exception:
-                    value = None
+            tasks = {sender_task, receiver_task}
+            done, pending = await asyncio.wait(
+                tasks, return_when=asyncio.FIRST_COMPLETED
+            )
 
-                if value is not None:
-                    try:
-                        await websocket.send(ws_channels.adapter.package(value))
-                    except (ConnectionResetError, BrokenPipeError, OSError) as e:
-                        self.logcomp.log(
-                            f"Failed to send data to client {remote_desc}, connection may be broken: {get_short_error_info(e)}",
-                            "WARNING",
-                        )
-                        break
-                    except websockets.exceptions.ConnectionClosed as e:
-                        self.logcomp.log(
-                            f"Failed to send data to client {remote_desc}, connection closed: {get_short_error_info(e)}",
-                            "WARNING",
-                        )
-                        break
+            for task in pending:
+                task.cancel()
 
-                try:
-                    # try to receive from the client
-                    data = await asyncio.wait_for(websocket.recv(), self.recv_timeout)
+            await asyncio.gather(*pending, return_exceptions=True)
 
-                    # process the received data
-                    data = ws_channels.adapter.unpackage(data)
-                    wrapped_data = TaggedData(path, data)
-
-                    super().on_next(wrapped_data)
-
-                except asyncio.TimeoutError:
-                    pass
-
-                except ConnectionResetError as e:
-                    self.logcomp.log(
-                        f"Connection reset (ConnectionResetError): {get_short_error_info(e)}",
-                        "WARNING",
-                    )
-                    break
-
-                except OSError as e:
-                    self.logcomp.log(
-                        f"Network error or connection lost (OSError): {get_short_error_info(e)}",
-                        "WARNING",
-                    )
-                    break
-
-                except websockets.exceptions.ConnectionClosedError as e:
-                    self.logcomp.log(
-                        f"Client {remote_desc} disconnected with error: {get_short_error_info(e)}.",
-                        "WARNING",
-                    )
-                    break
-
-                except websockets.exceptions.ConnectionClosedOK:
-                    self.logcomp.log(
-                        f"Client {remote_desc} disconnected gracefully.", "INFO"
-                    )
-                    break
+            for task in done:
+                # Propagate unexpected exceptions to the outer handler.
+                task.result()
 
         except asyncio.CancelledError:
             self.logcomp.log(f"Client {remote_desc} connection cancelled.", "INFO")
@@ -366,6 +331,74 @@ class RxWSServer(Subject):
             # Unregister client
             ws_channels.channels.discard(websocket)
             ws_channels.queues.discard(queue)
+
+    async def _server_sender(
+        self,
+        queue: asyncio.Queue[Any],
+        websocket: Any,
+        adapter: WSDatatype,
+        remote_desc: str,
+    ) -> None:
+        try:
+            while True:
+                value = await queue.get()
+                try:
+                    await websocket.send(adapter.package(value))
+                except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                    self.logcomp.log(
+                        f"Failed to send data to client {remote_desc}, connection may be broken: {get_short_error_info(e)}",
+                        "WARNING",
+                    )
+                    return
+                except websockets.exceptions.ConnectionClosed as e:
+                    self.logcomp.log(
+                        f"Failed to send data to client {remote_desc}, connection closed: {get_short_error_info(e)}",
+                        "WARNING",
+                    )
+                    return
+        except asyncio.CancelledError:
+            raise
+
+    async def _server_receiver(
+        self,
+        websocket: Any,
+        path: str,
+        adapter: WSDatatype,
+        remote_desc: str,
+    ) -> None:
+        try:
+            while True:
+                try:
+                    data = await websocket.recv()
+                except ConnectionResetError as e:
+                    self.logcomp.log(
+                        f"Connection reset (ConnectionResetError): {get_short_error_info(e)}",
+                        "WARNING",
+                    )
+                    return
+                except OSError as e:
+                    self.logcomp.log(
+                        f"Network error or connection lost (OSError): {get_short_error_info(e)}",
+                        "WARNING",
+                    )
+                    return
+                except websockets.exceptions.ConnectionClosedError as e:
+                    self.logcomp.log(
+                        f"Client {remote_desc} disconnected with error: {get_short_error_info(e)}.",
+                        "WARNING",
+                    )
+                    return
+                except websockets.exceptions.ConnectionClosedOK:
+                    self.logcomp.log(
+                        f"Client {remote_desc} disconnected gracefully.", "INFO"
+                    )
+                    return
+
+                payload = adapter.unpackage(data)
+                wrapped_data = TaggedData(path, payload)
+                super().on_next(wrapped_data)
+        except asyncio.CancelledError:
+            raise
 
     async def start_server(self):
         """Create the asyncio WebSocket server on the private loop."""
@@ -389,6 +422,7 @@ class RxWSServer(Subject):
     def _run_server_loop(self):
         loop = asyncio.new_event_loop()
         self._loop = loop
+        self._loop_ready.set()
         asyncio.set_event_loop(loop)
         # start the server
         loop.create_task(self.start_server())
@@ -470,9 +504,6 @@ class RxWSClient(Subject):
         WebSocket endpoint.
     logcomp : LogComp | None
         Optional logger component; defaults to :class:`EmptyLogComp`.
-    recv_timeout : float
-        Seconds to wait for incoming data before yielding control to the event
-        loop.
     datatype : Literal["string", "bytes", "object"]
         Frame representation handled by :func:`wsdt_factory`.
     conn_retry_timeout : float
@@ -492,7 +523,6 @@ class RxWSClient(Subject):
         self,
         conn_cfg: dict,
         logcomp: Optional[LogComp] = None,
-        recv_timeout: float = 0.001,
         datatype: Literal["string", "bytes", "object"] = "string",
         conn_retry_timeout: float = 0.5,
         ping_interval: Optional[float] = 30.0,
@@ -505,7 +535,6 @@ class RxWSClient(Subject):
         self.port = int(conn_cfg["port"])
         self.path = conn_cfg.get("path", "/")
 
-        self.recv_timeout = recv_timeout
 
         # setup the log source
         self.logcomp = logcomp or EmptyLogComp()
@@ -518,7 +547,7 @@ class RxWSClient(Subject):
         self.ping_timeout = ping_timeout
 
         # Cross-thread outbound queue; consumed by the private loop task
-        self.queue: _q.Queue[Any] = _q.Queue()
+        self.queue: asyncio.Queue[Any] = asyncio.Queue()
         self.ws: Optional[ClientConnection] = None
 
         self.conn_retry_timeout = conn_retry_timeout
@@ -526,6 +555,7 @@ class RxWSClient(Subject):
         # Private asyncio loop running in a background thread
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
+        self._loop_ready = threading.Event()
         self._start_loop_thread()
 
         # whether the connection is established. this will influence the caching strategy.
@@ -534,7 +564,25 @@ class RxWSClient(Subject):
     def on_next(self, value):
         """Send a message to the server when connected."""
         if self._connected:
-            self.queue.put_nowait(value)
+            self.adapter.package_type_check(value)
+            if not self._loop_ready.wait(timeout=5.0):
+                rx_exception = self.logcomp.get_rx_exception(
+                    RuntimeError("Client event loop failed to start"),
+                    note="RxWSClient.on_next",
+                )
+                super().on_error(rx_exception)
+                return
+
+            loop = self._loop
+            if loop is None:
+                rx_exception = self.logcomp.get_rx_exception(
+                    RuntimeError("Client event loop not available"),
+                    note="RxWSClient.on_next",
+                )
+                super().on_error(rx_exception)
+                return
+
+            loop.call_soon_threadsafe(self.queue.put_nowait, value)
 
     def on_error(self, error):
         """Report connection errors."""
@@ -577,7 +625,6 @@ class RxWSClient(Subject):
                 self.logcomp.log(f"Connecting to server {remote_desc}", "INFO")
 
                 while True:
-                    await asyncio.sleep(0)
                     try:
                         """
                         According to the documentation of websockets.connect:
@@ -607,7 +654,7 @@ class RxWSClient(Subject):
                         break
 
                     except asyncio.TimeoutError:
-                        pass
+                        continue
 
                     except OSError as e:
                         self.logcomp.log(
@@ -615,7 +662,6 @@ class RxWSClient(Subject):
                             "WARNING",
                         )
                         await asyncio.sleep(self.conn_retry_timeout)
-                        pass
 
                     except websockets.InvalidHandshake as e:
                         self.logcomp.log(
@@ -623,7 +669,6 @@ class RxWSClient(Subject):
                             "WARNING",
                         )
                         await asyncio.sleep(self.conn_retry_timeout)
-                        pass
 
                     # Catch invalid URI errors
                     except websockets.InvalidURI as e:
@@ -634,63 +679,31 @@ class RxWSClient(Subject):
                         super().on_error(e)
                         return
 
+                assert self.ws is not None
                 self.logcomp.log(f"Server {remote_desc} Connected.", "INFO")
                 self._connected = True
 
-                # Start receiving messages
-                while True:
-                    await asyncio.sleep(0)
+                sender_task = asyncio.create_task(
+                    self._client_sender(self.ws, remote_desc)
+                )
+                receiver_task = asyncio.create_task(
+                    self._client_receiver(self.ws, remote_desc)
+                )
 
-                    # try to send data to the server
-                    try:
-                        value = self.queue.get_nowait()
-                    except Exception:
-                        value = None
+                tasks = {sender_task, receiver_task}
+                done, pending = await asyncio.wait(
+                    tasks, return_when=asyncio.FIRST_COMPLETED
+                )
 
-                    if value is not None:
-                        try:
-                            await self.ws.send(self.adapter.package(value))
-                        except (ConnectionResetError, BrokenPipeError, OSError) as e:
-                            self.logcomp.log(
-                                f"Failed to send data to server {remote_desc}, connection may be broken: {get_short_error_info(e)}",
-                                "WARNING",
-                            )
-                            break
+                for task in pending:
+                    task.cancel()
 
-                        except websockets.exceptions.ConnectionClosed as e:
-                            self.logcomp.log(
-                                f"Failed to send data to server {remote_desc}, connection closed: {get_short_error_info(e)}",
-                                "WARNING",
-                            )
-                            break
+                await asyncio.gather(*pending, return_exceptions=True)
 
-                    try:
-                        data = await asyncio.wait_for(self.ws.recv(), self.recv_timeout)
-                        super().on_next(self.adapter.unpackage(data))
+                for task in done:
+                    task.result()
 
-                    except asyncio.TimeoutError:
-                        pass
-
-                    except OSError as e:
-                        self.logcomp.log(
-                            f"Network error or connection lost (OSError): {get_short_error_info(e)}",
-                            "WARNING",
-                        )
-                        break
-
-                    except websockets.ConnectionClosedError as e:
-                        self.logcomp.log(
-                            f"Server {remote_desc} Connection closed with error: {get_short_error_info(e)}.",
-                            "WARNING",
-                        )
-                        break
-
-                    except websockets.ConnectionClosedOK:
-                        self.logcomp.log(
-                            f"Server {remote_desc} Connection closed gracefully.",
-                            "INFO",
-                        )
-                        break
+                self._connected = False
 
         except asyncio.CancelledError:
             self.logcomp.log(f"WebSocket client connection cancelled.", "INFO")
@@ -714,9 +727,58 @@ class RxWSClient(Subject):
 
 
     # ---------------- threaded event loop plumbing ---------------- #
+    async def _client_sender(self, websocket: ClientConnection, remote_desc: str) -> None:
+        try:
+            while True:
+                value = await self.queue.get()
+                try:
+                    await websocket.send(self.adapter.package(value))
+                except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                    self.logcomp.log(
+                        f"Failed to send data to server {remote_desc}, connection may be broken: {get_short_error_info(e)}",
+                        "WARNING",
+                    )
+                    return
+                except websockets.exceptions.ConnectionClosed as e:
+                    self.logcomp.log(
+                        f"Failed to send data to server {remote_desc}, connection closed: {get_short_error_info(e)}",
+                        "WARNING",
+                    )
+                    return
+        except asyncio.CancelledError:
+            raise
+
+    async def _client_receiver(self, websocket: ClientConnection, remote_desc: str) -> None:
+        try:
+            while True:
+                try:
+                    data = await websocket.recv()
+                except OSError as e:
+                    self.logcomp.log(
+                        f"Network error or connection lost (OSError): {get_short_error_info(e)}",
+                        "WARNING",
+                    )
+                    return
+                except websockets.ConnectionClosedError as e:
+                    self.logcomp.log(
+                        f"Server {remote_desc} Connection closed with error: {get_short_error_info(e)}.",
+                        "WARNING",
+                    )
+                    return
+                except websockets.ConnectionClosedOK:
+                    self.logcomp.log(
+                        f"Server {remote_desc} Connection closed gracefully.", "INFO",
+                    )
+                    return
+
+                super().on_next(self.adapter.unpackage(data))
+        except asyncio.CancelledError:
+            raise
+
     def _run_loop(self):
         loop = asyncio.new_event_loop()
         self._loop = loop
+        self._loop_ready.set()
         asyncio.set_event_loop(loop)
         loop.create_task(self.connect_client())
         try:
@@ -777,7 +839,7 @@ class RxWSClientGroup(Subject):
         each connection is supplied by individual :class:`TaggedData` items.
     logcomp : LogComp | None
         Logger component shared by all spawned clients.
-    recv_timeout, datatype, conn_retry_timeout, ping_interval, ping_timeout
+    datatype, conn_retry_timeout, ping_interval, ping_timeout
         Passed through to the per‑path :class:`RxWSClient` factory.
 
     Notes
@@ -790,7 +852,6 @@ class RxWSClientGroup(Subject):
         self,
         conn_cfg: dict,
         logcomp: Optional[LogComp] = None,
-        recv_timeout: float = 0.001,
         datatype: (
             Callable[[str], Literal["string", "bytes", "object"]]
             | Literal["string", "bytes", "object"]
@@ -818,7 +879,6 @@ class RxWSClientGroup(Subject):
             return RxWSClient(
                 conn_cfg=new_conn_cfg,
                 logcomp=logcomp,
-                recv_timeout=recv_timeout,
                 datatype=self.datatype_func(path),
                 conn_retry_timeout=conn_retry_timeout,
                 ping_interval=ping_interval,

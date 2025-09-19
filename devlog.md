@@ -1,3 +1,4 @@
+- 2025-09-19 Improved `ws.py` logic.
 - 2025-09-08 Added `retry_with_signal`.
 - 2025-09-01 Updated `Logger` to be multi-process safe.
 - 2025-08-29 `log_redirect_to` now support functions like `print` as the observer.
