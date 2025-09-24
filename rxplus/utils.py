@@ -1,23 +1,24 @@
 """Utility helpers used across ``rxplus`` modules."""
 
 import traceback
-from typing import Any, Callable
+from typing import Callable, TypeVar, Generic
 
 import time
 
 from reactivex import operators as ops, Observable
 
-
-class TaggedData:
+TagT = TypeVar("TagT")
+InnerDataT = TypeVar("InnerDataT")
+class TaggedData(Generic[TagT, InnerDataT]):
     """
     A class to hold data with a tag.
 
     Attributes:
-        tag (str): The tag of the data.
-        data (any): The data itself.
+        tag (TagT): The tag of the data.
+        data (InnerDataT): The data itself.
     """
 
-    def __init__(self, tag: str, data: Any):
+    def __init__(self, tag: TagT, data: InnerDataT):
         self.tag = tag
         self.data = data
 
@@ -28,19 +29,19 @@ class TaggedData:
         return f"(tag={self.tag}, {str(self.data)})"
 
 
-def untag() -> Callable[[Observable[TaggedData]], Observable[Any]]:
+def untag() -> Callable[[Observable[TaggedData[object, InnerDataT]]], Observable[InnerDataT]]:
     """Return an operator that extracts the ``data`` attribute."""
 
     return ops.map(lambda x: x.data)  # type: ignore
 
 
-def tag(tag: str) -> Callable[[Observable[Any]], Observable[TaggedData]]:
+def tag(tag: TagT) -> Callable[[Observable[InnerDataT]], Observable[TaggedData[TagT, InnerDataT]]]:
     """Return an operator that wraps items in :class:`TaggedData`."""
 
     return ops.map(lambda x: TaggedData(tag, x))
 
 
-def tag_filter(tag: str) -> Callable[[Observable[Any]], Observable[TaggedData]]:
+def tag_filter(tag: TagT) -> Callable[[Observable[InnerDataT]], Observable[TaggedData[TagT, InnerDataT]]]:
     """Return an operator that filters ``TaggedData`` by ``tag``. It will drop non-``TaggedData`` items."""
 
     return ops.filter(lambda x: isinstance(x, TaggedData) and x.tag == tag)
