@@ -11,6 +11,7 @@ from reactivex.disposable import SerialDisposable, Disposable
 from reactivex import operators as ops
 
 from .mechanism import RxException
+from .logging import LogItem
 
 
 def stream_print_out(prompt: str = "Stream-Print-Out"):
@@ -85,6 +86,38 @@ class ErrorRestartSignal:
     '''
     error: RxException
     attempts: int
+
+    def __str__(self) -> str:
+        return f"ErrorRestartSignal(attempts={self.attempts}, error={self.error})"
+    
+def error_restart_signal_to_logitem(log_source: str) -> Callable[[Observable], Observable]:
+    """
+    Rx Operator. Convert `ErrorRestartSignal` to `LogItem` for logging purpose.
+    """
+
+    def _op(source: Observable[Any]) -> Observable[Any]:
+        def _subscribe(observer, scheduler=None):
+            def _on_next(v: Any):
+                if isinstance(v, ErrorRestartSignal):
+                    log_item = LogItem(
+                        level="WARNING",
+                        msg=str(v),
+                        source=log_source,
+                    )
+                    observer.on_next(log_item)
+                else:
+                    observer.on_next(v)
+
+            return source.subscribe(
+                on_next=_on_next,
+                on_error=observer.on_error,
+                on_completed=observer.on_completed,
+                scheduler=scheduler,
+            )
+
+        return create(_subscribe)
+
+    return _op
 
 def retry_with_signal(
     max_retries: Optional[int] = None,
