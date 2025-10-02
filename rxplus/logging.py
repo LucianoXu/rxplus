@@ -199,8 +199,13 @@ class Logger(Subject):
     @contextmanager
     def _acquire_lock(self):
         """
-        Cross-process file lock with waiting. Uses fcntl if available,
-        otherwise falls back to a lockfile with exclusive create + retry.
+        Cross-process file lock with waiting. Uses fcntl when available and
+        falls back to an exclusive create + retry strategy otherwise.
+
+        Improvements over the previous version:
+        - Never swallows pre-yield exceptions (prevents "generator didn't yield").
+        - Treats Windows-specific permission errors as a contention signal.
+        - Performs best-effort cleanup without masking underlying failures.
         """
         lock_path = self._lock_path()
         if lock_path is None:
@@ -208,63 +213,64 @@ class Logger(Subject):
             yield
             return
 
-        # Try fcntl-based advisory lock first (POSIX)
-        try:
-            import fcntl  # type: ignore
+        dir_name = os.path.dirname(lock_path)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
 
-            # Ensure directory exists for lock file as well
-            dir = os.path.dirname(lock_path)
-            if dir:
-                os.makedirs(dir, exist_ok=True)
-
-            f = open(lock_path, "a+")
+        # Try fcntl-based advisory lock first (POSIX platforms)
+        if os.name != "nt":  # pragma: no cover - platform specific guard
             try:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                yield
-            finally:
-                try:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-                finally:
-                    f.close()
-            return
-        except Exception:
-            # Fall back to portable lockfile with O_EXCL
-            pass
+                import fcntl  # type: ignore
 
-        # Fallback: spin on exclusive create of lock file, then unlink
+                f = open(lock_path, "a+")
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                    yield
+                finally:
+                    try:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                    finally:
+                        f.close()
+                return
+            except Exception:
+                # Fall back to portable lockfile with O_EXCL
+                pass
+
+        # Fallback: spin on exclusive create of lock file, then unlink on exit
         start = time.time()
         fd = None
+        contended_errnos = {errno.EEXIST, errno.EACCES, errno.EPERM, errno.EBUSY}
+
         try:
             while True:
                 try:
-                    # Ensure directory exists
-                    dir = os.path.dirname(lock_path)
-                    if dir:
-                        os.makedirs(dir, exist_ok=True)
                     fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
                     break
-                except OSError as e:
-                    if e.errno == errno.EEXIST:
+                except OSError as exc:
+                    # Windows reports open files as PermissionError (EACCES / EPERM)
+                    if exc.errno in contended_errnos:
                         if time.time() - start > self._lock_timeout:
-                            raise TimeoutError(f"Timeout acquiring log lock: {lock_path}")
+                            raise TimeoutError(f"Timeout acquiring log lock: {lock_path}") from exc
                         time.sleep(self._lock_poll_interval)
                         continue
-                    else:
-                        raise
+                    raise
 
             yield
-            
-        except Exception as e:
-            print(e)
-
         finally:
-            try:
-                if fd is not None:
+            if fd is not None:
+                try:
                     os.close(fd)
-                if os.path.exists(lock_path):
-                    os.unlink(lock_path)
-            except Exception:
-                # Best-effort cleanup; avoid raising from contextmanager
+                except OSError:
+                    pass
+
+            try:
+                os.unlink(lock_path)
+            except FileNotFoundError:
+                pass
+            except PermissionError:
+                # Windows may briefly deny removal if another process raced to open
+                # the file after we closed our handle. Leaving the file behind is a
+                # safe fallback because contention will be handled by retries.
                 pass
 
     def on_next(self, value: Any) -> None:
