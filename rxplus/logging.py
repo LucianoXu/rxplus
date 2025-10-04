@@ -74,7 +74,7 @@ def log_redirect_to(
         def subscribe(observer, scheduler=None):
 
             # Determine the redirection function
-            if isinstance(log_observer, rx.abc.ObserverBase):
+            if hasattr(log_observer, "on_next"):
                 redirect_fun = log_observer.on_next
             else:
                 redirect_fun = log_observer
@@ -82,7 +82,7 @@ def log_redirect_to(
             def on_next(value: Any) -> None:
                 if isinstance(value, LogItem):
                     if value.level in levels:
-                        redirect_fun(value)
+                        redirect_fun(value) # type: ignore
 
                 else:
                     observer.on_next(value)
@@ -143,10 +143,10 @@ class NamedLogComp(LogComp):
         log_item = LogItem(msg, level, self.name)
         if self.super_obs is None:
             raise Exception("Super observer is not set. Please call set_super() first.")
-        if isinstance(self.super_obs, rx.abc.ObserverBase):
+        if hasattr(self.super_obs, "on_next"):
             self.super_obs.on_next(log_item)
         else:
-            self.super_obs(log_item)
+            self.super_obs(log_item)    # type: ignore
 
     def get_rx_exception(self, error: Exception, note: str = "") -> RxException:
         """
