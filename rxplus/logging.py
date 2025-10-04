@@ -105,7 +105,7 @@ class LogComp(ABC):
     """
 
     @abstractmethod
-    def set_super(self, obs: rx.abc.ObserverBase): ...
+    def set_super(self, obs: rx.abc.ObserverBase|Callable): ...
 
     @abstractmethod
     def log(self, msg: Any, level: LOG_LEVEL = "INFO"): ...
@@ -115,7 +115,7 @@ class LogComp(ABC):
 
 
 class EmptyLogComp(LogComp):
-    def set_super(self, obs: rx.abc.ObserverBase):
+    def set_super(self, obs: rx.abc.ObserverBase|Callable):
         pass
 
     def log(self, msg: Any, level: LOG_LEVEL = "INFO"):
@@ -128,9 +128,9 @@ class EmptyLogComp(LogComp):
 class NamedLogComp(LogComp):
     def __init__(self, name: str = "LogSource"):
         self.name = name
-        self.super_obs: Optional[rx.abc.ObserverBase] = None
+        self.super_obs: Optional[rx.abc.ObserverBase|Callable] = None
 
-    def set_super(self, obs: rx.abc.ObserverBase):
+    def set_super(self, obs: rx.abc.ObserverBase|Callable):
         """
         Set the super observer to redirect the log messages.
         """
@@ -143,7 +143,10 @@ class NamedLogComp(LogComp):
         log_item = LogItem(msg, level, self.name)
         if self.super_obs is None:
             raise Exception("Super observer is not set. Please call set_super() first.")
-        self.super_obs.on_next(log_item)
+        if isinstance(self.super_obs, rx.abc.ObserverBase):
+            self.super_obs.on_next(log_item)
+        else:
+            self.super_obs(log_item)
 
     def get_rx_exception(self, error: Exception, note: str = "") -> RxException:
         """
