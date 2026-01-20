@@ -1,9 +1,12 @@
 import os
 import time
 import errno
+import glob
+import re
 from contextlib import contextmanager
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Literal, Optional
+from datetime import datetime, timedelta
+from typing import Any, Callable, Literal, Optional, Union
 
 import reactivex as rx
 from reactivex import Observable, Observer, Subject, create
@@ -161,12 +164,15 @@ class Logger(Subject):
 
     Behavior
     - Writes logs to a file when `logfile` is provided, which is lazily created on
-      the first log item.
+      the first log item. Each log file is named with a timestamp postfix
+      (e.g., `app_20250120T103045.log`).
     - Forwards LogItem instances to its subscribers; non‑log items pass through
       unchanged via the stream where applicable.
     - Conceptually not a terminal observer: errors are recorded as LogItem and
       forwarded rather than terminating the stream.
     - Never completes (`on_completed` is a no‑op).
+    - Supports automatic log rotation based on record count or time interval.
+    - Optionally cleans up old log files based on age.
 
     Concurrency and file locking
     - Supports multiple processes writing to the same log file by serializing
@@ -179,25 +185,159 @@ class Logger(Subject):
 
     Parameters
     - logfile: Optional[str]
-        If provided, enables file logging and sets the log file path.
+        If provided, enables file logging and sets the log file path base.
+        The actual file will have a timestamp postfix (e.g., `app_20250120T103045.log`).
+    - rotate_interval: Optional[int | timedelta], default None
+        If int, rotates to a new log file after that many records.
+        If timedelta, rotates after that time interval has passed since the current
+        file was created. None means no rotation (a new timestamped file is created
+        only at startup).
+    - max_log_age: Optional[timedelta], default None
+        If provided, log files older than this age will be deleted during rotation.
+        The cleanup only happens when a new log file is created.
     - lock_timeout: float, default 10.0
         Maximum time to wait when acquiring the lock in the fallback mode.
     - lock_poll_interval: float, default 0.05
         Sleep interval between retries when waiting for the lock.
     """
 
-    def __init__(self, logfile: Optional[str] = None, *, lock_timeout: float = 10.0, lock_poll_interval: float = 0.05):
-        super().__init__()
-        self.logfile = logfile
+    # Regex pattern to match timestamped log files: base_YYYYMMDDTHHmmss.ext
+    _TIMESTAMP_PATTERN = re.compile(r"^(.+)_(\d{8}T\d{6})(\.[^.]+)?$")
 
+    def __init__(
+        self,
+        logfile: Optional[str] = None,
+        *,
+        rotate_interval: Optional[Union[int, timedelta]] = None,
+        max_log_age: Optional[timedelta] = None,
+        lock_timeout: float = 10.0,
+        lock_poll_interval: float = 0.05,
+    ):
+        super().__init__()
+        self._logfile_base = logfile
+        self._rotate_interval = rotate_interval
+        self._max_log_age = max_log_age
+
+        # Current active log file path (with timestamp)
+        self._current_logfile: Optional[str] = None
         self.pfile = None
+
+        # Rotation tracking
+        self._record_count = 0
+        self._file_created_time: Optional[datetime] = None
+
         self._lock_timeout = lock_timeout
         self._lock_poll_interval = lock_poll_interval
 
+    @property
+    def logfile(self) -> Optional[str]:
+        """Return the current active log file path (for backward compatibility)."""
+        return self._current_logfile
+
+    def _generate_logfile_path(self) -> str:
+        """
+        Generate a new log file path with timestamp postfix.
+        
+        Format: base_YYYYMMDDTHHmmss.ext
+        Example: app_20250120T103045.log
+        """
+        if self._logfile_base is None:
+            raise ValueError("logfile base is not set")
+
+        timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+
+        # Split base path into name and extension
+        base, ext = os.path.splitext(self._logfile_base)
+        return f"{base}_{timestamp}{ext}"
+
+    def _should_rotate(self) -> bool:
+        """Check if we should rotate to a new log file."""
+        if self._rotate_interval is None:
+            return False
+
+        if isinstance(self._rotate_interval, int):
+            return self._record_count >= self._rotate_interval
+
+        if isinstance(self._rotate_interval, timedelta):
+            if self._file_created_time is None:
+                return False
+            return datetime.now() - self._file_created_time >= self._rotate_interval
+
+        return False
+
+    def _cleanup_old_logs(self) -> None:
+        """Delete log files older than max_log_age."""
+        if self._max_log_age is None or self._logfile_base is None:
+            return
+
+        base, ext = os.path.splitext(self._logfile_base)
+        dir_path = os.path.dirname(self._logfile_base) or "."
+
+        # Find all matching log files
+        pattern = f"{os.path.basename(base)}_*{ext}"
+        log_files = glob.glob(os.path.join(dir_path, pattern))
+
+        cutoff_time = datetime.now() - self._max_log_age
+
+        for log_file in log_files:
+            # Don't delete the current file
+            if log_file == self._current_logfile:
+                continue
+
+            # Extract timestamp from filename
+            filename = os.path.basename(log_file)
+            match = self._TIMESTAMP_PATTERN.match(filename)
+            if match:
+                timestamp_str = match.group(2)
+                try:
+                    file_time = datetime.strptime(timestamp_str, "%Y%m%dT%H%M%S")
+                    if file_time < cutoff_time:
+                        try:
+                            os.remove(log_file)
+                        except OSError:
+                            pass  # Best effort cleanup
+                except ValueError:
+                    pass  # Invalid timestamp format, skip
+
+    def _rotate_file(self) -> None:
+        """Close current file and prepare for a new one."""
+        if self.pfile is not None and not self.pfile.closed:
+            self.pfile.close()
+        self.pfile = None
+        self._current_logfile = None
+        self._record_count = 0
+        self._file_created_time = None
+
+    def _ensure_file_open(self) -> None:
+        """Ensure the log file is open, creating a new one if necessary."""
+        if self._logfile_base is None:
+            return
+
+        # Check if we need to rotate
+        if self._should_rotate():
+            self._rotate_file()
+
+        # Create new file if needed
+        if self._current_logfile is None:
+            self._current_logfile = self._generate_logfile_path()
+            self._file_created_time = datetime.now()
+            self._record_count = 0
+
+            # Cleanup old logs when creating a new file
+            self._cleanup_old_logs()
+
+        # Open file if not open
+        if self.pfile is None or self.pfile.closed:
+            dir_name = os.path.dirname(self._current_logfile)
+            if dir_name:
+                os.makedirs(dir_name, exist_ok=True)
+            self.pfile = open(self._current_logfile, "a")
+            self.pfile.write("\n")
+
     def _lock_path(self) -> Optional[str]:
-        if self.logfile is None:
+        if self._current_logfile is None:
             return None
-        return f"{self.logfile}.lock"
+        return f"{self._current_logfile}.lock"
 
     @contextmanager
     def _acquire_lock(self):
@@ -279,20 +419,19 @@ class Logger(Subject):
     def on_next(self, value: Any) -> None:
         if isinstance(value, LogItem):
             try:
-                if self.logfile is not None:
+                if self._logfile_base is not None:
                     # Serialize writes across processes
+                    # First ensure file is open (this handles rotation and cleanup)
+                    self._ensure_file_open()
+                    
                     with self._acquire_lock():
-                        if self.pfile is None or self.pfile.closed:
-                            # ensure the folder exists
-                            dir = os.path.dirname(self.logfile)
-                            if dir:
-                                os.makedirs(dir, exist_ok=True)
-
-                            self.pfile = open(f"{self.logfile}", "a")
-                            self.pfile.write("\n")
-
-                        self.pfile.write(str(value))
-                        self.pfile.flush()
+                        # Re-check file state after acquiring lock
+                        self._ensure_file_open()
+                        
+                        if self.pfile is not None:
+                            self.pfile.write(str(value))
+                            self.pfile.flush()
+                            self._record_count += 1
 
                 super().on_next(value)
 

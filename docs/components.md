@@ -1,34 +1,28 @@
 # Component Documentation
 
-### Duplex
+This directory contains detailed documentation for each `rxplus` module. The library extends [RxPY](https://github.com/ReactiveX/RxPY) with practical components for I/O, networking, and media streaming.
 
-The `duplex` module provides a `Duplex` class that represents a bidirectional communication channel. It consists of a `sink` for incoming data and a `stream` for outgoing data, both of which are `reactivex` Subjects.
+## Quick Navigation
 
-### Logging
+| Module | Description |
+|--------|-------------|
+| [Duplex](duplex.md) | Bidirectional communication channels |
+| [WebSocket](websocket.md) | Reactive WebSocket server/client |
+| [Logging](logging.md) | Structured logging for reactive pipelines |
+| [Operators](operators.md) | Custom Rx operators |
+| [Utilities](utilities.md) | Tagged data, monitors, helpers |
+| [Audio](audio.md) | Microphone, speaker, WAV file I/O |
+| [Video](video.md) | Screen capture and image encoding |
+| [CLI](cli.md) | Interactive command-line input |
 
-`rxplus` includes a flexible logging framework designed for reactive applications. It allows you to create loggers, filter log messages by level, and redirect logs to different observers.
+## Design Philosophy
 
-### Operators
+`rxplus` follows these principles:
 
-The `opt` module contains custom `reactivex` operators, such as `redirect_to`, which allows you to redirect items in a stream to a different observer based on a condition.
+1. **Subject-based I/O** — External resources (WebSocket, microphone, speaker) are exposed as `Subject`s, acting as both Observable and Observer. This allows bidirectional data flow with a unified API.
 
-### Utilities
+2. **Threading transparency** — Components that require async I/O (WebSocket, audio) manage their own background threads internally. Users interact via the standard Rx interface without needing `asyncio` knowledge.
 
-The `utils` module provides various utility functions, including `TaggedData` for wrapping data with a tag and error handling functions.
+3. **Tagged data multiplexing** — `TaggedData` enables routing multiple logical channels through a single stream, essential for multi-path WebSocket communication.
 
-### WebSocket
-
-The `ws` module offers a reactive wrapper around the `websockets` library, providing `RxWSServer` and `RxWSClient` classes for building real-time, bidirectional WebSocket applications.
-
-Implementation note: the websocket internals now run on dedicated background threads, each with its own asyncio event loop. This means you can instantiate `RxWSServer`/`RxWSClient` from regular (non-async) code without managing an event loop; the Observable/Observer interface remains unchanged.
-
-### Audio
-
-The `audio` module contains helpers for working with sound. `RxMicrophone` and
-`RxSpeaker` stream audio from the microphone or to the speaker. The
-`create_wavfile` observable loads a WAV file chunk by chunk, while the
-`save_wavfile` observer makes it easy to record audio streams.
-
-### CLI
-
-The `cli` module provides the `from_cli` operator, which creates an observable that emits strings from the command-line interface. This is useful for creating interactive command-line applications.
+4. **Composable logging** — Log items flow through the same reactive pipelines as data, enabling filtering, routing, and recording with standard operators.
