@@ -4,23 +4,49 @@
 
 ## Installation
 
-To install the latest version from GitHub, run the following command:
-```
+The package supports modular installation with optional dependencies for audio and video features.
+
+### Basic Installation (core features only)
+```bash
 pip install git+https://github.com/LucianoXu/rxplus.git
 ```
 
-To install directly from the source, enter the project root and execute:
-```
-python -m build && pip install .
+### Installation with Optional Features
+```bash
+# Audio support (microphone, speaker, wav files)
+pip install "git+https://github.com/LucianoXu/rxplus.git#egg=rxplus[audio]"
+
+# Video support (screen capture, image conversion)
+pip install "git+https://github.com/LucianoXu/rxplus.git#egg=rxplus[video]"
+
+# All features
+pip install "git+https://github.com/LucianoXu/rxplus.git#egg=rxplus[all]"
 ```
 
-The `pyaudio` module installation requires some configuration. For example, on `Ubuntu` it requires `portaudio` installed in advance. The corresponding shell command is:
+### Install from Source
+```bash
+python -m build && pip install .          # Basic only
+pip install -e ".[audio]"                 # With audio support
+pip install -e ".[video]"                 # With video support
+pip install -e ".[all]"                   # All features
 ```
+
+### System Dependencies for Audio
+The `pyaudio` module requires `portaudio` installed on your system.
+
+**Ubuntu/Debian:**
+```bash
 sudo apt update
 sudo apt install portaudio19-dev -y
 ```
-or
+
+**macOS (Homebrew):**
+```bash
+brew install portaudio
 ```
+
+**Conda:**
+```bash
 conda install -c conda-forge portaudio
 ```
 

@@ -1,3 +1,4 @@
+- 2026-01-20 Implemented modular installation. Add GitHub Action for sanity check.
 - 2025-09-19 Improved `ws.py` logic.
 - 2025-09-08 Added `retry_with_signal`.
 - 2025-09-01 Updated `Logger` to be multi-process safe.

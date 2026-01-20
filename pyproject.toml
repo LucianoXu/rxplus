@@ -21,13 +21,37 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 requires-python = ">=3.7"
+
+# Basic dependencies only - core reactive programming utilities
 dependencies = [
-    "reactivex",
-    "websockets",
-    "prompt-toolkit",
+    "reactivex>=4.0.4",
+    "websockets>=15.0.1",
+    "prompt-toolkit>=3.0.51",
+    "attrs>=25.4.0",
 ]
 
 [project.optional-dependencies]
+# Audio processing support (microphone, speaker, wav files)
+audio = [
+    "pyaudio>=0.2.14",
+    "soundfile>=0.12.1",
+    "scipy>=1.13.1",
+    "numpy",
+]
+
+# Video/graphics processing support (screen capture, image conversion)
+video = [
+    "pillow>=11.3.0",
+    "mss>=10.0.0",
+    "numpy",
+]
+
+# Install all optional dependencies
+all = [
+    "rxplus[audio,video]",
+]
+
+# Development dependencies
 dev = [
     "pytest>=7.0.0",
     "black>=23.0.0",

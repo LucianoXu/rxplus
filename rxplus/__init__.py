@@ -1,15 +1,18 @@
-"""Convenience exports for the :mod:`rxplus` package."""
+"""Convenience exports for the :mod:`rxplus` package.
 
-from .audio import (  # noqa: F401
-    PCMFormat,
-    RxMicrophone,
-    RxSpeaker,
-    create_wavfile,
-    save_wavfile,
-)
+This package supports optional dependencies for audio and video features.
+Install with:
+    - `pip install rxplus` for basic features
+    - `pip install rxplus[audio]` for audio features
+    - `pip install rxplus[video]` for video features
+    - `pip install rxplus[all]` for all features
+"""
+
+# =============================================================================
+# Basic exports (always available)
+# =============================================================================
 from .cli import from_cli  # noqa: F401
 from .duplex import Duplex, connect_adapter, make_duplex  # noqa: F401
-from .graphic import create_screen_capture, rgb_ndarray_to_jpeg_bytes, jpeg_bytes_to_rgb_ndarray  # noqa: F401
 from .logging import (  # noqa: F401
     LOG_LEVEL,
     EmptyLogComp,
@@ -27,7 +30,42 @@ from .opt import redirect_to, stream_print_out, ErrorRestartSignal, retry_with_s
 from .utils import TaggedData, tag, tag_filter, untag, FPSMonitor, BandwidthMonitor  # noqa: F401
 from .ws import RxWSClient, RxWSClientGroup, RxWSServer, WSDatatype, WSStr  # noqa: F401
 
+
+# =============================================================================
+# Audio exports (optional - requires rxplus[audio])
+# =============================================================================
+try:
+    from .audio import (  # noqa: F401
+        PCMFormat,
+        RxMicrophone,
+        RxSpeaker,
+        create_wavfile,
+        save_wavfile,
+    )
+    _HAS_AUDIO = True
+except ImportError:
+    _HAS_AUDIO = False
+
+
+# =============================================================================
+# Video exports (optional - requires rxplus[video])
+# =============================================================================
+try:
+    from .graphic import (  # noqa: F401
+        create_screen_capture,
+        rgb_ndarray_to_jpeg_bytes,
+        jpeg_bytes_to_rgb_ndarray,
+    )
+    _HAS_VIDEO = True
+except ImportError:
+    _HAS_VIDEO = False
+
+
+# =============================================================================
+# __all__ definition
+# =============================================================================
 __all__ = [
+    # Core
     "RxException",
     "TaggedData",
     "tag",
@@ -36,6 +74,7 @@ __all__ = [
     "FPSMonitor",
     "BandwidthMonitor",
 
+    # Logging
     "LogItem",
     "LOG_LEVEL",
     "keep_log",
@@ -66,16 +105,22 @@ __all__ = [
 
     # CLI
     "from_cli",
-
-    # audio
-    "PCMFormat",
-    "create_wavfile",
-    "RxMicrophone",
-    "RxSpeaker",
-    "save_wavfile",
-
-    # graphic
-    "create_screen_capture",
-    "rgb_ndarray_to_jpeg_bytes",
-    "jpeg_bytes_to_rgb_ndarray",
 ]
+
+# Add audio exports to __all__ if available
+if _HAS_AUDIO:
+    __all__.extend([
+        "PCMFormat",
+        "create_wavfile",
+        "RxMicrophone",
+        "RxSpeaker",
+        "save_wavfile",
+    ])
+
+# Add video exports to __all__ if available
+if _HAS_VIDEO:
+    __all__.extend([
+        "create_screen_capture",
+        "rgb_ndarray_to_jpeg_bytes",
+        "jpeg_bytes_to_rgb_ndarray",
+    ])
