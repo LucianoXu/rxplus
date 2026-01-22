@@ -56,7 +56,7 @@ source.pipe(
 
 ### `error_restart_signal_to_logitem(log_source)`
 
-Converts `ErrorRestartSignal` items into `LogItem` for unified logging.
+Converts `ErrorRestartSignal` items into `LogRecord` for unified logging.
 
 ```python
 source.pipe(

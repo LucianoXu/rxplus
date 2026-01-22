@@ -19,10 +19,12 @@ def test_basic_imports():
     assert hasattr(rxplus, "FPSMonitor")
     assert hasattr(rxplus, "BandwidthMonitor")
 
-    # Logging exports
-    assert hasattr(rxplus, "LogItem")
+    # Logging exports (OTel-based)
+    assert hasattr(rxplus, "LogRecord")
     assert hasattr(rxplus, "LOG_LEVEL")
     assert hasattr(rxplus, "Logger")
+    assert hasattr(rxplus, "create_log_record")
+    assert hasattr(rxplus, "SEVERITY_MAP")
 
     # WebSocket exports
     assert hasattr(rxplus, "RxWSServer")
@@ -92,9 +94,11 @@ def test_all_exports():
         "untag",
         "FPSMonitor",
         "BandwidthMonitor",
-        "LogItem",
+        "LogRecord",
         "LOG_LEVEL",
         "Logger",
+        "create_log_record",
+        "SEVERITY_MAP",
         "RxWSServer",
         "RxWSClient",
         "RxWSClientGroup",

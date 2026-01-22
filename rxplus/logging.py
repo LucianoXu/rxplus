@@ -1,3 +1,11 @@
+"""
+OpenTelemetry-native logging for reactive streams.
+
+This module provides logging facilities that integrate OpenTelemetry's LogRecord
+data model with RxPY reactive streams. Log records flow through reactive pipelines
+and can be filtered, redirected, and exported using standard OTel exporters.
+"""
+
 import os
 import time
 import errno
@@ -5,88 +13,193 @@ import glob
 import re
 from contextlib import contextmanager
 from abc import ABC, abstractmethod
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Literal, Optional, Union
 
 import reactivex as rx
-from reactivex import Observable, Observer, Subject, create
+from reactivex import Observable, Observer, Subject
 from reactivex import operators as ops
 
+from opentelemetry._logs import SeverityNumber, LoggerProvider, LogRecord
+
+from opentelemetry.sdk._logs import LoggerProvider as SdkLoggerProvider
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor, LogRecordExporter
+from opentelemetry.sdk.resources import Resource
+
 from .mechanism import RxException
-from .utils import get_full_error_info
 
-"""
-The objects to deal with loggings.
-"""
+# =============================================================================
+# Type Definitions
+# =============================================================================
 
-LOG_LEVEL = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+LOG_LEVEL = Literal["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"]
+
+# Mapping from LOG_LEVEL strings to OTel SeverityNumber
+SEVERITY_MAP: dict[str, SeverityNumber] = {
+    "TRACE": SeverityNumber.TRACE,
+    "DEBUG": SeverityNumber.DEBUG,
+    "INFO": SeverityNumber.INFO,
+    "WARN": SeverityNumber.WARN,
+    "ERROR": SeverityNumber.ERROR,
+    "FATAL": SeverityNumber.FATAL,
+}
+
+# Reverse mapping for filtering by level name
+SEVERITY_TO_LEVEL: dict[SeverityNumber, str] = {v: k for k, v in SEVERITY_MAP.items()}
 
 
-class LogItem:
+# =============================================================================
+# Factory Functions
+# =============================================================================
+
+def create_log_record(
+    body: Any,
+    level: LOG_LEVEL = "INFO",
+    source: str = "Unknown",
+    attributes: dict[str, Any] | None = None,
+) -> LogRecord:
     """
-    Use this term to represent the emitted log information.
+    Create an OpenTelemetry LogRecord with rxplus conventions.
+
+    This factory function creates OTel LogRecords that are compatible with
+    both the OTel ecosystem and rxplus reactive pipelines.
+
+    Note: Resource information is associated at the LoggerProvider level,
+    not per LogRecord. Use configure_otel_logging() to set resource info.
+
+    Args:
+        body: Log message (any serializable type).
+        level: Log level string, one of "DEBUG", "INFO", "WARN", "ERROR", "FATAL".
+        source: Component name, stored in the "log.source" attribute.
+        attributes: Additional structured key-value attributes.
+
+    Returns:
+        OpenTelemetry LogRecord ready for emission through reactive streams
+        or OTel exporters.
+
+    Example:
+        >>> record = create_log_record("Server started", "INFO", source="HTTPServer")
+        >>> record = create_log_record(
+        ...     "Request processed",
+        ...     "DEBUG",
+        ...     source="API",
+        ...     attributes={"request_id": "abc123", "duration_ms": 42}
+        ... )
     """
+    merged_attributes = {"log.source": source, **(attributes or {})}
 
-    def __init__(self, msg: Any, level: LOG_LEVEL = "INFO", source: str = "Unknown"):
-        self.level = level
-        self.timestamp_str = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        self.source = source
-        self.msg = msg
+    return LogRecord(
+        timestamp=time.time_ns(),
+        observed_timestamp=time.time_ns(),
+        severity_number=SEVERITY_MAP.get(level, SeverityNumber.INFO),
+        severity_text=level,
+        body=body,
+        attributes=merged_attributes,
+    )
 
-    def __str__(self) -> str:
-        return f"[{self.level}] {self.timestamp_str} {self.source}\t: {self.msg}\n"
 
-
-def keep_log(func: Callable[[Any], Any]) -> Callable[[Any], Any]:
+def format_log_record(record: LogRecord) -> str:
     """
-    A decorator to keep the log item type. Can be used to monkey-patch the function to keep the log item type.
+    Format a LogRecord as a human-readable string for file/console output.
+
+    Format: [LEVEL] YYYY-MM-DDTHH:MM:SSZ source\\t: body\\n
+
+    Args:
+        record: OpenTelemetry LogRecord to format.
+
+    Returns:
+        Formatted string suitable for file or console output.
     """
+    timestamp_ns = record.timestamp or 0
+    timestamp_str = datetime.fromtimestamp(timestamp_ns / 1e9, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    source = (
+        record.attributes.get("log.source", "Unknown")
+        if record.attributes
+        else "Unknown"
+    )
+    return f"[{record.severity_text}] {timestamp_str} {source}\t: {record.body}\n"
 
-    def wrapper(x):
-        if isinstance(x, LogItem):
-            return x
-        else:
-            return func(x)
 
-    return wrapper
-
+# =============================================================================
+# Reactive Operators
+# =============================================================================
 
 def log_filter(
-    levels: set[LOG_LEVEL] = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
-):
+    levels: set[LOG_LEVEL] = {"TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"}
+) -> Callable[[Observable], Observable]:
     """
-    The operator to filter the log items by the level.
+    Filter LogRecords by severity level.
+
+    Only LogRecords with severity matching the specified levels pass through.
+    Non-LogRecord items are dropped.
+
+    Args:
+        levels: Set of level strings to allow through the filter.
+
+    Returns:
+        An RxPY operator that filters LogRecords by level.
+
+    Example:
+        >>> source.pipe(log_filter({"ERROR", "FATAL"})).subscribe(print)
     """
-    return ops.filter(lambda log: isinstance(log, LogItem) and log.level in levels)
+    severity_set = {SEVERITY_MAP[lvl] for lvl in levels if lvl in SEVERITY_MAP}
+    return ops.filter(
+        lambda item: isinstance(item, LogRecord) and item.severity_number in severity_set
+    )
 
 
-def drop_log():
-    return ops.filter(lambda log: not isinstance(log, LogItem))
+def drop_log() -> Callable[[Observable], Observable]:
+    """
+    Remove all LogRecords from the stream, passing through other items.
+
+    Useful when you want to separate log records from data in a mixed stream.
+
+    Returns:
+        An RxPY operator that drops LogRecords.
+
+    Example:
+        >>> mixed_stream.pipe(drop_log()).subscribe(process_data)
+    """
+    return ops.filter(lambda item: not isinstance(item, LogRecord))
 
 
 def log_redirect_to(
-    log_observer: Observer|Callable,
-    levels: set[LOG_LEVEL] = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"},
-):
+    log_observer: Observer | Callable,
+    levels: set[LOG_LEVEL] = {"TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"},
+) -> Callable[[Observable], Observable]:
     """
-    The operator redirect the log items to the specified observer (or function), and forward other items.
-    The log items outside the specifed levels are ignored.
-    """
+    Redirect LogRecords to another observer/function, forward other items.
 
-    def _log_redirect_to(source):
+    LogRecords matching the specified levels are sent to the log_observer,
+    while all other items continue through the main stream.
+
+    Args:
+        log_observer: Observer or callable to receive the LogRecords.
+        levels: Set of level strings to redirect.
+
+    Returns:
+        An RxPY operator that redirects matching LogRecords.
+
+    Example:
+        >>> logger = Logger(logfile="app.log")
+        >>> source.pipe(log_redirect_to(logger, {"ERROR"})).subscribe(process)
+    """
+    severity_set = {SEVERITY_MAP[lvl] for lvl in levels if lvl in SEVERITY_MAP}
+
+    def _log_redirect_to(source: Observable) -> Observable:
         def subscribe(observer, scheduler=None):
-
-            # Determine the redirection function
-            if hasattr(log_observer, "on_next"):
-                redirect_fun = log_observer.on_next
-            else:
-                redirect_fun = log_observer
+            redirect_fn = (
+                log_observer.on_next
+                if hasattr(log_observer, "on_next")
+                else log_observer
+            )
 
             def on_next(value: Any) -> None:
-                if isinstance(value, LogItem):
-                    if value.level in levels:
-                        redirect_fun(value) # type: ignore
-
+                if isinstance(value, LogRecord):
+                    if value.severity_number in severity_set:
+                        redirect_fn(value)  # type: ignore
                 else:
                     observer.on_next(value)
 
@@ -102,26 +215,53 @@ def log_redirect_to(
     return _log_redirect_to
 
 
+# =============================================================================
+# LogComp Interface
+# =============================================================================
+
 class LogComp(ABC):
     """
-    The abstract class for the log source, a component that can log messages.
+    Abstract base for components that emit logs into reactive streams.
+
+    Components that produce log output should implement this interface
+    to integrate with the rxplus logging system.
     """
 
     @abstractmethod
-    def set_super(self, obs: rx.abc.ObserverBase|Callable): ...
+    def set_super(self, obs: rx.abc.ObserverBase | Callable) -> None:
+        """Set the parent observer to receive log records."""
+        ...
 
     @abstractmethod
-    def log(self, msg: Any, level: LOG_LEVEL = "INFO"): ...
+    def log(
+        self,
+        body: Any,
+        level: LOG_LEVEL = "INFO",
+        attributes: dict[str, Any] | None = None,
+    ) -> None:
+        """Emit a log record with the specified message, level, and attributes."""
+        ...
 
     @abstractmethod
-    def get_rx_exception(self, error: Exception, note: str = "") -> RxException: ...
+    def get_rx_exception(self, error: Exception, note: str = "") -> RxException:
+        """Create an RxException with this component's context."""
+        ...
 
 
 class EmptyLogComp(LogComp):
-    def set_super(self, obs: rx.abc.ObserverBase|Callable):
+    """
+    A no-op LogComp implementation for testing or silent operation.
+    """
+
+    def set_super(self, obs: rx.abc.ObserverBase | Callable) -> None:
         pass
 
-    def log(self, msg: Any, level: LOG_LEVEL = "INFO"):
+    def log(
+        self,
+        body: Any,
+        level: LOG_LEVEL = "INFO",
+        attributes: dict[str, Any] | None = None,
+    ) -> None:
         pass
 
     def get_rx_exception(self, error: Exception, note: str = "") -> RxException:
@@ -129,76 +269,89 @@ class EmptyLogComp(LogComp):
 
 
 class NamedLogComp(LogComp):
+    """
+    LogComp implementation with a named source.
+
+    Emits LogRecords with the component name as the "log.source" attribute.
+    """
+
     def __init__(self, name: str = "LogSource"):
         self.name = name
-        self.super_obs: Optional[rx.abc.ObserverBase|Callable] = None
+        self.super_obs: rx.abc.ObserverBase | Callable | None = None
 
-    def set_super(self, obs: rx.abc.ObserverBase|Callable):
-        """
-        Set the super observer to redirect the log messages.
-        """
+    def set_super(self, obs: rx.abc.ObserverBase | Callable) -> None:
+        """Set the parent observer to receive log records."""
         self.super_obs = obs
 
-    def log(self, msg: Any, level: LOG_LEVEL = "INFO"):
+    def log(
+        self,
+        body: Any,
+        level: LOG_LEVEL = "INFO",
+        attributes: dict[str, Any] | None = None,
+    ) -> None:
         """
-        Log a message with the specified level.
+        Emit a LogRecord to the parent observer.
+
+        Args:
+            body: Log message (any serializable type).
+            level: Log level string.
+            attributes: Additional structured attributes.
+
+        Raises:
+            RuntimeError: If set_super() has not been called.
         """
-        log_item = LogItem(msg, level, self.name)
         if self.super_obs is None:
-            raise Exception("Super observer is not set. Please call set_super() first.")
+            raise RuntimeError("Super observer not set. Call set_super() first.")
+
+        record = create_log_record(
+            body=body,
+            level=level,
+            source=self.name,
+            attributes=attributes,
+        )
+
         if hasattr(self.super_obs, "on_next"):
-            self.super_obs.on_next(log_item)
+            self.super_obs.on_next(record)
         else:
-            self.super_obs(log_item)    # type: ignore
+            self.super_obs(record)  # type: ignore
 
     def get_rx_exception(self, error: Exception, note: str = "") -> RxException:
-        """
-        Get a RxException with the specified source and note.
-        """
+        """Create an RxException with this component's name as the source."""
         return RxException(error, source=self.name, note=note)
 
 
+# =============================================================================
+# Logger Subject
+# =============================================================================
+
 class Logger(Subject):
     """
-    Logger is a Subject that filters, records, and forwards LogItem entries.
+    Logger is a Subject that processes and forwards OTel LogRecords.
 
-    Behavior
-    - Writes logs to a file when `logfile` is provided, which is lazily created on
-      the first log item. Each log file is named with a timestamp postfix
-      (e.g., `app_20250120T103045.log`).
-    - Forwards LogItem instances to its subscribers; non‑log items pass through
-      unchanged via the stream where applicable.
-    - Conceptually not a terminal observer: errors are recorded as LogItem and
-      forwarded rather than terminating the stream.
-    - Never completes (`on_completed` is a no‑op).
-    - Supports automatic log rotation based on record count or time interval.
-    - Optionally cleans up old log files based on age.
+    Features:
+    - Emits LogRecords to OTel LoggerProvider for export (OTLP, console, etc.)
+    - Optional file logging with rotation for local debugging
+    - Cross-process file locking for concurrent writes
+    - Never terminates the stream on errors (converts to log records)
 
-    Concurrency and file locking
-    - Supports multiple processes writing to the same log file by serializing
-      writes. Acquires an exclusive cross‑process lock before writing:
-        * Uses `fcntl.flock` on POSIX platforms when available.
-        * Falls back to a lockfile (`.lock`) created with `O_EXCL` and retries
-          until acquired or a timeout occurs.
-    - The locking ensures atomic append segments and prevents open/write races
-      across processes.
+    Parameters:
+        logfile: Base path for file logging (timestamped). Optional.
+        rotate_interval: When to rotate log files. int = after N records,
+            timedelta = after time elapsed. None = no rotation.
+        max_log_age: Delete log files older than this during rotation.
+        lock_timeout: Maximum time to wait for file lock.
+        lock_poll_interval: Sleep interval when waiting for lock.
+        otel_provider: Custom LoggerProvider. Auto-created if otel_exporter is provided.
+        otel_exporter: Log exporter (ConsoleLogExporter, OTLPLogExporter, etc.)
+        resource: OTel Resource with service attributes.
 
-    Parameters
-    - logfile: Optional[str]
-        If provided, enables file logging and sets the log file path base.
-        The actual file will have a timestamp postfix (e.g., `app_20250120T103045.log`).
-    - rotate_interval: Optional[int | timedelta], default None
-        If int, rotates to a new log file after that many records.
-        If timedelta, rotates after that time interval has passed since the current
-        file was created. None means no rotation (a new timestamped file is created
-        only at startup).
-    - max_log_age: Optional[timedelta], default None
-        If provided, log files older than this age will be deleted during rotation.
-        The cleanup only happens when a new log file is created.
-    - lock_timeout: float, default 10.0
-        Maximum time to wait when acquiring the lock in the fallback mode.
-    - lock_poll_interval: float, default 0.05
-        Sleep interval between retries when waiting for the lock.
+    Example:
+        >>> from opentelemetry.sdk._logs.export import ConsoleLogExporter
+        >>> logger = Logger(
+        ...     logfile="app.log",
+        ...     otel_exporter=ConsoleLogExporter(),
+        ... )
+        >>> logger.on_next(create_log_record("Hello", "INFO", source="Main"))
     """
 
     # Regex pattern to match timestamped log files: base_YYYYMMDDTHHmmss.ext
@@ -206,47 +359,64 @@ class Logger(Subject):
 
     def __init__(
         self,
-        logfile: Optional[str] = None,
+        logfile: str | None = None,
         *,
-        rotate_interval: Optional[Union[int, timedelta]] = None,
-        max_log_age: Optional[timedelta] = None,
+        rotate_interval: int | timedelta | None = None,
+        max_log_age: timedelta | None = None,
         lock_timeout: float = 10.0,
         lock_poll_interval: float = 0.05,
+        # OTel parameters
+        otel_provider: LoggerProvider | None = None,
+        otel_exporter: LogRecordExporter | None = None,
+        resource: Resource | None = None,
     ):
         super().__init__()
+
+        # File logging setup
         self._logfile_base = logfile
         self._rotate_interval = rotate_interval
         self._max_log_age = max_log_age
+        self._lock_timeout = lock_timeout
+        self._lock_poll_interval = lock_poll_interval
 
         # Current active log file path (with timestamp)
-        self._current_logfile: Optional[str] = None
+        self._current_logfile: str | None = None
         self.pfile = None
 
         # Rotation tracking
         self._record_count = 0
-        self._file_created_time: Optional[datetime] = None
+        self._file_created_time: datetime | None = None
 
-        self._lock_timeout = lock_timeout
-        self._lock_poll_interval = lock_poll_interval
+        # OTel setup
+        self._resource = resource or Resource.create({"service.name": "rxplus"})
+
+        if otel_provider:
+            self._otel_provider = otel_provider
+        elif otel_exporter:
+            self._otel_provider = SdkLoggerProvider(resource=self._resource)
+            self._otel_provider.add_log_record_processor(
+                BatchLogRecordProcessor(otel_exporter)
+            )
+        else:
+            self._otel_provider = None
+
+        self._otel_logger = (
+            self._otel_provider.get_logger("rxplus.logger")
+            if self._otel_provider
+            else None
+        )
 
     @property
-    def logfile(self) -> Optional[str]:
-        """Return the current active log file path (for backward compatibility)."""
+    def logfile(self) -> str | None:
+        """Return the current active log file path."""
         return self._current_logfile
 
     def _generate_logfile_path(self) -> str:
-        """
-        Generate a new log file path with timestamp postfix.
-        
-        Format: base_YYYYMMDDTHHmmss.ext
-        Example: app_20250120T103045.log
-        """
+        """Generate a new log file path with timestamp postfix."""
         if self._logfile_base is None:
             raise ValueError("logfile base is not set")
 
         timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
-
-        # Split base path into name and extension
         base, ext = os.path.splitext(self._logfile_base)
         return f"{base}_{timestamp}{ext}"
 
@@ -273,18 +443,15 @@ class Logger(Subject):
         base, ext = os.path.splitext(self._logfile_base)
         dir_path = os.path.dirname(self._logfile_base) or "."
 
-        # Find all matching log files
         pattern = f"{os.path.basename(base)}_*{ext}"
         log_files = glob.glob(os.path.join(dir_path, pattern))
 
         cutoff_time = datetime.now() - self._max_log_age
 
         for log_file in log_files:
-            # Don't delete the current file
             if log_file == self._current_logfile:
                 continue
 
-            # Extract timestamp from filename
             filename = os.path.basename(log_file)
             match = self._TIMESTAMP_PATTERN.match(filename)
             if match:
@@ -295,9 +462,9 @@ class Logger(Subject):
                         try:
                             os.remove(log_file)
                         except OSError:
-                            pass  # Best effort cleanup
+                            pass
                 except ValueError:
-                    pass  # Invalid timestamp format, skip
+                    pass
 
     def _rotate_file(self) -> None:
         """Close current file and prepare for a new one."""
@@ -313,20 +480,15 @@ class Logger(Subject):
         if self._logfile_base is None:
             return
 
-        # Check if we need to rotate
         if self._should_rotate():
             self._rotate_file()
 
-        # Create new file if needed
         if self._current_logfile is None:
             self._current_logfile = self._generate_logfile_path()
             self._file_created_time = datetime.now()
             self._record_count = 0
-
-            # Cleanup old logs when creating a new file
             self._cleanup_old_logs()
 
-        # Open file if not open
         if self.pfile is None or self.pfile.closed:
             dir_name = os.path.dirname(self._current_logfile)
             if dir_name:
@@ -334,25 +496,16 @@ class Logger(Subject):
             self.pfile = open(self._current_logfile, "a")
             self.pfile.write("\n")
 
-    def _lock_path(self) -> Optional[str]:
+    def _lock_path(self) -> str | None:
         if self._current_logfile is None:
             return None
         return f"{self._current_logfile}.lock"
 
     @contextmanager
     def _acquire_lock(self):
-        """
-        Cross-process file lock with waiting. Uses fcntl when available and
-        falls back to an exclusive create + retry strategy otherwise.
-
-        Improvements over the previous version:
-        - Never swallows pre-yield exceptions (prevents "generator didn't yield").
-        - Treats Windows-specific permission errors as a contention signal.
-        - Performs best-effort cleanup without masking underlying failures.
-        """
+        """Cross-process file lock with waiting."""
         lock_path = self._lock_path()
         if lock_path is None:
-            # No file logging, no locking needed
             yield
             return
 
@@ -361,9 +514,9 @@ class Logger(Subject):
             os.makedirs(dir_name, exist_ok=True)
 
         # Try fcntl-based advisory lock first (POSIX platforms)
-        if os.name != "nt":  # pragma: no cover - platform specific guard
+        if os.name != "nt":
             try:
-                import fcntl  # type: ignore
+                import fcntl
 
                 f = open(lock_path, "a+")
                 try:
@@ -376,10 +529,9 @@ class Logger(Subject):
                         f.close()
                 return
             except Exception:
-                # Fall back to portable lockfile with O_EXCL
                 pass
 
-        # Fallback: spin on exclusive create of lock file, then unlink on exit
+        # Fallback: spin on exclusive create of lock file
         start = time.time()
         fd = None
         contended_errnos = {errno.EEXIST, errno.EACCES, errno.EPERM, errno.EBUSY}
@@ -390,10 +542,11 @@ class Logger(Subject):
                     fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
                     break
                 except OSError as exc:
-                    # Windows reports open files as PermissionError (EACCES / EPERM)
                     if exc.errno in contended_errnos:
                         if time.time() - start > self._lock_timeout:
-                            raise TimeoutError(f"Timeout acquiring log lock: {lock_path}") from exc
+                            raise TimeoutError(
+                                f"Timeout acquiring log lock: {lock_path}"
+                            ) from exc
                         time.sleep(self._lock_poll_interval)
                         continue
                     raise
@@ -411,28 +564,28 @@ class Logger(Subject):
             except FileNotFoundError:
                 pass
             except PermissionError:
-                # Windows may briefly deny removal if another process raced to open
-                # the file after we closed our handle. Leaving the file behind is a
-                # safe fallback because contention will be handled by retries.
                 pass
 
     def on_next(self, value: Any) -> None:
-        if isinstance(value, LogItem):
+        if isinstance(value, LogRecord):
             try:
+                # Emit to OTel provider
+                if self._otel_logger is not None:
+                    self._otel_logger.emit(value)
+
+                # Write to file if configured
                 if self._logfile_base is not None:
-                    # Serialize writes across processes
-                    # First ensure file is open (this handles rotation and cleanup)
                     self._ensure_file_open()
-                    
+
                     with self._acquire_lock():
-                        # Re-check file state after acquiring lock
                         self._ensure_file_open()
-                        
+
                         if self.pfile is not None:
-                            self.pfile.write(str(value))
+                            self.pfile.write(format_log_record(value))
                             self.pfile.flush()
                             self._record_count += 1
 
+                # Forward to subscribers
                 super().on_next(value)
 
             except Exception as e:
@@ -440,16 +593,71 @@ class Logger(Subject):
                 super().on_error(rx_exception)
 
     def on_completed(self) -> None:
-        """
-        The logger will never be completed.
-        """
+        """The logger never completes (keeps stream alive)."""
         pass
 
     def on_error(self, error: Exception) -> None:
-        if isinstance(error, RxException):
-            logitem = LogItem(str(error), "ERROR", source=error.source)
-        else:
-            logitem = LogItem(str(error), "ERROR")
+        """Convert errors to LogRecords and forward."""
+        source = error.source if isinstance(error, RxException) else "Unknown"
+        record = create_log_record(str(error), "ERROR", source=source)
+        self.on_next(record)
 
-        # log the error
-        self.on_next(logitem)
+
+# =============================================================================
+# Configuration Helpers
+# =============================================================================
+
+def configure_otel_logging(
+    service_name: str = "rxplus",
+    service_version: str = "",
+    otlp_endpoint: str | None = None,
+    otlp_insecure: bool = True,
+    console_export: bool = False,
+) -> LoggerProvider:
+    """
+    Configure OTel logging with common exporters.
+
+    This helper creates a LoggerProvider with the specified exporters,
+    ready for use with the Logger class.
+
+    Args:
+        service_name: Service identifier for resource attributes.
+        service_version: Service version for resource attributes.
+        otlp_endpoint: OTLP collector endpoint (e.g., "localhost:4317").
+        otlp_insecure: Use insecure connection for OTLP (default True).
+        console_export: Enable console output for debugging.
+
+    Returns:
+        Configured LoggerProvider ready for use with Logger.
+
+    Example:
+        >>> provider = configure_otel_logging(
+        ...     service_name="my-app",
+        ...     otlp_endpoint="localhost:4317",
+        ...     console_export=True,
+        ... )
+        >>> logger = Logger(otel_provider=provider)
+    """
+    resource = Resource.create({
+        "service.name": service_name,
+        "service.version": service_version,
+    })
+    provider = SdkLoggerProvider(resource=resource)
+
+    if console_export:
+        from opentelemetry.sdk._logs.export import ConsoleLogRecordExporter
+
+        provider.add_log_record_processor(
+            BatchLogRecordProcessor(ConsoleLogRecordExporter())
+        )
+
+    if otlp_endpoint:
+        from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
+
+        provider.add_log_record_processor(
+            BatchLogRecordProcessor(
+                OTLPLogExporter(endpoint=otlp_endpoint, insecure=otlp_insecure)
+            )
+        )
+
+    return provider

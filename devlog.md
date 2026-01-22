@@ -1,3 +1,4 @@
+- 2026-01-22 Finished the new logging component supporting OpenTelemetry framework.
 - 2026-01-20 
   - Implemented modular installation. Add GitHub Action for sanity check. 
   - Enriched documentation. Improved logging file control automation.

@@ -15,16 +15,20 @@ from .cli import from_cli  # noqa: F401
 from .duplex import Duplex, connect_adapter, make_duplex  # noqa: F401
 from .logging import (  # noqa: F401
     LOG_LEVEL,
+    SEVERITY_MAP,
     EmptyLogComp,
     LogComp,
     Logger,
-    LogItem,
     NamedLogComp,
+    create_log_record,
+    configure_otel_logging,
+    format_log_record,
     drop_log,
-    keep_log,
     log_filter,
     log_redirect_to,
 )
+# Re-export LogRecord from OpenTelemetry for convenience
+from opentelemetry.sdk._logs._internal import LogRecord  # noqa: F401
 from .mechanism import RxException  # noqa: F401
 from .opt import redirect_to, stream_print_out, ErrorRestartSignal, retry_with_signal, error_restart_signal_to_logitem  # noqa: F401
 from .utils import TaggedData, tag, tag_filter, untag, FPSMonitor, BandwidthMonitor  # noqa: F401
@@ -74,10 +78,13 @@ __all__ = [
     "FPSMonitor",
     "BandwidthMonitor",
 
-    # Logging
-    "LogItem",
+    # Logging (OpenTelemetry-based)
+    "LogRecord",
     "LOG_LEVEL",
-    "keep_log",
+    "SEVERITY_MAP",
+    "create_log_record",
+    "format_log_record",
+    "configure_otel_logging",
     "log_filter",
     "drop_log",
     "log_redirect_to",

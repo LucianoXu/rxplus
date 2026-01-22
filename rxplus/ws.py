@@ -347,13 +347,13 @@ class RxWSServer(Subject):
                 except (ConnectionResetError, BrokenPipeError, OSError) as e:
                     self.logcomp.log(
                         f"Failed to send data to client {remote_desc}, connection may be broken: {get_short_error_info(e)}",
-                        "WARNING",
+                        "WARN",
                     )
                     return
                 except websockets.exceptions.ConnectionClosed as e:
                     self.logcomp.log(
                         f"Failed to send data to client {remote_desc}, connection closed: {get_short_error_info(e)}",
-                        "WARNING",
+                        "WARN",
                     )
                     return
         except asyncio.CancelledError:
@@ -373,19 +373,19 @@ class RxWSServer(Subject):
                 except ConnectionResetError as e:
                     self.logcomp.log(
                         f"Connection reset (ConnectionResetError): {get_short_error_info(e)}",
-                        "WARNING",
+                        "WARN",
                     )
                     return
                 except OSError as e:
                     self.logcomp.log(
                         f"Network error or connection lost (OSError): {get_short_error_info(e)}",
-                        "WARNING",
+                        "WARN",
                     )
                     return
                 except websockets.exceptions.ConnectionClosedError as e:
                     self.logcomp.log(
                         f"Client {remote_desc} disconnected with error: {get_short_error_info(e)}.",
-                        "WARNING",
+                        "WARN",
                     )
                     return
                 except websockets.exceptions.ConnectionClosedOK:
@@ -659,14 +659,14 @@ class RxWSClient(Subject):
                     except OSError as e:
                         self.logcomp.log(
                             f"Network error or connection failed (OSError): {get_short_error_info(e)}",
-                            "WARNING",
+                            "WARN",
                         )
                         await asyncio.sleep(self.conn_retry_timeout)
 
                     except websockets.InvalidHandshake as e:
                         self.logcomp.log(
                             f"Invalid handshake with server {remote_desc}: {get_short_error_info(e)}",
-                            "WARNING",
+                            "WARN",
                         )
                         await asyncio.sleep(self.conn_retry_timeout)
 
@@ -736,13 +736,13 @@ class RxWSClient(Subject):
                 except (ConnectionResetError, BrokenPipeError, OSError) as e:
                     self.logcomp.log(
                         f"Failed to send data to server {remote_desc}, connection may be broken: {get_short_error_info(e)}",
-                        "WARNING",
+                        "WARN",
                     )
                     return
                 except websockets.exceptions.ConnectionClosed as e:
                     self.logcomp.log(
                         f"Failed to send data to server {remote_desc}, connection closed: {get_short_error_info(e)}",
-                        "WARNING",
+                        "WARN",
                     )
                     return
         except asyncio.CancelledError:
@@ -756,13 +756,13 @@ class RxWSClient(Subject):
                 except OSError as e:
                     self.logcomp.log(
                         f"Network error or connection lost (OSError): {get_short_error_info(e)}",
-                        "WARNING",
+                        "WARN",
                     )
                     return
                 except websockets.ConnectionClosedError as e:
                     self.logcomp.log(
                         f"Server {remote_desc} Connection closed with error: {get_short_error_info(e)}.",
-                        "WARNING",
+                        "WARN",
                     )
                     return
                 except websockets.ConnectionClosedOK:
