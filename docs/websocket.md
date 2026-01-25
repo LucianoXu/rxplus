@@ -65,7 +65,7 @@ client.subscribe(print)
 client.on_completed()
 ```
 
-The client automatically retries connection until the server is available. Outbound messages are queued while disconnected.
+The client automatically retries connection until the server is available.
 
 **Parameters:**
 
@@ -76,6 +76,7 @@ The client automatically retries connection until the server is available. Outbo
 | `ping_interval` | `30.0` | Heartbeat interval (seconds) |
 | `ping_timeout` | `30.0` | Heartbeat timeout (seconds) |
 | `name` | `None` | Custom name for log source identification |
+| `buffer_while_disconnected` | `False` | If `True`, queue messages while disconnected for delivery after reconnection. If `False`, messages are dropped when not connected. |
 
 ### `RxWSClientGroup`
 
@@ -101,6 +102,7 @@ group.subscribe(lambda td: print(f"[{td.tag}] received"))
 | `ping_interval` | `30.0` | Heartbeat interval (seconds) |
 | `ping_timeout` | `30.0` | Heartbeat timeout (seconds) |
 | `name` | `None` | Custom name for log source; child clients use `"{name}:{path}"` |
+| `buffer_while_disconnected` | `False` | If `True`, queue messages while disconnected. Passed to child clients. |
 
 ### Data Types
 

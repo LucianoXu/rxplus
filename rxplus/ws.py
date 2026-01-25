@@ -7,23 +7,18 @@ threaded Observable/Observer (similar to `rx.interval` on a new thread).
 """
 
 import asyncio
-import os
 import pickle
 import threading
-import time
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Literal, Optional
 
-import reactivex as rx
 import websockets
+from websockets import ClientConnection, Server
 
-
-from websockets import ClientConnection, Server, ServerConnection
-
-from reactivex import Observable, Observer, Subject, create
+from reactivex import Subject
 from reactivex import operators as ops
 
-from .logging import LOG_LEVEL, create_log_record, drop_log
+from .logging import LOG_LEVEL, create_log_record
 from .mechanism import RxException
 from .utils import TaggedData, get_full_error_info, get_short_error_info
 
@@ -89,7 +84,7 @@ class WSBytes(WSDatatype):
 
     def package_type_check(self, value) -> None:
         if not isinstance(value, (bytes, bytearray)):
-            raise TypeError("WSRawBytes expects a bytes-like object")
+            raise TypeError("WSBytes expects a bytes-like object")
 
     def package(self, value):
         return value
@@ -98,7 +93,7 @@ class WSBytes(WSDatatype):
         # websockets binary frame → bytes ；text frame → str
         if isinstance(value, str):
             raise TypeError(
-                f"WSRawBytes expects a bytes-like object, got str '{value}'"
+                f"WSBytes expects a bytes-like object, got str '{value}'"
             )
         return bytes(value)
 
@@ -151,15 +146,41 @@ def wsdt_factory(datatype: Literal["string", "bytes", "object"]) -> WSDatatype:
 # }
 
 
+def _validate_conn_cfg(conn_cfg: dict, required_keys: list[str]) -> None:
+    """Validate that conn_cfg contains all required keys."""
+    missing = [k for k in required_keys if k not in conn_cfg]
+    if missing:
+        raise ValueError(f"conn_cfg missing required keys: {missing}")
+
+
 class WS_Channels:
     """
     The class to manage the websocket channels of the same path.
+    Thread-safe access to channels and queues via internal lock.
     """
 
     def __init__(self, datatype: Literal["string", "bytes", "object"] = "string"):
         self.adapter: WSDatatype = wsdt_factory(datatype)
+        self._lock = threading.Lock()
         self.channels: set[Any] = set()
         self.queues: set[Any] = set()
+
+    def add_client(self, websocket: Any, queue: Any) -> None:
+        """Thread-safe registration of a client."""
+        with self._lock:
+            self.channels.add(websocket)
+            self.queues.add(queue)
+
+    def remove_client(self, websocket: Any, queue: Any) -> None:
+        """Thread-safe removal of a client."""
+        with self._lock:
+            self.channels.discard(websocket)
+            self.queues.discard(queue)
+
+    def get_queues_snapshot(self) -> list[Any]:
+        """Return a snapshot of queues for iteration."""
+        with self._lock:
+            return list(self.queues)
 
 
 class RxWSServer(Subject):
@@ -190,6 +211,7 @@ class RxWSServer(Subject):
     ):
         """Initialize the WebSocket server and start listening."""
         super().__init__()
+        _validate_conn_cfg(conn_cfg, ["host", "port"])
         self.host = conn_cfg["host"]
         self.port = int(conn_cfg["port"])
 
@@ -210,6 +232,8 @@ class RxWSServer(Subject):
         self.ping_interval = ping_interval
         self.ping_timeout = ping_timeout
 
+        # Thread-safe access to path_channels
+        self._path_channels_lock = threading.Lock()
         self.path_channels: dict[str, WS_Channels] = {}
 
         # Private asyncio loop in a background thread
@@ -226,13 +250,13 @@ class RxWSServer(Subject):
         """
         Get the WS_Channels instance for the given path.
         If the path does not exist, create a new WS_Channels instance.
+        Thread-safe via _path_channels_lock.
         """
-        if path not in self.path_channels:
-            datatype = self.datatype_func(path)
-
-            self.path_channels[path] = WS_Channels(datatype=datatype)
-
-        return self.path_channels[path]
+        with self._path_channels_lock:
+            if path not in self.path_channels:
+                datatype = self.datatype_func(path)
+                self.path_channels[path] = WS_Channels(datatype=datatype)
+            return self.path_channels[path]
 
     def on_next(self, value):
         """Route outbound messages to the proper channel queues."""
@@ -274,7 +298,7 @@ class RxWSServer(Subject):
             super().on_error(rx_exception)
             return
 
-        for queue in ws_channels.queues:
+        for queue in ws_channels.get_queues_snapshot():
             loop.call_soon_threadsafe(queue.put_nowait, data)
 
     def on_error(self, error):
@@ -298,9 +322,8 @@ class RxWSServer(Subject):
 
             queue: asyncio.Queue[Any] = asyncio.Queue()
 
-            # Register client
-            ws_channels.channels.add(websocket)
-            ws_channels.queues.add(queue)
+            # Register client (thread-safe)
+            ws_channels.add_client(websocket, queue)
 
             sender_task = asyncio.create_task(
                 self._server_sender(queue, websocket, ws_channels.adapter, remote_desc)
@@ -338,9 +361,8 @@ class RxWSServer(Subject):
             await websocket.close()
             self._log(f"Client {remote_desc} resources released.", "INFO")
 
-            # Unregister client
-            ws_channels.channels.discard(websocket)
-            ws_channels.queues.discard(queue)
+            # Unregister client (thread-safe)
+            ws_channels.remove_client(websocket, queue)
 
     async def _server_sender(
         self,
@@ -404,7 +426,15 @@ class RxWSServer(Subject):
                     )
                     return
 
-                payload = adapter.unpackage(data)
+                try:
+                    payload = adapter.unpackage(data)
+                except Exception as e:
+                    self._log(
+                        f"Failed to unpackage data from {remote_desc}: {get_short_error_info(e)}",
+                        "ERROR",
+                    )
+                    continue
+
                 wrapped_data = TaggedData(path, payload)
                 super().on_next(wrapped_data)
         except asyncio.CancelledError:
@@ -543,10 +573,22 @@ class RxWSClient(Subject):
         ping_interval: Optional[float] = 30.0,
         ping_timeout: Optional[float] = 30.0,
         name: Optional[str] = None,
+        buffer_while_disconnected: bool = False,
     ):
-        """Create a reconnecting WebSocket client."""
-        super().__init__()
+        """Create a reconnecting WebSocket client.
 
+        Args:
+            conn_cfg: Connection configuration with 'host', 'port', and optional 'path'.
+            datatype: Payload serialization type.
+            conn_retry_timeout: Delay between reconnection attempts in seconds.
+            ping_interval: WebSocket heartbeat interval.
+            ping_timeout: WebSocket heartbeat timeout.
+            name: Custom name for log source identification.
+            buffer_while_disconnected: If True, queue messages while disconnected.
+                If False (default), messages are dropped when not connected.
+        """
+        super().__init__()
+        _validate_conn_cfg(conn_cfg, ["host", "port"])
         self.host = conn_cfg["host"]
         self.port = int(conn_cfg["port"])
         self.path = conn_cfg.get("path", "/")
@@ -559,9 +601,10 @@ class RxWSClient(Subject):
 
         self.ping_interval = ping_interval
         self.ping_timeout = ping_timeout
+        self._buffer_while_disconnected = buffer_while_disconnected
 
-        # Cross-thread outbound queue; consumed by the private loop task
-        self.queue: asyncio.Queue[Any] = asyncio.Queue()
+        # Cross-thread outbound queue; created lazily in _run_loop
+        self.queue: Optional[asyncio.Queue[Any]] = None
         self.ws: Optional[ClientConnection] = None
 
         self.conn_retry_timeout = conn_retry_timeout
@@ -574,6 +617,8 @@ class RxWSClient(Subject):
 
         # whether the connection is established. this will influence the caching strategy.
         self._connected = False
+        # flag to signal shutdown
+        self._shutdown_requested = False
 
     def _log(self, body: str, level: LOG_LEVEL = "INFO") -> None:
         """Emit a log record to subscribers with trace context."""
@@ -581,29 +626,40 @@ class RxWSClient(Subject):
         super().on_next(record)
 
     def on_next(self, value):
-        """Send a message to the server when connected."""
-        if self._connected:
-            self.adapter.package_type_check(value)
-            if not self._loop_ready.wait(timeout=5.0):
-                rx_exception = RxException(
-                    RuntimeError("Client event loop failed to start"),
-                    source=self._source,
-                    note="RxWSClient.on_next",
-                )
-                super().on_error(rx_exception)
-                return
+        """Send a message to the server.
 
-            loop = self._loop
-            if loop is None:
-                rx_exception = RxException(
-                    RuntimeError("Client event loop not available"),
-                    source=self._source,
-                    note="RxWSClient.on_next",
-                )
-                super().on_error(rx_exception)
-                return
+        If buffer_while_disconnected is False (default), messages are dropped
+        when not connected. If True, messages are queued for delivery after
+        reconnection.
+        """
+        if self._shutdown_requested:
+            return
 
-            loop.call_soon_threadsafe(self.queue.put_nowait, value)
+        if not self._connected and not self._buffer_while_disconnected:
+            # Drop message when not connected and buffering is disabled
+            return
+
+        self.adapter.package_type_check(value)
+        if not self._loop_ready.wait(timeout=5.0):
+            rx_exception = RxException(
+                RuntimeError("Client event loop failed to start"),
+                source=self._source,
+                note="RxWSClient.on_next",
+            )
+            super().on_error(rx_exception)
+            return
+
+        loop = self._loop
+        if loop is None or self.queue is None:
+            rx_exception = RxException(
+                RuntimeError("Client event loop not available"),
+                source=self._source,
+                note="RxWSClient.on_next",
+            )
+            super().on_error(rx_exception)
+            return
+
+        loop.call_soon_threadsafe(self.queue.put_nowait, value)
 
     def on_error(self, error):
         """Report connection errors."""
@@ -612,24 +668,32 @@ class RxWSClient(Subject):
 
     def on_completed(self) -> None:
         """Close the connection before completing."""
-        self._schedule_on_loop(self.async_completing())
+        self._shutdown_requested = True
+        self._shutdown_client()
 
-    async def async_completing(self):
-        """Async helper to close the WebSocket client."""
+    def _shutdown_client(self):
+        """Shutdown the client, stop the event loop, and join the thread."""
+        self._log("Closing...", "INFO")
         try:
-            # close all connections
-            self._log("Closing...", "INFO")
+            if self._loop is not None:
+                def _close():
+                    try:
+                        # Cancel all tasks
+                        for task in asyncio.all_tasks(self._loop):
+                            task.cancel()
+                    finally:
+                        asyncio.get_running_loop().stop()
 
-            if self.ws is not None:
-                await self.ws.close()
-                self.ws = None
+                self._loop.call_soon_threadsafe(_close)
+
+            if self._thread is not None:
+                self._thread.join(timeout=2.0)
 
             self._log("Closed.", "INFO")
             super().on_completed()
-
-        except asyncio.CancelledError:
-            self._log("Async completing cancelled.", "INFO")
-            raise
+        except Exception as e:
+            rx_exception = RxException(e, source=self._source, note="RxWSClient.on_completed")
+            super().on_error(rx_exception)
 
     async def connect_client(self):
         """Connect to the remote server and forward messages."""
@@ -639,13 +703,13 @@ class RxWSClient(Subject):
 
         try:
             # Repeatedly attempt to connect to the server
-            while True:
+            while not self._shutdown_requested:
 
                 self._connected = False
                 # Attempt to connect to the server
                 self._log(f"Connecting to server {remote_desc}", "INFO")
 
-                while True:
+                while not self._shutdown_requested:
                     try:
                         """
                         According to the documentation of websockets.connect:
@@ -750,6 +814,7 @@ class RxWSClient(Subject):
     # ---------------- threaded event loop plumbing ---------------- #
     async def _client_sender(self, websocket: ClientConnection, remote_desc: str) -> None:
         try:
+            assert self.queue is not None, "Queue must be initialized before _client_sender"
             while True:
                 value = await self.queue.get()
                 try:
@@ -792,13 +857,24 @@ class RxWSClient(Subject):
                     )
                     return
 
-                super().on_next(self.adapter.unpackage(data))
+                try:
+                    payload = self.adapter.unpackage(data)
+                except Exception as e:
+                    self._log(
+                        f"Failed to unpackage data from {remote_desc}: {get_short_error_info(e)}",
+                        "ERROR",
+                    )
+                    continue
+
+                super().on_next(payload)
         except asyncio.CancelledError:
             raise
 
     def _run_loop(self):
         loop = asyncio.new_event_loop()
         self._loop = loop
+        # Create queue after event loop is set up
+        self.queue = asyncio.Queue()
         self._loop_ready.set()
         asyncio.set_event_loop(loop)
         loop.create_task(self.connect_client())
@@ -882,10 +958,13 @@ class RxWSClientGroup(Subject):
         ping_interval: Optional[float] = 30.0,
         ping_timeout: Optional[float] = 30.0,
         name: Optional[str] = None,
+        buffer_while_disconnected: bool = False,
     ):
         super().__init__()
+        _validate_conn_cfg(conn_cfg, ["host", "port"])
 
         self._name = name
+        self._buffer_while_disconnected = buffer_while_disconnected
         self.datatype_func: Callable[[str], Literal["string", "bytes", "object"]]
         if datatype in ["string", "bytes", "object"]:
             self.datatype_func = lambda path: datatype  # type: ignore
@@ -910,10 +989,12 @@ class RxWSClientGroup(Subject):
                 ping_interval=ping_interval,
                 ping_timeout=ping_timeout,
                 name=child_name,
+                buffer_while_disconnected=buffer_while_disconnected,
             )
 
         self._client_factory = make_client
-        self._clients = {}  # tag -> RxWSClient
+        self._clients_lock = threading.Lock()
+        self._clients: dict[str, RxWSClient] = {}  # tag -> RxWSClient
         self._bus = Subject()  # merged inbound stream
 
     # ============ Observer interface ============ #
@@ -944,15 +1025,17 @@ class RxWSClientGroup(Subject):
         self._ensure_client(path)
 
     # ============ internal helpers ============ #
-    def _ensure_client(self, tag: str):
-        if tag not in self._clients:
-            # build new client and bridge its inbound traffic
-            client = self._client_factory(tag)
+    def _ensure_client(self, tag: str) -> RxWSClient:
+        """Get or create a client for the given tag. Thread-safe."""
+        with self._clients_lock:
+            if tag not in self._clients:
+                # build new client and bridge its inbound traffic
+                client = self._client_factory(tag)
 
-            # When the client emits, wrap again with tag and push to bus
-            client.pipe(
-                ops.map(keep_log(lambda data: TaggedData(tag, data)))
-            ).subscribe(self._bus)
+                # When the client emits, wrap again with tag and push to bus
+                client.pipe(
+                    ops.map(keep_log(lambda data: TaggedData(tag, data)))
+                ).subscribe(self._bus)
 
-            self._clients[tag] = client
-        return self._clients[tag]
+                self._clients[tag] = client
+            return self._clients[tag]

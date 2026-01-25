@@ -1,3 +1,6 @@
+- 2026-01-25 
+    Removed `LogComp` and updated the usage in `RxWS`. 
+    Refined RxWS series compnents.
 - 2026-01-22 Finished the new logging component supporting OpenTelemetry framework.
 - 2026-01-20 
   - Implemented modular installation. Add GitHub Action for sanity check. 
