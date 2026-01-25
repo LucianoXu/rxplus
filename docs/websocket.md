@@ -46,7 +46,7 @@ server.on_completed()
 | `datatype` | `"string"` | `"string"`, `"bytes"`, `"object"`, or `Callable[[path], dtype]` |
 | `ping_interval` | `30.0` | Heartbeat interval (seconds) |
 | `ping_timeout` | `30.0` | Heartbeat timeout (seconds) |
-| `logcomp` | `None` | Optional `LogComp` for structured logging |
+| `name` | `None` | Custom name for log source identification |
 
 ### `RxWSClient`
 
@@ -67,6 +67,16 @@ client.on_completed()
 
 The client automatically retries connection until the server is available. Outbound messages are queued while disconnected.
 
+**Parameters:**
+
+| Name | Default | Description |
+|------|---------|-------------|
+| `datatype` | `"string"` | `"string"`, `"bytes"`, or `"object"` |
+| `conn_retry_timeout` | `0.5` | Delay between reconnection attempts (seconds) |
+| `ping_interval` | `30.0` | Heartbeat interval (seconds) |
+| `ping_timeout` | `30.0` | Heartbeat timeout (seconds) |
+| `name` | `None` | Custom name for log source identification |
+
 ### `RxWSClientGroup`
 
 Manages multiple `RxWSClient` instances behind a single interface, creating clients lazily per path.
@@ -81,6 +91,16 @@ group.on_next(TaggedData("/video", video_data))
 # Receive from all paths
 group.subscribe(lambda td: print(f"[{td.tag}] received"))
 ```
+
+**Parameters:**
+
+| Name | Default | Description |
+|------|---------|-------------|
+| `datatype` | `"string"` | `"string"`, `"bytes"`, `"object"`, or `Callable[[path], dtype]` |
+| `conn_retry_timeout` | `0.5` | Delay between reconnection attempts (seconds) |
+| `ping_interval` | `30.0` | Heartbeat interval (seconds) |
+| `ping_timeout` | `30.0` | Heartbeat timeout (seconds) |
+| `name` | `None` | Custom name for log source; child clients use `"{name}:{path}"` |
 
 ### Data Types
 

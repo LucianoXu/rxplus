@@ -7,7 +7,7 @@ import pyaudio
 import time
 
 import rxplus
-from rxplus import TaggedData, RxMicrophone, NamedLogComp, log_filter, drop_log, RxWSServer, tag
+from rxplus import TaggedData, RxMicrophone, log_filter, drop_log, RxWSServer, tag
 from reactivex.scheduler import ThreadPoolScheduler
 
 # TODO: problem encounted when changing the microphone device. The following code observed:
@@ -28,7 +28,6 @@ def task(parsed_args: argparse.Namespace):
             'host' : parsed_args.host, 
             'port' : parsed_args.port,
         }, 
-        logcomp=NamedLogComp("RxWSServer"),
         datatype='bytes'
     )
 

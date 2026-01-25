@@ -5,7 +5,7 @@ from reactivex import operators as ops
 import argparse
 import time
 
-from rxplus import create_screen_capture, RxWSServer, NamedLogComp, rgb_ndarray_to_jpeg_bytes, FPSMonitor, BandwidthMonitor, tag
+from rxplus import create_screen_capture, RxWSServer, rgb_ndarray_to_jpeg_bytes, FPSMonitor, BandwidthMonitor, tag
 
 
 
@@ -22,7 +22,6 @@ def task(parsed_args: argparse.Namespace):
             'host' : parsed_args.host, 
             'port' : parsed_args.port,
         }, 
-        logcomp=NamedLogComp("RxWSServer"),
         datatype='bytes'
     )
 

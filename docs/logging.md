@@ -33,9 +33,6 @@ from rxplus import (
     
     # Components
     Logger,
-    LogComp,
-    NamedLogComp,
-    EmptyLogComp,
 )
 ```
 
@@ -150,30 +147,6 @@ logger = Logger(otel_provider=provider)
 - Errors converted to LogRecords (never terminates the stream)
 - `on_completed()` is a no-op to keep the logger alive
 
-## LogComp Interface
-
-Components that produce logs implement this interface:
-
-```python
-class LogComp(ABC):
-    def set_super(self, obs): ...       # Connect to parent observer
-    def log(self, body, level="INFO", attributes=None): ...
-    def get_rx_exception(self, error, note=""): ...
-```
-
-**Implementations:**
-
-- `NamedLogComp(name)` — Logs with a named source and supports attributes
-- `EmptyLogComp()` — Silent no-op; useful for testing
-
-```python
-from rxplus import NamedLogComp
-
-comp = NamedLogComp("MyComponent")
-comp.set_super(logger)
-comp.log("Processing started", "INFO", attributes={"batch_size": 100})
-```
-
 ## Reactive Operators
 
 | Operator | Purpose |
@@ -202,6 +175,60 @@ from rxplus import log_filter
 
 # Only process ERROR and FATAL logs
 error_stream = source.pipe(log_filter({"ERROR", "FATAL"}))
+```
+
+## Trace Context Integration
+
+Log records can automatically include trace and span IDs for distributed tracing correlation. This is powered by the `rxplus` trace context system.
+
+### Automatic Trace Injection
+
+When you create log records within a span, trace IDs are automatically injected:
+
+```python
+from rxplus import create_log_record, start_span
+
+with start_span() as span:
+    record = create_log_record("Processing request", "INFO", source="API")
+    # record.attributes now contains:
+    # - "trace_id": span.trace_id (32 hex chars)
+    # - "span_id": span.span_id (16 hex chars)
+    # - "parent_span_id": (if nested, 16 hex chars)
+```
+
+### Trace Context in Log Output
+
+Formatted log output includes short trace/span prefixes for debugging:
+
+```
+[INFO] 2025-01-25T10:30:45Z [a1b2c3d4:12345678] API: Processing request
+```
+
+### Disabling Trace Injection
+
+If you don't want trace context in a specific log record:
+
+```python
+record = create_log_record("Simple log", "INFO", include_trace=False)
+```
+
+### TraceContext for Long-Running Operations
+
+For operations that span multiple async tasks or threads:
+
+```python
+from rxplus import TraceContext, create_log_record
+
+trace = TraceContext()
+
+# Start the root span
+trace.start_root_span()
+
+# All logs created will share the same trace_id
+log = create_log_record("Starting work", "INFO", source="Worker")
+
+with trace.span():
+    log = create_log_record("In child span", "DEBUG", source="Worker")
 ```
 
 ## Configuration Helper

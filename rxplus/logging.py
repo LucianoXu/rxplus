@@ -12,7 +12,6 @@ import errno
 import glob
 import re
 from contextlib import contextmanager
-from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Literal, Optional, Union
 
@@ -26,7 +25,7 @@ from opentelemetry.sdk._logs import LoggerProvider as SdkLoggerProvider
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor, LogRecordExporter
 from opentelemetry.sdk.resources import Resource
 
-from .mechanism import RxException
+from .mechanism import RxException, get_current_span, SpanContext
 
 # =============================================================================
 # Type Definitions
@@ -57,6 +56,7 @@ def create_log_record(
     level: LOG_LEVEL = "INFO",
     source: str = "Unknown",
     attributes: dict[str, Any] | None = None,
+    include_trace: bool = True,
 ) -> LogRecord:
     """
     Create an OpenTelemetry LogRecord with rxplus conventions.
@@ -72,6 +72,7 @@ def create_log_record(
         level: Log level string, one of "DEBUG", "INFO", "WARN", "ERROR", "FATAL".
         source: Component name, stored in the "log.source" attribute.
         attributes: Additional structured key-value attributes.
+        include_trace: If True, includes current trace/span IDs from context.
 
     Returns:
         OpenTelemetry LogRecord ready for emission through reactive streams
@@ -85,8 +86,22 @@ def create_log_record(
         ...     source="API",
         ...     attributes={"request_id": "abc123", "duration_ms": 42}
         ... )
+        >>> # With trace context
+        >>> from rxplus import start_span
+        >>> with start_span() as span:
+        ...     record = create_log_record("In span", "INFO")
+        ...     assert record.attributes["trace_id"] == span.trace_id
     """
     merged_attributes = {"log.source": source, **(attributes or {})}
+
+    # Inject trace context if available and requested
+    if include_trace:
+        span_ctx = get_current_span()
+        if span_ctx is not None:
+            merged_attributes["trace_id"] = span_ctx.trace_id
+            merged_attributes["span_id"] = span_ctx.span_id
+            if span_ctx.parent_span_id:
+                merged_attributes["parent_span_id"] = span_ctx.parent_span_id
 
     return LogRecord(
         timestamp=time.time_ns(),
@@ -102,7 +117,10 @@ def format_log_record(record: LogRecord) -> str:
     """
     Format a LogRecord as a human-readable string for file/console output.
 
-    Format: [LEVEL] YYYY-MM-DDTHH:MM:SSZ source\\t: body\\n
+    Format: [LEVEL] YYYY-MM-DDTHH:MM:SSZ [trace:span] source\\t: body\\n
+
+    If trace context is present in the record attributes, includes a short
+    trace/span identifier (first 8 characters of each) for debugging.
 
     Args:
         record: OpenTelemetry LogRecord to format.
@@ -119,7 +137,17 @@ def format_log_record(record: LogRecord) -> str:
         if record.attributes
         else "Unknown"
     )
-    return f"[{record.severity_text}] {timestamp_str} {source}\t: {record.body}\n"
+
+    # Include trace context in output if present
+    trace_part = ""
+    if record.attributes:
+        trace_id = record.attributes.get("trace_id")
+        span_id = record.attributes.get("span_id")
+        if isinstance(trace_id, str) and isinstance(span_id, str):
+            # Show short versions for readability (first 8 chars each)
+            trace_part = f" [{trace_id[:8]}:{span_id[:8]}]"
+
+    return f"[{record.severity_text}] {timestamp_str}{trace_part} {source}\t: {record.body}\n"
 
 
 # =============================================================================
@@ -213,111 +241,6 @@ def log_redirect_to(
         return Observable(subscribe)
 
     return _log_redirect_to
-
-
-# =============================================================================
-# LogComp Interface
-# =============================================================================
-
-class LogComp(ABC):
-    """
-    Abstract base for components that emit logs into reactive streams.
-
-    Components that produce log output should implement this interface
-    to integrate with the rxplus logging system.
-    """
-
-    @abstractmethod
-    def set_super(self, obs: rx.abc.ObserverBase | Callable) -> None:
-        """Set the parent observer to receive log records."""
-        ...
-
-    @abstractmethod
-    def log(
-        self,
-        body: Any,
-        level: LOG_LEVEL = "INFO",
-        attributes: dict[str, Any] | None = None,
-    ) -> None:
-        """Emit a log record with the specified message, level, and attributes."""
-        ...
-
-    @abstractmethod
-    def get_rx_exception(self, error: Exception, note: str = "") -> RxException:
-        """Create an RxException with this component's context."""
-        ...
-
-
-class EmptyLogComp(LogComp):
-    """
-    A no-op LogComp implementation for testing or silent operation.
-    """
-
-    def set_super(self, obs: rx.abc.ObserverBase | Callable) -> None:
-        pass
-
-    def log(
-        self,
-        body: Any,
-        level: LOG_LEVEL = "INFO",
-        attributes: dict[str, Any] | None = None,
-    ) -> None:
-        pass
-
-    def get_rx_exception(self, error: Exception, note: str = "") -> RxException:
-        return RxException(error, note=note)
-
-
-class NamedLogComp(LogComp):
-    """
-    LogComp implementation with a named source.
-
-    Emits LogRecords with the component name as the "log.source" attribute.
-    """
-
-    def __init__(self, name: str = "LogSource"):
-        self.name = name
-        self.super_obs: rx.abc.ObserverBase | Callable | None = None
-
-    def set_super(self, obs: rx.abc.ObserverBase | Callable) -> None:
-        """Set the parent observer to receive log records."""
-        self.super_obs = obs
-
-    def log(
-        self,
-        body: Any,
-        level: LOG_LEVEL = "INFO",
-        attributes: dict[str, Any] | None = None,
-    ) -> None:
-        """
-        Emit a LogRecord to the parent observer.
-
-        Args:
-            body: Log message (any serializable type).
-            level: Log level string.
-            attributes: Additional structured attributes.
-
-        Raises:
-            RuntimeError: If set_super() has not been called.
-        """
-        if self.super_obs is None:
-            raise RuntimeError("Super observer not set. Call set_super() first.")
-
-        record = create_log_record(
-            body=body,
-            level=level,
-            source=self.name,
-            attributes=attributes,
-        )
-
-        if hasattr(self.super_obs, "on_next"):
-            self.super_obs.on_next(record)
-        else:
-            self.super_obs(record)  # type: ignore
-
-    def get_rx_exception(self, error: Exception, note: str = "") -> RxException:
-        """Create an RxException with this component's name as the source."""
-        return RxException(error, source=self.name, note=note)
 
 
 # =============================================================================

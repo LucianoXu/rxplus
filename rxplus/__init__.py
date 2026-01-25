@@ -16,10 +16,7 @@ from .duplex import Duplex, connect_adapter, make_duplex  # noqa: F401
 from .logging import (  # noqa: F401
     LOG_LEVEL,
     SEVERITY_MAP,
-    EmptyLogComp,
-    LogComp,
     Logger,
-    NamedLogComp,
     create_log_record,
     configure_otel_logging,
     format_log_record,
@@ -29,7 +26,16 @@ from .logging import (  # noqa: F401
 )
 # Re-export LogRecord from OpenTelemetry for convenience
 from opentelemetry.sdk._logs._internal import LogRecord  # noqa: F401
-from .mechanism import RxException  # noqa: F401
+from .mechanism import (  # noqa: F401
+    RxException,
+    SpanContext,
+    TraceContext,
+    generate_trace_id,
+    generate_span_id,
+    get_current_span,
+    set_current_span,
+    start_span,
+)
 from .opt import redirect_to, stream_print_out, ErrorRestartSignal, retry_with_signal, error_restart_signal_to_logitem  # noqa: F401
 from .utils import TaggedData, tag, tag_filter, untag, FPSMonitor, BandwidthMonitor  # noqa: F401
 from .ws import RxWSClient, RxWSClientGroup, RxWSServer, WSDatatype, WSStr  # noqa: F401
@@ -78,6 +84,15 @@ __all__ = [
     "FPSMonitor",
     "BandwidthMonitor",
 
+    # Trace Context
+    "SpanContext",
+    "TraceContext",
+    "generate_trace_id",
+    "generate_span_id",
+    "get_current_span",
+    "set_current_span",
+    "start_span",
+
     # Logging (OpenTelemetry-based)
     "LogRecord",
     "LOG_LEVEL",
@@ -88,9 +103,6 @@ __all__ = [
     "log_filter",
     "drop_log",
     "log_redirect_to",
-    "LogComp",
-    "EmptyLogComp",
-    "NamedLogComp",
     "Logger",
     "stream_print_out",
     "redirect_to",

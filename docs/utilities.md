@@ -92,4 +92,4 @@ Attributes:
 | `source` | Component name |
 | `note` | Additional context |
 
-Used by `LogComp.get_rx_exception()` for consistent error wrapping.
+Used for consistent error wrapping in reactive components.

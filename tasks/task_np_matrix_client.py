@@ -2,7 +2,7 @@ import argparse
 import numpy as np
 import time
 
-from rxplus import RxWSClient, NamedLogComp
+from rxplus import RxWSClient
 
 
 def build_parser(subparsers: argparse._SubParsersAction):
@@ -32,7 +32,6 @@ def task(parsed_args: argparse.Namespace):
             "port": parsed_args.port,
             "path": parsed_args.path,
         },
-        logcomp=NamedLogComp("NPMatrixClient"),
         datatype="object",
     )
 

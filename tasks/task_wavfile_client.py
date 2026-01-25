@@ -7,7 +7,7 @@ import argparse
 import time
 
 import rxplus
-from rxplus import save_wavfile, NamedLogComp, drop_log, RxWSClient
+from rxplus import save_wavfile, drop_log, RxWSClient
 from reactivex.scheduler import ThreadPoolScheduler
 
 
@@ -27,7 +27,6 @@ def task(parsed_args: argparse.Namespace):
             'host' : parsed_args.host, 
             'port' : parsed_args.port,
         }, 
-        logcomp=NamedLogComp("RxWSClient"),
         datatype='bytes'
     )
 

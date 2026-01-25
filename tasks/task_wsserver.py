@@ -1,7 +1,7 @@
 import argparse
 import time
 
-from rxplus import RxWSServer, NamedLogComp, TaggedData
+from rxplus import RxWSServer, TaggedData
 
 
 def build_parser(subparsers: argparse._SubParsersAction):
@@ -16,7 +16,6 @@ def task(parsed_args: argparse.Namespace):
             'host' : parsed_args.host, 
             'port' : parsed_args.port,
         }, 
-        logcomp=NamedLogComp("RxWSServer"),
         datatype='string'
     )
     sender.subscribe(print)

@@ -14,14 +14,18 @@ from rxplus.logging import (
     LOG_LEVEL,
     SEVERITY_MAP,
     Logger,
-    NamedLogComp,
-    EmptyLogComp,
     create_log_record,
     format_log_record,
     log_filter,
     drop_log,
     log_redirect_to,
     configure_otel_logging,
+)
+from rxplus import (
+    start_span,
+    get_current_span,
+    set_current_span,
+    TraceContext,
 )
 
 
@@ -368,54 +372,6 @@ def test_logger_forwards_to_subscribers():
 
 
 # =============================================================================
-# Tests for NamedLogComp
-# =============================================================================
-
-def test_named_log_comp_creates_record():
-    """Verify NamedLogComp creates LogRecord with source."""
-    comp = NamedLogComp(name="MyComp")
-    collected = []
-    comp.set_super(collected.append)
-
-    comp.log("hello", "INFO")
-
-    assert len(collected) == 1
-    assert isinstance(collected[0], LogRecord)
-    assert collected[0].body == "hello"
-    assert collected[0].attributes["log.source"] == "MyComp"
-
-
-def test_named_log_comp_attributes():
-    """Verify NamedLogComp passes attributes."""
-    comp = NamedLogComp(name="API")
-    collected = []
-    comp.set_super(collected.append)
-
-    comp.log("request", "DEBUG", attributes={"request_id": "123"})
-
-    assert collected[0].attributes["request_id"] == "123"
-    assert collected[0].attributes["log.source"] == "API"
-
-
-def test_named_log_comp_raises_without_super():
-    """Verify NamedLogComp raises if set_super not called."""
-    comp = NamedLogComp(name="Test")
-
-    try:
-        comp.log("msg")
-        assert False, "Should have raised RuntimeError"
-    except RuntimeError as e:
-        assert "set_super" in str(e)
-
-
-def test_empty_log_comp():
-    """Verify EmptyLogComp is a no-op."""
-    comp = EmptyLogComp()
-    comp.set_super(lambda x: None)
-    comp.log("ignored")  # Should not raise
-
-
-# =============================================================================
 # Tests for configure_otel_logging
 # =============================================================================
 
@@ -470,3 +426,100 @@ def test_reactive_pipeline_with_log_operators():
     assert len(logger_collector.items) == 2
     assert logger_collector.items[0].body == "log1"
     assert logger_collector.items[1].body == "log2"
+
+
+# =============================================================================
+# Tests for Trace Context Integration
+# =============================================================================
+
+
+def test_create_log_record_includes_trace():
+    """Verify trace IDs are included in attributes when within a span."""
+    set_current_span(None)  # Reset context
+
+    with start_span() as span:
+        record = create_log_record("message in span", "INFO")
+
+        assert "trace_id" in record.attributes
+        assert "span_id" in record.attributes
+        assert record.attributes["trace_id"] == span.trace_id
+        assert record.attributes["span_id"] == span.span_id
+
+
+def test_create_log_record_no_trace_outside_span():
+    """Verify no trace IDs when no span is active."""
+    set_current_span(None)  # Ensure no active span
+
+    record = create_log_record("message outside span", "INFO")
+
+    assert "trace_id" not in record.attributes
+    assert "span_id" not in record.attributes
+
+
+def test_create_log_record_include_trace_false():
+    """Verify include_trace=False skips trace injection."""
+    with start_span():
+        record = create_log_record("no trace", "INFO", include_trace=False)
+
+        assert "trace_id" not in record.attributes
+        assert "span_id" not in record.attributes
+
+
+def test_create_log_record_includes_parent_span():
+    """Verify parent_span_id is included in nested spans."""
+    set_current_span(None)
+
+    with start_span() as root:
+        with start_span() as child:
+            record = create_log_record("nested message", "INFO")
+
+            assert record.attributes["trace_id"] == root.trace_id
+            assert record.attributes["span_id"] == child.span_id
+            assert record.attributes["parent_span_id"] == root.span_id
+
+
+def test_format_log_record_with_trace():
+    """Verify formatted output includes trace prefix."""
+    set_current_span(None)
+
+    with start_span() as span:
+        record = create_log_record("hello", "INFO", source="Test")
+        formatted = format_log_record(record)
+
+        # Should include short trace/span (first 8 chars each)
+        expected_trace_part = f"[{span.trace_id[:8]}:{span.span_id[:8]}]"
+        assert expected_trace_part in formatted
+
+
+def test_format_log_record_without_trace():
+    """Verify formatted output has no trace prefix when not in span."""
+    set_current_span(None)
+
+    record = create_log_record("hello", "INFO", source="Test")
+    formatted = format_log_record(record)
+
+    # Should not have trace brackets
+    assert "[" not in formatted.split("]")[1].split("Test")[0].strip()
+
+
+def test_logger_with_trace_context():
+    """Verify Logger processes trace-enriched records correctly."""
+    import tempfile
+    import os
+
+    set_current_span(None)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        logfile = os.path.join(tmpdir, "test.log")
+        logger = Logger(logfile=logfile)
+
+        with start_span() as span:
+            logger.on_next(create_log_record("traced log", "INFO", source="Test"))
+
+        # Read the file and verify trace context is in output
+        with open(logger.logfile, "r") as f:
+            content = f.read()
+
+        assert span.trace_id[:8] in content
+        assert span.span_id[:8] in content
+
