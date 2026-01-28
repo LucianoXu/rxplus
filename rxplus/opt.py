@@ -10,8 +10,9 @@ from reactivex import Observable, Observer, Subject, create
 from reactivex.disposable import SerialDisposable, Disposable
 from reactivex import operators as ops
 
+from opentelemetry.trace import Span, StatusCode
+
 from .mechanism import RxException
-from .logging import create_log_record
 
 
 def stream_print_out(prompt: str = "Stream-Print-Out"):
@@ -89,35 +90,21 @@ class ErrorRestartSignal:
 
     def __str__(self) -> str:
         return f"ErrorRestartSignal(attempts={self.attempts}, error={self.error})"
-    
-def error_restart_signal_to_logitem(log_source: str) -> Callable[[Observable], Observable]:
-    """
-    Rx Operator. Convert `ErrorRestartSignal` to `LogRecord` for logging purpose.
-    """
 
-    def _op(source: Observable[Any]) -> Observable[Any]:
-        def _subscribe(observer, scheduler=None):
-            def _on_next(v: Any):
-                if isinstance(v, ErrorRestartSignal):
-                    log_record = create_log_record(
-                        body=str(v),
-                        level="WARN",
-                        source=log_source,
-                    )
-                    observer.on_next(log_record)
-                else:
-                    observer.on_next(v)
+    def record_as_span_event(self, span: Span) -> None:
+        """Record this signal as an event on the given OTel span."""
+        span.add_event(
+            "retry",
+            attributes={
+                "attempt": self.attempts,
+                "error.type": type(self.error.exception).__name__,
+                "error.message": str(self.error.exception),
+                "error.source": self.error.source or "",
+                "error.note": self.error.note or "",
+            }
+        )
+        span.set_status(StatusCode.ERROR, f"Retry attempt {self.attempts}")
 
-            return source.subscribe(
-                on_next=_on_next,
-                on_error=observer.on_error,
-                on_completed=observer.on_completed,
-                scheduler=scheduler,
-            )
-
-        return create(_subscribe)
-
-    return _op
 
 def retry_with_signal(
     max_retries: Optional[int] = None,

@@ -7,7 +7,7 @@ import argparse
 import time
 
 import rxplus
-from rxplus import save_wavfile, drop_log, log_filter, RxWSClient, jpeg_bytes_to_rgb_ndarray
+from rxplus import save_wavfile, RxWSClient, jpeg_bytes_to_rgb_ndarray
 from reactivex.scheduler import ThreadPoolScheduler
 
 
@@ -27,15 +27,17 @@ def task(parsed_args: argparse.Namespace):
         datatype='bytes'
     )
 
+    # Subscribe to process JPEG frames
     client.pipe(
-        log_filter()
-    ).subscribe(print)
-
-    client.pipe(
-        drop_log(),
         ops.map(jpeg_bytes_to_rgb_ndarray),
         ops.do_action(lambda x: print(f"Received image with shape: {x.shape}"))
     ).subscribe()
+
+    # Subscribe for error handling
+    client.subscribe(
+        on_error=lambda e: print(f"Error: {e}"),
+        on_completed=lambda: print("Client completed"),
+    )
 
     try:
         while True:

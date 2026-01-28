@@ -19,12 +19,9 @@ def test_basic_imports():
     assert hasattr(rxplus, "FPSMonitor")
     assert hasattr(rxplus, "BandwidthMonitor")
 
-    # Logging exports (OTel-based)
-    assert hasattr(rxplus, "LogRecord")
-    assert hasattr(rxplus, "LOG_LEVEL")
-    assert hasattr(rxplus, "Logger")
-    assert hasattr(rxplus, "create_log_record")
-    assert hasattr(rxplus, "SEVERITY_MAP")
+    # Telemetry exports
+    assert hasattr(rxplus, "configure_telemetry")
+    assert hasattr(rxplus, "FileLogRecordExporter")
 
     # WebSocket exports
     assert hasattr(rxplus, "RxWSServer")
@@ -42,6 +39,8 @@ def test_basic_imports():
     # Opt exports
     assert hasattr(rxplus, "redirect_to")
     assert hasattr(rxplus, "stream_print_out")
+    assert hasattr(rxplus, "ErrorRestartSignal")
+    assert hasattr(rxplus, "retry_with_signal")
 
 
 def test_audio_feature_flags():
@@ -91,14 +90,16 @@ def test_all_exports():
         "RxException",
         "TaggedData",
         "tag",
+        "tag_filter",
         "untag",
         "FPSMonitor",
         "BandwidthMonitor",
-        "LogRecord",
-        "LOG_LEVEL",
-        "Logger",
-        "create_log_record",
-        "SEVERITY_MAP",
+        "configure_telemetry",
+        "FileLogRecordExporter",
+        "stream_print_out",
+        "redirect_to",
+        "ErrorRestartSignal",
+        "retry_with_signal",
         "RxWSServer",
         "RxWSClient",
         "RxWSClientGroup",

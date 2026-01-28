@@ -9,6 +9,7 @@ threaded Observable/Observer (similar to `rx.interval` on a new thread).
 import asyncio
 import pickle
 import threading
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Literal, Optional
 
@@ -18,19 +19,12 @@ from websockets import ClientConnection, Server
 from reactivex import Subject
 from reactivex import operators as ops
 
-from .logging import LOG_LEVEL, create_log_record
+from opentelemetry.trace import TracerProvider, Tracer
+from opentelemetry._logs import LoggerProvider, SeverityNumber
+from opentelemetry._logs import LogRecord as OTelLogRecord
+
 from .mechanism import RxException
 from .utils import TaggedData, get_full_error_info, get_short_error_info
-
-
-def keep_log(func):
-    """Decorator that preserves LogRecords while applying func to other items."""
-    from opentelemetry._logs import LogRecord
-    def wrapper(item):
-        if isinstance(item, LogRecord):
-            return item
-        return func(item)
-    return wrapper
 
 
 def _ws_path(ws: Any) -> str:
@@ -99,6 +93,13 @@ class WSBytes(WSDatatype):
 
 
 class WSObject(WSDatatype):
+    """
+    WebSocket datatype for arbitrary Python objects using pickle serialization.
+    
+    Note: Standard OTel LogRecords may have issues with pickle serialization
+    due to their context objects. Custom data classes are recommended for
+    reliable serialization over WebSocket.
+    """
 
     def package_type_check(self, value) -> None:
         # Accept any pickleable object; validation occurs in package().
@@ -120,7 +121,11 @@ class WSObject(WSDatatype):
         try:
             return pickle.loads(value)
         except Exception as e:
-            raise TypeError(f"WSObject failed to unpickle payload: {e}")
+            # Include exception type and repr for better debugging
+            error_msg = str(e) or repr(e)
+            raise TypeError(
+                f"WSObject failed to unpickle payload: {type(e).__name__}: {error_msg}"
+            ) from e
 
 
 def wsdt_factory(datatype: Literal["string", "bytes", "object"]) -> WSDatatype:
@@ -196,6 +201,9 @@ class RxWSServer(Subject):
 
     Use datatype parameter to control the data type sent through the websocket.
     The server will be closed upon receiving on_completed signal.
+    
+    Telemetry is optional — pass tracer_provider and/or logger_provider to enable
+    OTel instrumentation. Without providers, the component operates silently.
     """
 
     def __init__(
@@ -208,6 +216,8 @@ class RxWSServer(Subject):
         ping_interval: Optional[float] = 30.0,
         ping_timeout: Optional[float] = 30.0,
         name: Optional[str] = None,
+        tracer_provider: TracerProvider | None = None,
+        logger_provider: LoggerProvider | None = None,
     ):
         """Initialize the WebSocket server and start listening."""
         super().__init__()
@@ -215,8 +225,18 @@ class RxWSServer(Subject):
         self.host = conn_cfg["host"]
         self.port = int(conn_cfg["port"])
 
-        # Source name for logging
-        self._source = name if name else f"RxWSServer:{self.host}:{self.port}"
+        # Source name for logging/tracing
+        self._name = name if name else f"RxWSServer:{self.host}:{self.port}"
+
+        # OTel instrumentation (optional)
+        self._tracer: Tracer | None = (
+            tracer_provider.get_tracer(f"rxplus.{self._name}")
+            if tracer_provider else None
+        )
+        self._logger = (
+            logger_provider.get_logger(f"rxplus.{self._name}")
+            if logger_provider else None
+        )
 
         # the function to determine the datatype of the path
         self.datatype_func: Callable[[str], Literal["string", "bytes", "object"]]
@@ -268,7 +288,7 @@ class RxWSServer(Subject):
         else:
             rx_exception = RxException(
                 ValueError(f"Expected TaggedData, but got {type(value)}"),
-                source=self._source,
+                source=self._name,
                 note="RxWSServer.on_next",
             )
             super().on_error(rx_exception)
@@ -281,7 +301,7 @@ class RxWSServer(Subject):
         if not self._loop_ready.wait(timeout=5.0):
             rx_exception = RxException(
                 RuntimeError("Server event loop failed to start"),
-                source=self._source,
+                source=self._name,
                 note="RxWSServer.on_next",
             )
             super().on_error(rx_exception)
@@ -292,7 +312,7 @@ class RxWSServer(Subject):
             # Should not happen because _loop_ready is set when loop is created.
             rx_exception = RxException(
                 RuntimeError("Server event loop not available"),
-                source=self._source,
+                source=self._name,
                 note="RxWSServer.on_next",
             )
             super().on_error(rx_exception)
@@ -352,7 +372,7 @@ class RxWSServer(Subject):
 
         except Exception as e:
             rx_exception = RxException(
-                e, source=self._source, note=f"Error while handling client {remote_desc}"
+                e, source=self._name, note=f"Error while handling client {remote_desc}"
             )
             super().on_error(rx_exception)
 
@@ -482,10 +502,24 @@ class RxWSServer(Subject):
         self._thread = threading.Thread(target=self._run_server_loop, daemon=True)
         self._thread.start()
 
-    def _log(self, body: str, level: LOG_LEVEL = "INFO") -> None:
-        """Emit a log record to subscribers with trace context."""
-        record = create_log_record(body, level, source=self._source)
-        super().on_next(record)
+    def _log(self, body: str, level: str = "INFO") -> None:
+        """Emit a log record via OTel logger if configured."""
+        if self._logger is None:
+            return
+        severity_map = {
+            "DEBUG": SeverityNumber.DEBUG,
+            "INFO": SeverityNumber.INFO,
+            "WARN": SeverityNumber.WARN,
+            "ERROR": SeverityNumber.ERROR,
+        }
+        record = OTelLogRecord(
+            timestamp=time.time_ns(),
+            body=body,
+            severity_text=level,
+            severity_number=severity_map.get(level, SeverityNumber.INFO),
+            attributes={"component": self._name},
+        )
+        self._logger.emit(record)
 
     def _shutdown_server(self):
         self._log("Closing...", "INFO")
@@ -507,7 +541,7 @@ class RxWSServer(Subject):
             self._log("Closed.", "INFO")
             super().on_completed()
         except Exception as e:
-            rx_exception = RxException(e, source=self._source, note="RxWSServer.on_completed")
+            rx_exception = RxException(e, source=self._name, note="RxWSServer.on_completed")
             super().on_error(rx_exception)
 
 
@@ -574,6 +608,8 @@ class RxWSClient(Subject):
         ping_timeout: Optional[float] = 30.0,
         name: Optional[str] = None,
         buffer_while_disconnected: bool = False,
+        tracer_provider: TracerProvider | None = None,
+        logger_provider: LoggerProvider | None = None,
     ):
         """Create a reconnecting WebSocket client.
 
@@ -586,6 +622,8 @@ class RxWSClient(Subject):
             name: Custom name for log source identification.
             buffer_while_disconnected: If True, queue messages while disconnected.
                 If False (default), messages are dropped when not connected.
+            tracer_provider: Optional OTel TracerProvider for span instrumentation.
+            logger_provider: Optional OTel LoggerProvider for log emission.
         """
         super().__init__()
         _validate_conn_cfg(conn_cfg, ["host", "port"])
@@ -593,8 +631,12 @@ class RxWSClient(Subject):
         self.port = int(conn_cfg["port"])
         self.path = conn_cfg.get("path", "/")
 
-        # Source name for logging
-        self._source = name if name else f"RxWSClient:ws://{self.host}:{self.port}{self.path}"
+        # Source name for identification
+        self._name = name if name else f"RxWSClient:ws://{self.host}:{self.port}{self.path}"
+
+        # OTel instrumentation
+        self._tracer = tracer_provider.get_tracer(f"rxplus.{self._name}") if tracer_provider else None
+        self._logger = logger_provider.get_logger(f"rxplus.{self._name}") if logger_provider else None
 
         self.datatype = datatype
         self.adapter: WSDatatype = wsdt_factory(datatype)
@@ -620,10 +662,24 @@ class RxWSClient(Subject):
         # flag to signal shutdown
         self._shutdown_requested = False
 
-    def _log(self, body: str, level: LOG_LEVEL = "INFO") -> None:
-        """Emit a log record to subscribers with trace context."""
-        record = create_log_record(body, level, source=self._source)
-        super().on_next(record)
+    def _log(self, body: str, level: str = "INFO") -> None:
+        """Emit a log record via OTel logger if configured."""
+        if self._logger is None:
+            return
+        severity_map = {
+            "DEBUG": SeverityNumber.DEBUG,
+            "INFO": SeverityNumber.INFO,
+            "WARN": SeverityNumber.WARN,
+            "ERROR": SeverityNumber.ERROR,
+        }
+        record = OTelLogRecord(
+            timestamp=time.time_ns(),
+            body=body,
+            severity_text=level,
+            severity_number=severity_map.get(level, SeverityNumber.INFO),
+            attributes={"component": self._name},
+        )
+        self._logger.emit(record)
 
     def on_next(self, value):
         """Send a message to the server.
@@ -643,7 +699,7 @@ class RxWSClient(Subject):
         if not self._loop_ready.wait(timeout=5.0):
             rx_exception = RxException(
                 RuntimeError("Client event loop failed to start"),
-                source=self._source,
+                source=self._name,
                 note="RxWSClient.on_next",
             )
             super().on_error(rx_exception)
@@ -653,7 +709,7 @@ class RxWSClient(Subject):
         if loop is None or self.queue is None:
             rx_exception = RxException(
                 RuntimeError("Client event loop not available"),
-                source=self._source,
+                source=self._name,
                 note="RxWSClient.on_next",
             )
             super().on_error(rx_exception)
@@ -663,7 +719,7 @@ class RxWSClient(Subject):
 
     def on_error(self, error):
         """Report connection errors."""
-        rx_exception = RxException(error, source=self._source, note="Error")
+        rx_exception = RxException(error, source=self._name, note="Error")
         super().on_error(rx_exception)
 
     def on_completed(self) -> None:
@@ -692,7 +748,7 @@ class RxWSClient(Subject):
             self._log("Closed.", "INFO")
             super().on_completed()
         except Exception as e:
-            rx_exception = RxException(e, source=self._source, note="RxWSClient.on_completed")
+            rx_exception = RxException(e, source=self._name, note="RxWSClient.on_completed")
             super().on_error(rx_exception)
 
     async def connect_client(self):
@@ -959,11 +1015,15 @@ class RxWSClientGroup(Subject):
         ping_timeout: Optional[float] = 30.0,
         name: Optional[str] = None,
         buffer_while_disconnected: bool = False,
+        tracer_provider: TracerProvider | None = None,
+        logger_provider: LoggerProvider | None = None,
     ):
         super().__init__()
         _validate_conn_cfg(conn_cfg, ["host", "port"])
 
         self._name = name
+        self._tracer_provider = tracer_provider
+        self._logger_provider = logger_provider
         self._buffer_while_disconnected = buffer_while_disconnected
         self.datatype_func: Callable[[str], Literal["string", "bytes", "object"]]
         if datatype in ["string", "bytes", "object"]:
@@ -990,6 +1050,8 @@ class RxWSClientGroup(Subject):
                 ping_timeout=ping_timeout,
                 name=child_name,
                 buffer_while_disconnected=buffer_while_disconnected,
+                tracer_provider=tracer_provider,
+                logger_provider=logger_provider,
             )
 
         self._client_factory = make_client
@@ -1034,7 +1096,7 @@ class RxWSClientGroup(Subject):
 
                 # When the client emits, wrap again with tag and push to bus
                 client.pipe(
-                    ops.map(keep_log(lambda data: TaggedData(tag, data)))
+                    ops.map(lambda data: TaggedData(tag, data))
                 ).subscribe(self._bus)
 
                 self._clients[tag] = client

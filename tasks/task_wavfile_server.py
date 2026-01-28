@@ -9,7 +9,7 @@ import argparse
 import threading
 import time
 import rxplus
-from rxplus import create_wavfile, drop_log, RxWSServer, TaggedData, untag, tag
+from rxplus import create_wavfile, RxWSServer, TaggedData, untag, tag
 from reactivex.scheduler import ThreadPoolScheduler
 
 

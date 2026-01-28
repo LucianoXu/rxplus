@@ -65,6 +65,32 @@ def test_wsobject():
         obj.unpackage("text frame")
 
 
+def test_wsobject_tagged_data_serialization():
+    """Test WSObject handles TaggedData serialization transparently."""
+    from rxplus import TaggedData
+    
+    obj = WSObject()
+    
+    # Test: TaggedData containing string data
+    tagged = TaggedData("/test/path", "Hello, World!")
+    packaged = obj.package(tagged)
+    restored = obj.unpackage(packaged)
+    
+    assert isinstance(restored, TaggedData)
+    assert restored.tag == "/test/path"
+    assert restored.data == "Hello, World!"
+
+    # Test: TaggedData containing dict data
+    data = {"message": "test", "count": 42}
+    tagged = TaggedData("/api", data)
+    packaged = obj.package(tagged)
+    restored = obj.unpackage(packaged)
+    
+    assert isinstance(restored, TaggedData)
+    assert restored.tag == "/api"
+    assert restored.data == data
+
+
 # =============================================================================
 # Connection configuration validation tests
 # =============================================================================
@@ -147,7 +173,7 @@ def test_server_accepts_valid_config():
     """Server should accept valid config."""
     server = RxWSServer({"host": "localhost", "port": 0}, name="test-server")
     assert server.host == "localhost"
-    assert server._source == "test-server"
+    assert server._name == "test-server"
     server.on_completed()
 
 

@@ -8,7 +8,7 @@ import argparse
 
 import time
 
-from rxplus import RxWSServer, drop_log, from_cli
+from rxplus import RxWSServer, from_cli
 
 
 def build_parser(subparsers: argparse._SubParsersAction):

@@ -1,3 +1,7 @@
+- 2026-01-28
+    Decided to remove customized logging completely.
+- 2026-01-27
+    Completely refined Logging logic. One known issue: the first starting log record will be lost sometimes in RxWS.
 - 2026-01-25 
     Removed `LogComp` and updated the usage in `RxWS`. 
     Refined RxWS series compnents.

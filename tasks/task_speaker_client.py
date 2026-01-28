@@ -7,7 +7,7 @@ import argparse
 import time
 
 import rxplus
-from rxplus import RxSpeaker, log_filter, drop_log, RxWSClient
+from rxplus import RxSpeaker, RxWSClient
 from reactivex.scheduler import ThreadPoolScheduler
 
 def build_parser(subparsers: argparse._SubParsersAction):
@@ -34,13 +34,14 @@ def task(parsed_args: argparse.Namespace):
         channels=parsed_args.ch,
     )
 
-    client.pipe(
-        log_filter()
-    ).subscribe(print)
+    # Subscribe to speaker for audio playback
+    client.subscribe(speaker)
 
-    client.pipe(
-        drop_log()
-    ).subscribe(speaker)
+    # Subscribe for error handling
+    client.subscribe(
+        on_error=lambda e: print(f"Error: {e}"),
+        on_completed=lambda: print("Client completed"),
+    )
 
     try:
         while True:

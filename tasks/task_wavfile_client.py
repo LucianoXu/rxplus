@@ -7,7 +7,7 @@ import argparse
 import time
 
 import rxplus
-from rxplus import save_wavfile, drop_log, RxWSClient
+from rxplus import save_wavfile, RxWSClient
 from reactivex.scheduler import ThreadPoolScheduler
 
 
@@ -37,9 +37,14 @@ def task(parsed_args: argparse.Namespace):
         channels=parsed_args.ch
     )
 
-    # create the network
-    client.pipe(rxplus.log_filter()).subscribe(print)
-    client.pipe(drop_log()).subscribe(wavfile)
+    # Subscribe to write audio to wav file
+    client.subscribe(wavfile)
+
+    # Subscribe for error handling
+    client.subscribe(
+        on_error=lambda e: print(f"Error: {e}"),
+        on_completed=lambda: print("Client completed"),
+    )
 
     try:
         while True:
