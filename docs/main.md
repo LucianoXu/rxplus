@@ -6,14 +6,14 @@ This directory contains detailed documentation for each `rxplus` module. The lib
 
 | Module | Description |
 |--------|-------------|
-| [Duplex](duplex.md) | Bidirectional communication channels |
-| [WebSocket](websocket.md) | Reactive WebSocket server/client |
-| [Logging](logging.md) | Structured logging for reactive pipelines |
-| [Operators](operators.md) | Custom Rx operators |
-| [Utilities](utilities.md) | Tagged data, monitors, helpers |
 | [Audio](audio.md) | Microphone, speaker, WAV file I/O |
-| [Video](video.md) | Screen capture and image encoding |
 | [CLI](cli.md) | Interactive command-line input |
+| [Duplex](duplex.md) | Bidirectional communication channels |
+| [Operators](operators.md) | Custom Rx operators |
+| [Telemetry](telemetry.md) | OpenTelemetry integration for observability |
+| [Utilities](utilities.md) | Tagged data, monitors, helpers |
+| [Video](video.md) | Screen capture and image encoding |
+| [WebSocket](websocket.md) | Reactive WebSocket server/client |
 
 ## Design Philosophy
 
@@ -25,4 +25,4 @@ This directory contains detailed documentation for each `rxplus` module. The lib
 
 3. **Tagged data multiplexing** — `TaggedData` enables routing multiple logical channels through a single stream, essential for multi-path WebSocket communication.
 
-4. **Composable logging** — Log items flow through the same reactive pipelines as data, enabling filtering, routing, and recording with standard operators.
+4. **Provider-based telemetry** — Components accept optional OTel provider parameters, enabling observability without tight coupling to any specific backend.

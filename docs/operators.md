@@ -7,8 +7,9 @@ Custom RxPY operators for stream control and error handling.
 ```python
 from rxplus import (
     redirect_to, stream_print_out,
-    retry_with_signal, ErrorRestartSignal, error_restart_signal_to_logitem,
+    retry_with_signal, ErrorRestartSignal,
 )
+from reactivex import operators as ops
 ```
 
 ### `redirect_to(cond, target)`
@@ -25,6 +26,8 @@ stream.pipe(
 errors.subscribe(handle_error)
 ```
 
+---
+
 ### `stream_print_out(prompt="")`
 
 Debug operator that prints and forwards every item.
@@ -32,6 +35,8 @@ Debug operator that prints and forwards every item.
 ```python
 stream.pipe(stream_print_out("[DEBUG] ")).subscribe(...)
 ```
+
+---
 
 ### `retry_with_signal(max_retries, delay_s, should_retry)`
 
@@ -54,17 +59,28 @@ source.pipe(
 )
 ```
 
-### `error_restart_signal_to_logitem(log_source)`
+### `ErrorRestartSignal.record_as_span_event(span)`
 
-Converts `ErrorRestartSignal` items into `LogRecord` for unified logging.
+Record a retry signal as an event on an OpenTelemetry span.
 
 ```python
+from opentelemetry import trace
+
+tracer = tracer_provider.get_tracer("my-pipeline")
+
+def handle_item(item):
+    if isinstance(item, ErrorRestartSignal):
+        with tracer.start_as_current_span("retry") as span:
+            item.record_as_span_event(span)
+    return item
+
 source.pipe(
-    retry_with_signal(max_retries=5),
-    error_restart_signal_to_logitem("MyComponent"),
-    log_redirect_to(logger),
+    retry_with_signal(max_retries=5, delay_s=1.0),
+    ops.map(handle_item),
 ).subscribe(process)
 ```
+
+---
 
 ## Design Notes
 

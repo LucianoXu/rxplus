@@ -15,6 +15,8 @@ from rxplus import (
     create_screen_capture,
     rgb_ndarray_to_jpeg_bytes,
     jpeg_bytes_to_rgb_ndarray,
+    rgb_ndarray_to_png_bytes,
+    png_bytes_to_rgb_ndarray,
 )
 ```
 
@@ -22,14 +24,40 @@ from rxplus import (
 
 ## Screen Capture
 
-### `create_screen_capture(fps=10.0, scheduler=None)`
+### `create_screen_capture(fps=10.0, monitor=None, scheduler=None)`
 
-Observable emitting NumPy arrays `[H, W, 3]` (RGB, uint8) from the primary monitor.
+Observable emitting NumPy arrays `[H, W, 3]` (RGB, uint8) from screen capture.
 
 ```python
 create_screen_capture(fps=30.0).pipe(
     ops.map(rgb_ndarray_to_jpeg_bytes),
 ).subscribe(send_frame)
+```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `fps` | `float` | `10.0` | Target frames per second |
+| `monitor` | `int \| dict \| None` | `None` | Monitor selection (see below) |
+| `scheduler` | `SchedulerBase \| None` | `None` | Rx scheduler for timing |
+
+**Monitor selection:**
+
+| Value | Behavior |
+|-------|----------|
+| `None` | Primary monitor (default) |
+| `0` | All monitors combined |
+| `1` | Primary monitor |
+| `2+` | Secondary monitors |
+| `dict` | Custom region: `{"left": x, "top": y, "width": w, "height": h}` |
+
+```python
+# Capture specific region
+create_screen_capture(fps=30.0, monitor={"left": 0, "top": 0, "width": 800, "height": 600})
+
+# Capture secondary monitor
+create_screen_capture(fps=30.0, monitor=2)
 ```
 
 **Timing behavior:**
@@ -56,6 +84,27 @@ Decode JPEG bytes to RGB array.
 
 ```python
 frame = jpeg_bytes_to_rgb_ndarray(jpeg)  # [H, W, 3] uint8
+```
+
+### `rgb_ndarray_to_png_bytes(frame, compression=6)`
+
+Encode RGB array to PNG bytes.
+
+```python
+png = rgb_ndarray_to_png_bytes(frame, compression=9)  # Max compression
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `frame` | `np.ndarray` | — | RGB array `[H, W, 3]` |
+| `compression` | `int` | `6` | Compression level (0-9, 9 = max) |
+
+### `png_bytes_to_rgb_ndarray(png)`
+
+Decode PNG bytes to RGB array.
+
+```python
+frame = png_bytes_to_rgb_ndarray(png)  # [H, W, 3] uint8
 ```
 
 ---

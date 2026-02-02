@@ -67,6 +67,8 @@ tracer_provider, logger_provider = configure_telemetry(
 **Returns:**
 - `tuple[TracerProvider, LoggerProvider]`: The configured providers
 
+---
+
 ## Provider Injection
 
 All WebSocket components accept telemetry providers:
@@ -113,6 +115,8 @@ group = RxWSClientGroup(
 
 The `RxWSClientGroup` passes the providers to all child `RxWSClient` instances it creates.
 
+---
+
 ## Manual Log Emission
 
 For components outside of rxplus, you can emit logs directly using the OTel Logger:
@@ -135,6 +139,8 @@ record = LogRecord(
 logger.emit(record)
 ```
 
+---
+
 ## Span Creation
 
 For tracing operations, use the tracer:
@@ -149,6 +155,8 @@ with tracer.start_as_current_span("process_batch") as span:
     # ... do work ...
     span.set_status(StatusCode.OK)
 ```
+
+---
 
 ## ErrorRestartSignal Integration
 
@@ -176,6 +184,52 @@ observable.pipe(
 )
 ```
 
+---
+
+## FileLogRecordExporter
+
+`rxplus` provides a custom log exporter for writing logs to files with rotation and cleanup support.
+
+```python
+from rxplus import FileLogRecordExporter, configure_telemetry
+from datetime import timedelta
+
+# Basic file logging
+exporter = FileLogRecordExporter("app.log")
+
+# With rotation and cleanup
+exporter = FileLogRecordExporter(
+    "logs/app.log",
+    format="json",                      # "text" or "json"
+    rotate_interval=1000,               # Rotate after 1000 records
+    max_log_age=timedelta(days=7),      # Delete logs older than 7 days
+)
+
+# Use with configure_telemetry
+tracer_provider, logger_provider = configure_telemetry(
+    log_exporter=exporter,
+)
+```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `logfile` | `str` | — | Base path for log files (timestamp appended) |
+| `format` | `"text" \| "json"` | `"text"` | Output format |
+| `rotate_interval` | `int \| timedelta \| None` | `None` | Rotation trigger: record count or time |
+| `max_log_age` | `timedelta \| None` | `None` | Delete files older than this |
+| `lock_timeout` | `float` | `10.0` | Max wait for file lock (seconds) |
+
+**Features:**
+
+- **File rotation**: By record count (`int`) or time elapsed (`timedelta`)
+- **Automatic cleanup**: Old log files are deleted during rotation
+- **Cross-process locking**: Safe for concurrent writes from multiple processes
+- **Two formats**: Human-readable text or structured JSON
+
+---
+
 ## No Telemetry Mode
 
 If you don't need telemetry, simply omit the provider parameters:
@@ -185,6 +239,8 @@ If you don't need telemetry, simply omit the provider parameters:
 server = RxWSServer({"host": "localhost", "port": 8888})
 client = RxWSClient({"host": "localhost", "port": 8888})
 ```
+
+---
 
 ## Shutdown
 
@@ -199,6 +255,8 @@ finally:
     tracer_provider.shutdown()
     logger_provider.shutdown()
 ```
+
+---
 
 ## OTLP Export Example
 

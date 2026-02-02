@@ -93,3 +93,34 @@ Attributes:
 | `note` | Additional context |
 
 Used for consistent error wrapping in reactive components.
+
+---
+
+## Error Formatting
+
+Helper functions for formatting exception information.
+
+### `get_short_error_info(e)`
+
+Returns a concise single-line summary of an exception.
+
+```python
+from rxplus.utils import get_short_error_info
+
+try:
+    risky_operation()
+except Exception as e:
+    print(get_short_error_info(e))  # "ValueError: invalid input"
+```
+
+### `get_full_error_info(e)`
+
+Returns the full traceback as a string.
+
+```python
+from rxplus.utils import get_full_error_info
+
+try:
+    risky_operation()
+except Exception as e:
+    logging.error(get_full_error_info(e))
