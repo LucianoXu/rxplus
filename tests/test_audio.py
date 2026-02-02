@@ -1,3 +1,5 @@
+"""Tests for rxplus.audio module."""
+
 import asyncio
 import sys
 import threading
@@ -5,9 +7,15 @@ import time
 import types
 from unittest.mock import MagicMock
 
+import pytest
+
+# Skip entire module if audio dependencies are not available
+pytest.importorskip("numpy")
+pytest.importorskip("pyaudio")
+pytest.importorskip("soundfile")
+
 import numpy as np
 import pyaudio
-import pytest
 import soundfile as sf
 
 from rxplus.audio import (

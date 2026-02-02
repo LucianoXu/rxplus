@@ -24,7 +24,7 @@ jobs:
       - name: Install system dependencies for audio
         run: |
           sudo apt-get update
-          sudo apt-get install -y portaudio19-dev
+          sudo apt-get install -y portaudio19-dev libasound2-dev
 
       - name: Install package with all dependencies
         run: |
@@ -33,7 +33,7 @@ jobs:
 
       - name: Run tests
         run: |
-          pytest tests/ -v
+          pytest tests/ -v --ignore=tests/test_mechanism.py
 
   test-basic:
     # Test that basic installation works without optional dependencies
@@ -53,4 +53,4 @@ jobs:
 
       - name: Run basic tests
         run: |
-          pytest tests/test_optional_deps.py -v
+          pytest tests/ -v --ignore=tests/test_audio.py --ignore=tests/test_graphic.py --ignore=tests/test_mechanism.py

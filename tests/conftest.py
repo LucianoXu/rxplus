@@ -2,19 +2,46 @@
 
 from unittest.mock import MagicMock
 
-import numpy as np
 import pytest
+
+# Try to import optional dependencies
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+    np = None
+
+try:
+    import pyaudio
+    HAS_PYAUDIO = True
+except ImportError:
+    HAS_PYAUDIO = False
+
+try:
+    import mss
+    HAS_MSS = True
+except ImportError:
+    HAS_MSS = False
+
+# Combined feature flags
+HAS_AUDIO = HAS_NUMPY and HAS_PYAUDIO
+HAS_VIDEO = HAS_NUMPY and HAS_MSS
 
 
 @pytest.fixture
 def synthetic_rgb_frame():
     """Generate random RGB frame for video tests."""
+    if not HAS_NUMPY:
+        pytest.skip("numpy not available")
     return np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
 
 
 @pytest.fixture
 def synthetic_audio_float32():
     """Generate sine wave audio chunk for testing."""
+    if not HAS_NUMPY:
+        pytest.skip("numpy not available")
     t = np.linspace(0, 0.1, 4800, dtype=np.float32)
     audio = 0.5 * np.sin(2 * np.pi * 440 * t)
     return audio.reshape(-1, 1)
@@ -28,6 +55,8 @@ def mock_pyaudio(monkeypatch):
     The stream's is_active() returns True by default to prevent immediate shutdown.
     Tests that need to verify shutdown behavior should set is_active.return_value = False.
     """
+    if not HAS_AUDIO:
+        pytest.skip("audio dependencies not available")
     mock_pa = MagicMock()
     mock_stream = MagicMock()
     mock_stream.is_active.return_value = True  # Keep active to allow testing
@@ -43,6 +72,8 @@ def mock_mss(monkeypatch):
     Returns the mock_sct object that simulates mss.mss() context manager.
     The grab() method returns a 100x100 BGRA numpy array.
     """
+    if not HAS_VIDEO:
+        pytest.skip("video dependencies not available")
     # Create fake BGRA frame (mss returns BGRA format)
     fake_bgra = np.zeros((100, 100, 4), dtype=np.uint8)
     # Set some non-zero values to verify color conversion

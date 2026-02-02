@@ -3,8 +3,14 @@
 import threading
 import time
 
-import numpy as np
 import pytest
+
+# Skip entire module if video dependencies are not available
+pytest.importorskip("numpy")
+pytest.importorskip("PIL")
+pytest.importorskip("mss")
+
+import numpy as np
 
 from rxplus.graphic import (
     create_screen_capture,
