@@ -1,6 +1,7 @@
 - 2026-02-02
     Refined Audio and Video components. Tests constructed.
     Refined reconnection logic of RxWSClient.
+    Refined CLI and RxWS components.
 - 2026-01-28
     Decided to remove customized logging completely.
 - 2026-01-27

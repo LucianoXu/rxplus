@@ -11,7 +11,7 @@ Install with:
 # =============================================================================
 # Basic exports (always available)
 # =============================================================================
-from .cli import from_cli  # noqa: F401
+from .cli import from_cli, to_cli  # noqa: F401
 from .duplex import Duplex, connect_adapter, make_duplex  # noqa: F401
 from .mechanism import RxException  # noqa: F401
 from .telemetry import configure_telemetry, FileLogRecordExporter  # noqa: F401
@@ -89,6 +89,7 @@ __all__ = [
 
     # CLI
     "from_cli",
+    "to_cli",
 ]
 
 # Add audio exports to __all__ if available

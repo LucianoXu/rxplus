@@ -566,18 +566,26 @@ class RxWSServer(Subject):
         self._log("Closing...", "INFO")
         try:
             if self._loop is not None:
-                def _close():
+                async def _async_close():
                     try:
                         if self.serve is not None:
                             self.serve.close(True)  # type: ignore[arg-type]
+                            # Wait for the close task to complete
+                            if self.serve.close_task is not None:
+                                try:
+                                    await asyncio.wait_for(self.serve.close_task, timeout=2.0)
+                                except asyncio.TimeoutError:
+                                    pass
                             self.serve = None
                     finally:
                         asyncio.get_running_loop().stop()
 
-                self._loop.call_soon_threadsafe(_close)
+                self._loop.call_soon_threadsafe(
+                    lambda: self._loop.create_task(_async_close())
+                )
 
             if self._thread is not None:
-                self._thread.join(timeout=2.0)
+                self._thread.join(timeout=3.0)
 
             self._log("Closed.", "INFO")
             super().on_completed()
@@ -801,18 +809,33 @@ class RxWSClient(Subject):
         self._log("Closing...", "INFO")
         try:
             if self._loop is not None:
-                def _close():
+                async def _async_close():
                     try:
-                        # Cancel all tasks
+                        # Close the WebSocket connection if open
+                        if self.ws is not None:
+                            try:
+                                await asyncio.wait_for(self.ws.close(), timeout=1.0)
+                            except (asyncio.TimeoutError, Exception):
+                                pass
+                            self.ws = None
+                        
+                        # Cancel all remaining tasks except this one
+                        current = asyncio.current_task()
                         for task in asyncio.all_tasks(self._loop):
-                            task.cancel()
+                            if task is not current:
+                                task.cancel()
+                        
+                        # Give tasks a moment to clean up
+                        await asyncio.sleep(0.1)
                     finally:
                         asyncio.get_running_loop().stop()
 
-                self._loop.call_soon_threadsafe(_close)
+                self._loop.call_soon_threadsafe(
+                    lambda: self._loop.create_task(_async_close())
+                )
 
             if self._thread is not None:
-                self._thread.join(timeout=2.0)
+                self._thread.join(timeout=3.0)
 
             self._log("Closed.", "INFO")
             # Complete the connection state subject
