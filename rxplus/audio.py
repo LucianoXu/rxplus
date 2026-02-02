@@ -73,6 +73,39 @@ def resample_audio(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarra
     return resampled.astype(audio.dtype, copy=False)
 
 
+def _convert_channels(audio: np.ndarray, target_ch: int) -> np.ndarray:
+    """Convert audio channels with proper mixing.
+
+    Args:
+        audio: Input audio array with shape [samples, channels]
+        target_ch: Target number of channels
+
+    Returns:
+        Audio array with shape [samples, target_ch]
+    """
+    current_ch = audio.shape[1]
+    if current_ch == target_ch:
+        return audio
+
+    if current_ch == 2 and target_ch == 1:
+        # Stereo to mono: average channels
+        return audio.mean(axis=1, keepdims=True).astype(audio.dtype)
+    elif current_ch == 1 and target_ch == 2:
+        # Mono to stereo: duplicate
+        return np.repeat(audio, 2, axis=1)
+    elif current_ch > target_ch:
+        # Downmix: keep first (target-1) channels, average rest into last
+        if target_ch == 1:
+            return audio.mean(axis=1, keepdims=True).astype(audio.dtype)
+        result = audio[:, : target_ch - 1]
+        mixed = audio[:, target_ch - 1 :].mean(axis=1, keepdims=True).astype(audio.dtype)
+        return np.concatenate([result, mixed], axis=1)
+    else:
+        # Upmix: duplicate last channel
+        padding = np.repeat(audio[:, -1:], target_ch - current_ch, axis=1)
+        return np.concatenate([audio, padding], axis=1)
+
+
 def _load_wav_resample(
     path: str,
     target_format: PCMFormat = "Float32",
@@ -90,13 +123,8 @@ def _load_wav_resample(
     # transform to target sample rate
     audio = resample_audio(audio, orig_sr, target_sr)
 
-    # transform to target channel
-    # TODO: there should be a protocol to transform the wav array between different channel numbers.
-    current_ch = audio.shape[1]
-    if current_ch > target_ch:
-        audio = audio[:, :target_ch]
-    elif current_ch < target_ch:
-        audio = np.concatenate((audio[:, 0],) * target_ch, 1)
+    # transform to target channel using proper mixing
+    audio = _convert_channels(audio, target_ch)
 
     # ------------------------------------------------------------------ #
     #                   Convert to the target PCM dtype                  #
@@ -224,6 +252,7 @@ class RxMicrophone(Subject):
         sample_rate: int = 48_000,
         channels: int = 1,
         frames_per_buffer: int = 1_024,
+        device_index: Optional[int] = None,
         loop: Optional[asyncio.AbstractEventLoop] = None,
     ) -> None:
         super().__init__()
@@ -233,6 +262,7 @@ class RxMicrophone(Subject):
         self.channels = channels
         self.format = format
         self.frames_per_buffer = frames_per_buffer
+        self.device_index = device_index
 
         # ---------- PyAudio setup ----------------------------------------------
         self._pa = pyaudio.PyAudio()
@@ -241,6 +271,7 @@ class RxMicrophone(Subject):
             channels=self.channels,
             rate=self.sample_rate,
             input=True,
+            input_device_index=device_index,
             frames_per_buffer=self.frames_per_buffer,
             stream_callback=self._pyaudio_callback,
         )
@@ -329,6 +360,7 @@ class RxSpeaker(Subject):
         format: PCMFormat = "Float32",
         sample_rate: int = 48_000,
         channels: int = 1,
+        device_index: Optional[int] = None,
     ):
 
         super().__init__()
@@ -337,6 +369,7 @@ class RxSpeaker(Subject):
         self.sample_rate = sample_rate
         self.channels = channels
         self.format = format
+        self.device_index = device_index
 
         # ---------- PyAudio setup ----------------------------------------------
         self._pa = pyaudio.PyAudio()
@@ -345,6 +378,7 @@ class RxSpeaker(Subject):
             channels=self.channels,
             rate=self.sample_rate,
             output=True,
+            output_device_index=device_index,
         )
         self._stream.start_stream()
 

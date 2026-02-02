@@ -2,7 +2,7 @@
 
 import asyncio
 import time
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from io import BytesIO
 
@@ -20,6 +20,7 @@ from .mechanism import RxException
 
 def create_screen_capture(
     fps: float = 10.0,
+    monitor: Union[int, dict, None] = None,
     scheduler: Optional[rx.abc.SchedulerBase] = None,
 ) -> Observable[np.ndarray]:
     """
@@ -28,6 +29,10 @@ def create_screen_capture(
 
     Args:
         fps (float): Frames per second for capturing the screen.
+        monitor: Monitor selection:
+            - None: Primary monitor (default, backwards compatible)
+            - int: Monitor index (0=all monitors combined, 1=primary, 2+=secondary)
+            - dict: Region specification {"left": x, "top": y, "width": w, "height": h}
 
     Output stream: 
         Observable emitting NumPy arrays representing RGB frames of the screen.
@@ -70,10 +75,16 @@ def create_screen_capture(
 
             try:
                 with mss.mss() as sct:
-                    monitor = sct.monitors[1]  # primary monitor
+                    # Select monitor based on parameter type
+                    if monitor is None:
+                        _monitor = sct.monitors[1]  # primary monitor
+                    elif isinstance(monitor, int):
+                        _monitor = sct.monitors[monitor]
+                    else:
+                        _monitor = monitor  # dict region
 
                     while not disposed and True:
-                        rgb = np.array(sct.grab(monitor))[:, :, :3][:, :, ::-1]  # BGRA -> RGB
+                        rgb = np.array(sct.grab(_monitor))[:, :, :3][:, :, ::-1]  # BGRA -> RGB
                         observer.on_next(rgb)
                         # adjust the sleep time based on the interval. experiments show that this is critical.
                         current_time = time.time()
@@ -97,10 +108,16 @@ def create_screen_capture(
 
             try:
                 with mss.mss() as sct:
-                    monitor = sct.monitors[1]  # primary monitor
+                    # Select monitor based on parameter type
+                    if monitor is None:
+                        _monitor = sct.monitors[1]  # primary monitor
+                    elif isinstance(monitor, int):
+                        _monitor = sct.monitors[monitor]
+                    else:
+                        _monitor = monitor  # dict region
 
                     while not disposed and True:
-                        rgb = np.array(sct.grab(monitor))[:, :, :3][:, :, ::-1]  # BGRA -> RGB
+                        rgb = np.array(sct.grab(_monitor))[:, :, :3][:, :, ::-1]  # BGRA -> RGB
                         observer.on_next(rgb)
                         # adjust the sleep time based on the interval. experiments show that this is critical.
                         current_time = time.time()
@@ -180,5 +197,52 @@ def jpeg_bytes_to_rgb_ndarray(jpeg: bytes) -> np.ndarray:
         Image as RGB array (copy, contiguous).
     """
     with Image.open(BytesIO(jpeg)) as im:
+        rgb = im.convert("RGB")        # ensure 3-channel
+        return np.asarray(rgb)         # shape (H, W, 3), dtype uint8
+
+
+def rgb_ndarray_to_png_bytes(frame: np.ndarray, compression: int = 6) -> bytes:
+    """
+    Convert RGB NumPy array to lossless PNG bytes.
+
+    Parameters
+    ----------
+    frame : np.ndarray
+        Image as RGB array (H, W, 3), dtype uint8.
+    compression : int, optional
+        PNG compression level (0-9, where 9 is maximum compression), by default 6.
+
+    Returns
+    -------
+    bytes
+        PNG encoded image data.
+    """
+    width, height = frame.shape[1], frame.shape[0]
+
+    img = Image.frombytes("RGB", (width, height), frame.tobytes())
+
+    # Convert to PNG format with specified compression
+    with BytesIO() as output:
+        img.save(output, format="PNG", compress_level=compression)
+        png_data = output.getvalue()
+
+    return png_data
+
+
+def png_bytes_to_rgb_ndarray(png: bytes) -> np.ndarray:
+    """
+    Convert PNG bytes to H×W×3 uint8 NumPy array (RGB).
+
+    Parameters
+    ----------
+    png : bytes
+        Raw PNG data.
+
+    Returns
+    -------
+    np.ndarray
+        Image as RGB array (copy, contiguous).
+    """
+    with Image.open(BytesIO(png)) as im:
         rgb = im.convert("RGB")        # ensure 3-channel
         return np.asarray(rgb)         # shape (H, W, 3), dtype uint8

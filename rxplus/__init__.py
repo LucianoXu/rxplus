@@ -44,6 +44,8 @@ try:
         create_screen_capture,
         rgb_ndarray_to_jpeg_bytes,
         jpeg_bytes_to_rgb_ndarray,
+        rgb_ndarray_to_png_bytes,
+        png_bytes_to_rgb_ndarray,
     )
     _HAS_VIDEO = True
 except ImportError:
@@ -105,4 +107,6 @@ if _HAS_VIDEO:
         "create_screen_capture",
         "rgb_ndarray_to_jpeg_bytes",
         "jpeg_bytes_to_rgb_ndarray",
+        "rgb_ndarray_to_png_bytes",
+        "png_bytes_to_rgb_ndarray",
     ])

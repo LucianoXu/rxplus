@@ -1,3 +1,5 @@
+- 2026-02-02
+    Refined Audio and Video components. Tests constructed.
 - 2026-01-28
     Decided to remove customized logging completely.
 - 2026-01-27
