@@ -8,9 +8,12 @@ threaded Observable/Observer (similar to `rx.interval` on a new thread).
 
 import asyncio
 import pickle
+import random
 import threading
 import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Callable, Literal, Optional
 
 import websockets
@@ -18,6 +21,7 @@ from websockets import ClientConnection, Server
 
 from reactivex import Subject
 from reactivex import operators as ops
+from reactivex.subject import BehaviorSubject
 
 from opentelemetry.trace import TracerProvider, Tracer
 from opentelemetry._logs import LoggerProvider, SeverityNumber
@@ -25,6 +29,43 @@ from opentelemetry._logs import LogRecord as OTelLogRecord
 
 from .mechanism import RxException
 from .utils import TaggedData, get_full_error_info, get_short_error_info
+
+
+class ConnectionState(Enum):
+    """Observable states for RxWSClient connection lifecycle."""
+    DISCONNECTED = "disconnected"
+    CONNECTING = "connecting"
+    CONNECTED = "connected"
+    RECONNECTING = "reconnecting"
+    CLOSED = "closed"  # terminal state after on_completed
+
+
+@dataclass
+class RetryPolicy:
+    """Configurable retry behavior for WebSocket reconnection.
+    
+    Attributes:
+        max_retries: Maximum number of retry attempts. None means infinite retries.
+        base_delay: Initial delay between retries in seconds.
+        max_delay: Maximum delay between retries in seconds.
+        backoff_factor: Multiplier for exponential backoff.
+        jitter: Randomization factor (0.0-1.0) to prevent thundering herd.
+    """
+    max_retries: int | None = None  # None = infinite
+    base_delay: float = 0.5
+    max_delay: float = 30.0
+    backoff_factor: float = 2.0
+    jitter: float = 0.1  # randomization factor (0.0-1.0)
+
+    def get_delay(self, attempt: int) -> float:
+        """Calculate delay for given attempt number (0-indexed).
+        
+        Uses exponential backoff with jitter:
+        delay = min(base_delay * (backoff_factor ^ attempt), max_delay) ± jitter
+        """
+        delay = min(self.base_delay * (self.backoff_factor ** attempt), self.max_delay)
+        jitter_range = delay * self.jitter
+        return delay + random.uniform(-jitter_range, jitter_range)
 
 
 def _ws_path(ws: Any) -> str:
@@ -610,6 +651,7 @@ class RxWSClient(Subject):
         buffer_while_disconnected: bool = False,
         tracer_provider: TracerProvider | None = None,
         logger_provider: LoggerProvider | None = None,
+        retry_policy: RetryPolicy | None = None,
     ):
         """Create a reconnecting WebSocket client.
 
@@ -617,6 +659,7 @@ class RxWSClient(Subject):
             conn_cfg: Connection configuration with 'host', 'port', and optional 'path'.
             datatype: Payload serialization type.
             conn_retry_timeout: Delay between reconnection attempts in seconds.
+                Deprecated: Use retry_policy instead.
             ping_interval: WebSocket heartbeat interval.
             ping_timeout: WebSocket heartbeat timeout.
             name: Custom name for log source identification.
@@ -624,6 +667,8 @@ class RxWSClient(Subject):
                 If False (default), messages are dropped when not connected.
             tracer_provider: Optional OTel TracerProvider for span instrumentation.
             logger_provider: Optional OTel LoggerProvider for log emission.
+            retry_policy: Configurable retry behavior with exponential backoff.
+                If None, uses default RetryPolicy with conn_retry_timeout as base_delay.
         """
         super().__init__()
         _validate_conn_cfg(conn_cfg, ["host", "port"])
@@ -649,12 +694,18 @@ class RxWSClient(Subject):
         self.queue: Optional[asyncio.Queue[Any]] = None
         self.ws: Optional[ClientConnection] = None
 
-        self.conn_retry_timeout = conn_retry_timeout
+        # Retry policy: use provided or create default from conn_retry_timeout
+        self._retry_policy = retry_policy if retry_policy else RetryPolicy(base_delay=conn_retry_timeout)
+        self.conn_retry_timeout = conn_retry_timeout  # kept for backward compatibility
 
         # Private asyncio loop running in a background thread
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._loop_ready = threading.Event()
+        
+        # Connection state observable
+        self._connection_state_subject: BehaviorSubject[ConnectionState] = BehaviorSubject(ConnectionState.DISCONNECTED)
+        
         self._start_loop_thread()
 
         # whether the connection is established. this will influence the caching strategy.
@@ -680,6 +731,23 @@ class RxWSClient(Subject):
             attributes={"component": self._name},
         )
         self._logger.emit(record)
+
+    @property
+    def connection_state(self):
+        """Observable stream of connection state changes.
+        
+        Emits on every state transition including each reconnect attempt.
+        New subscribers immediately receive the current state.
+        
+        Returns:
+            Observable[ConnectionState]: Stream of connection state values.
+        """
+        return self._connection_state_subject.pipe(ops.share())
+
+    def _set_connection_state(self, state: ConnectionState) -> None:
+        """Thread-safe state transition with logging."""
+        self._log(f"Connection state: {state.value}", "DEBUG")
+        self._connection_state_subject.on_next(state)
 
     def on_next(self, value):
         """Send a message to the server.
@@ -725,6 +793,7 @@ class RxWSClient(Subject):
     def on_completed(self) -> None:
         """Close the connection before completing."""
         self._shutdown_requested = True
+        self._set_connection_state(ConnectionState.CLOSED)
         self._shutdown_client()
 
     def _shutdown_client(self):
@@ -746,83 +815,127 @@ class RxWSClient(Subject):
                 self._thread.join(timeout=2.0)
 
             self._log("Closed.", "INFO")
+            # Complete the connection state subject
+            self._connection_state_subject.on_completed()
             super().on_completed()
         except Exception as e:
             rx_exception = RxException(e, source=self._name, note="RxWSClient.on_completed")
             super().on_error(rx_exception)
 
     async def connect_client(self):
-        """Connect to the remote server and forward messages."""
+        """Connect to the remote server and forward messages.
+        
+        Uses the configured RetryPolicy for exponential backoff.
+        Emits ConnectionState on every state transition.
+        Calls on_error if max_retries is exhausted.
+        """
         # calculate the url
         url = f"ws://{self.host}:{self.port}{self.path}"
         remote_desc = f"[{url}]"
+        attempt = 0
 
         try:
             # Repeatedly attempt to connect to the server
             while not self._shutdown_requested:
 
                 self._connected = False
+                
+                # Emit state: CONNECTING on first attempt, RECONNECTING on subsequent
+                self._set_connection_state(
+                    ConnectionState.RECONNECTING if attempt > 0 else ConnectionState.CONNECTING
+                )
+                
+                # Check max retries before attempting connection
+                if (self._retry_policy.max_retries is not None 
+                    and attempt >= self._retry_policy.max_retries):
+                    self._log(
+                        f"Max retries ({self._retry_policy.max_retries}) exhausted for {remote_desc}",
+                        "ERROR",
+                    )
+                    self._set_connection_state(ConnectionState.DISCONNECTED)
+                    super().on_error(RxException(
+                        ConnectionError(f"Max retries exhausted connecting to {url}"),
+                        source=self._name,
+                        note="RxWSClient.connect_client",
+                    ))
+                    return
+
                 # Attempt to connect to the server
-                self._log(f"Connecting to server {remote_desc}", "INFO")
+                self._log(f"Connecting to server {remote_desc} (attempt {attempt + 1})", "INFO")
 
-                while not self._shutdown_requested:
-                    try:
-                        """
-                        According to the documentation of websockets.connect:
-                        Raises
-                            InvalidURI
-                            If uri isn't a valid WebSocket URI.
+                try:
+                    """
+                    According to the documentation of websockets.connect:
+                    Raises
+                        InvalidURI
+                        If uri isn't a valid WebSocket URI.
 
-                            OSError
-                            If the TCP connection fails.
+                        OSError
+                        If the TCP connection fails.
 
-                            InvalidHandshake
-                            If the opening handshake fails.
+                        InvalidHandshake
+                        If the opening handshake fails.
 
-                            ~asyncio.TimeoutError
-                            If the opening handshake times out.
-                        """
+                        ~asyncio.TimeoutError
+                        If the opening handshake times out.
+                    """
 
-                        self.ws = await asyncio.wait_for(
-                            websockets.connect(
-                                url,
-                                ping_interval=self.ping_interval,
-                                ping_timeout=self.ping_timeout,
-                                max_size=None,
-                            ),
-                            self.conn_retry_timeout,
-                        )
-                        break
+                    self.ws = await asyncio.wait_for(
+                        websockets.connect(
+                            url,
+                            ping_interval=self.ping_interval,
+                            ping_timeout=self.ping_timeout,
+                            max_size=None,
+                        ),
+                        self._retry_policy.base_delay,
+                    )
+                    # Connection successful - reset attempt counter
+                    attempt = 0
 
-                    except asyncio.TimeoutError:
-                        continue
+                except asyncio.TimeoutError:
+                    attempt += 1
+                    delay = self._retry_policy.get_delay(attempt - 1)
+                    self._log(f"Connection timeout, retry {attempt} in {delay:.2f}s", "WARN")
+                    self._set_connection_state(ConnectionState.DISCONNECTED)
+                    await asyncio.sleep(delay)
+                    continue
 
-                    except OSError as e:
-                        self._log(
-                            f"Network error or connection failed (OSError): {get_short_error_info(e)}",
-                            "WARN",
-                        )
-                        await asyncio.sleep(self.conn_retry_timeout)
+                except OSError as e:
+                    attempt += 1
+                    delay = self._retry_policy.get_delay(attempt - 1)
+                    self._log(
+                        f"Network error (OSError): {get_short_error_info(e)}, retry {attempt} in {delay:.2f}s",
+                        "WARN",
+                    )
+                    self._set_connection_state(ConnectionState.DISCONNECTED)
+                    await asyncio.sleep(delay)
+                    continue
 
-                    except websockets.InvalidHandshake as e:
-                        self._log(
-                            f"Invalid handshake with server {remote_desc}: {get_short_error_info(e)}",
-                            "WARN",
-                        )
-                        await asyncio.sleep(self.conn_retry_timeout)
+                except websockets.InvalidHandshake as e:
+                    attempt += 1
+                    delay = self._retry_policy.get_delay(attempt - 1)
+                    self._log(
+                        f"Invalid handshake: {get_short_error_info(e)}, retry {attempt} in {delay:.2f}s",
+                        "WARN",
+                    )
+                    self._set_connection_state(ConnectionState.DISCONNECTED)
+                    await asyncio.sleep(delay)
+                    continue
 
-                    # Catch invalid URI errors
-                    except websockets.InvalidURI as e:
-                        self._log(
-                            f"Invalid URI for server {remote_desc}: {get_short_error_info(e)}",
-                            "ERROR",
-                        )
-                        super().on_error(e)
-                        return
+                # Catch invalid URI errors - these are not retryable
+                except websockets.InvalidURI as e:
+                    self._log(
+                        f"Invalid URI for server {remote_desc}: {get_short_error_info(e)}",
+                        "ERROR",
+                    )
+                    self._set_connection_state(ConnectionState.DISCONNECTED)
+                    super().on_error(e)
+                    return
 
                 assert self.ws is not None
                 self._log(f"Server {remote_desc} Connected.", "INFO")
                 self._connected = True
+                self._set_connection_state(ConnectionState.CONNECTED)
 
                 sender_task = asyncio.create_task(
                     self._client_sender(self.ws, remote_desc)
@@ -845,6 +958,10 @@ class RxWSClient(Subject):
                     task.result()
 
                 self._connected = False
+                self._set_connection_state(ConnectionState.DISCONNECTED)
+                
+                # Increment attempt for reconnection
+                attempt += 1
 
         except asyncio.CancelledError:
             self._log("WebSocket client connection cancelled.", "INFO")
@@ -855,6 +972,7 @@ class RxWSClient(Subject):
                 f"Error while connecting to server {remote_desc}:\n{get_full_error_info(e)}",
                 "ERROR",
             )
+            self._set_connection_state(ConnectionState.DISCONNECTED)
             super().on_error(e)
 
         finally:

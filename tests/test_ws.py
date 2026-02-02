@@ -10,6 +10,8 @@ from rxplus.ws import (
     RxWSServer,
     RxWSClient,
     RxWSClientGroup,
+    ConnectionState,
+    RetryPolicy,
 )
 
 
@@ -224,3 +226,156 @@ def test_client_group_passes_buffer_while_disconnected():
     )
     assert group._buffer_while_disconnected is True
     group.on_completed()
+
+
+# =============================================================================
+# ConnectionState enum tests
+# =============================================================================
+
+
+def test_connection_state_enum_values():
+    """Verify all ConnectionState values are defined correctly."""
+    assert ConnectionState.DISCONNECTED.value == "disconnected"
+    assert ConnectionState.CONNECTING.value == "connecting"
+    assert ConnectionState.CONNECTED.value == "connected"
+    assert ConnectionState.RECONNECTING.value == "reconnecting"
+    assert ConnectionState.CLOSED.value == "closed"
+
+
+def test_connection_state_is_enum():
+    """Verify ConnectionState members are proper enum instances."""
+    assert isinstance(ConnectionState.DISCONNECTED, ConnectionState)
+    assert ConnectionState.DISCONNECTED is ConnectionState.DISCONNECTED
+
+
+# =============================================================================
+# RetryPolicy tests
+# =============================================================================
+
+
+def test_retry_policy_default_values():
+    """Verify default RetryPolicy values."""
+    policy = RetryPolicy()
+    assert policy.max_retries is None
+    assert policy.base_delay == 0.5
+    assert policy.max_delay == 30.0
+    assert policy.backoff_factor == 2.0
+    assert policy.jitter == 0.1
+
+
+def test_retry_policy_get_delay_exponential():
+    """Verify exponential backoff calculation (without jitter)."""
+    policy = RetryPolicy(base_delay=1.0, backoff_factor=2.0, jitter=0.0)
+    
+    # attempt 0: 1.0 * 2^0 = 1.0
+    assert policy.get_delay(0) == 1.0
+    # attempt 1: 1.0 * 2^1 = 2.0
+    assert policy.get_delay(1) == 2.0
+    # attempt 2: 1.0 * 2^2 = 4.0
+    assert policy.get_delay(2) == 4.0
+    # attempt 3: 1.0 * 2^3 = 8.0
+    assert policy.get_delay(3) == 8.0
+
+
+def test_retry_policy_get_delay_max_cap():
+    """Verify delay is capped at max_delay."""
+    policy = RetryPolicy(base_delay=1.0, max_delay=5.0, backoff_factor=2.0, jitter=0.0)
+    
+    # attempt 10: would be 1.0 * 2^10 = 1024.0, but capped at 5.0
+    assert policy.get_delay(10) == 5.0
+    assert policy.get_delay(100) == 5.0
+
+
+def test_retry_policy_get_delay_jitter():
+    """Verify jitter is applied within expected bounds."""
+    policy = RetryPolicy(base_delay=10.0, backoff_factor=1.0, jitter=0.1)
+    
+    # With jitter=0.1 and base_delay=10.0, delay should be 10.0 ± 1.0
+    delays = [policy.get_delay(0) for _ in range(100)]
+    
+    assert all(9.0 <= d <= 11.0 for d in delays), "All delays should be within jitter bounds"
+    # Check that jitter actually varies the values (not all the same)
+    assert len(set(delays)) > 1, "Jitter should produce varying delays"
+
+
+def test_retry_policy_custom_values():
+    """Verify custom RetryPolicy values are respected."""
+    policy = RetryPolicy(
+        max_retries=5,
+        base_delay=0.1,
+        max_delay=10.0,
+        backoff_factor=3.0,
+        jitter=0.2,
+    )
+    assert policy.max_retries == 5
+    assert policy.base_delay == 0.1
+    assert policy.max_delay == 10.0
+    assert policy.backoff_factor == 3.0
+    assert policy.jitter == 0.2
+
+
+# =============================================================================
+# RxWSClient connection state tests
+# =============================================================================
+
+
+def test_client_has_connection_state_observable():
+    """Client should expose connection_state property."""
+    client = RxWSClient({"host": "localhost", "port": 9999})
+    
+    # Should be able to subscribe to connection_state
+    states = []
+    client.connection_state.subscribe(lambda s: states.append(s))
+    
+    # Should have received initial state (DISCONNECTED or CONNECTING depending on timing)
+    # Give a moment for the thread to start
+    import time
+    time.sleep(0.1)
+    
+    assert len(states) >= 1
+    assert all(isinstance(s, ConnectionState) for s in states)
+    
+    client.on_completed()
+
+
+def test_client_retry_policy_default():
+    """Client should use default RetryPolicy when not provided."""
+    client = RxWSClient({"host": "localhost", "port": 9999})
+    
+    assert isinstance(client._retry_policy, RetryPolicy)
+    # Default should use conn_retry_timeout as base_delay
+    assert client._retry_policy.base_delay == client.conn_retry_timeout
+    
+    client.on_completed()
+
+
+def test_client_retry_policy_custom():
+    """Client should use custom RetryPolicy when provided."""
+    custom_policy = RetryPolicy(max_retries=3, base_delay=1.0)
+    client = RxWSClient(
+        {"host": "localhost", "port": 9999},
+        retry_policy=custom_policy,
+    )
+    
+    assert client._retry_policy is custom_policy
+    assert client._retry_policy.max_retries == 3
+    assert client._retry_policy.base_delay == 1.0
+    
+    client.on_completed()
+
+
+def test_client_emits_closed_on_completed():
+    """Client should emit CLOSED state on on_completed."""
+    client = RxWSClient({"host": "localhost", "port": 9999})
+    
+    states = []
+    client.connection_state.subscribe(lambda s: states.append(s))
+    
+    import time
+    time.sleep(0.1)  # Let connection attempt start
+    
+    client.on_completed()
+    time.sleep(0.1)  # Let shutdown complete
+    
+    # CLOSED should be in the state history
+    assert ConnectionState.CLOSED in states
