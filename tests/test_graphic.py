@@ -107,12 +107,19 @@ class TestPNGCodec:
         
         assert recovered.shape == (200, 300, 3)
 
-    def test_png_compression_affects_size(self, synthetic_rgb_frame):
-        """Verify lower compression produces larger file size."""
-        low_compression = rgb_ndarray_to_png_bytes(synthetic_rgb_frame, compression=1)
-        high_compression = rgb_ndarray_to_png_bytes(synthetic_rgb_frame, compression=9)
+    def test_png_compression_affects_size(self):
+        """Verify compression level affects file size on compressible data."""
+        # Use a gradient image that compresses well (random data doesn't compress predictably)
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        # Create horizontal gradient - this compresses much better than random data
+        for i in range(640):
+            frame[:, i, :] = i % 256
+        
+        low_compression = rgb_ndarray_to_png_bytes(frame, compression=1)
+        high_compression = rgb_ndarray_to_png_bytes(frame, compression=9)
         
         # Lower compression = larger file, higher compression = smaller file
+        # For compressible data, this relationship should hold
         assert len(low_compression) > len(high_compression)
 
     def test_png_lossless_roundtrip(self):
