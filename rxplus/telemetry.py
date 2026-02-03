@@ -21,6 +21,7 @@ from opentelemetry.sdk._logs import LoggerProvider
 from opentelemetry.sdk._logs.export import (
     LogRecordExporter,
     BatchLogRecordProcessor,
+    SimpleLogRecordProcessor,
     LogRecordExportResult,
 )
 from opentelemetry.sdk._logs._internal import ReadableLogRecord
@@ -33,6 +34,7 @@ def configure_telemetry(
     service_version: str = "",
     span_exporter: SpanExporter | None = None,
     log_exporter: LogRecordExporter | None = None,
+    batch_logs: bool = True,
 ) -> tuple[TracerProvider, LoggerProvider]:
     """
     Configure OTel providers for rxplus components.
@@ -46,6 +48,8 @@ def configure_telemetry(
         service_version: Service version for resource attributes.
         span_exporter: Optional span exporter (e.g., OTLPSpanExporter, ConsoleSpanExporter).
         log_exporter: Optional log exporter (e.g., OTLPLogExporter, ConsoleLogExporter).
+        batch_logs: If True, use BatchLogRecordProcessor (better for network exporters).
+            If False, use SimpleLogRecordProcessor (immediate output, better for console).
 
     Returns:
         Tuple of (TracerProvider, LoggerProvider) for injection into components.
@@ -77,7 +81,10 @@ def configure_telemetry(
 
     logger_provider = LoggerProvider(resource=resource)
     if log_exporter:
-        logger_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
+        if batch_logs:
+            logger_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
+        else:
+            logger_provider.add_log_record_processor(SimpleLogRecordProcessor(log_exporter))
 
     return tracer_provider, logger_provider
 
@@ -309,8 +316,8 @@ def get_default_providers(
     providers on subsequent calls (singleton pattern).
     
     The default configuration uses ConsoleLogRecordExporter for CLI-friendly
-    output to stderr. Users can override by passing custom providers to
-    component constructors.
+    output to stderr with immediate (non-batched) processing.
+    Users can override by passing custom providers to component constructors.
     
     Args:
         service_name: Service name for the default providers (only used on first call).
@@ -328,6 +335,7 @@ def get_default_providers(
         _default_tracer_provider, _default_logger_provider = configure_telemetry(
             service_name=service_name,
             log_exporter=ConsoleLogRecordExporter(),
+            batch_logs=False,  # Immediate output for CLI
         )
     
     return _default_tracer_provider, _default_logger_provider
