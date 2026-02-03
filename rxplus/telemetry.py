@@ -338,6 +338,8 @@ def get_default_providers(
             batch_logs=False,  # Immediate output for CLI
         )
     
+    # At this point both providers are guaranteed to be initialized
+    assert _default_tracer_provider is not None
     return _default_tracer_provider, _default_logger_provider
 
 
