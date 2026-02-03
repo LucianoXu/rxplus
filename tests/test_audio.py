@@ -87,6 +87,102 @@ def test_get_pyaudio_format_and_sf_format():
 
 
 # =============================================================================
+# Audio Format Conversion Tests
+# =============================================================================
+
+
+class TestGetNumpyDtype:
+    """Tests for get_numpy_dtype function."""
+    
+    def test_int16(self):
+        from rxplus.audio import get_numpy_dtype
+        assert get_numpy_dtype("Int16") == np.dtype(np.int16)
+    
+    def test_float32(self):
+        from rxplus.audio import get_numpy_dtype
+        assert get_numpy_dtype("Float32") == np.dtype(np.float32)
+    
+    def test_int32(self):
+        from rxplus.audio import get_numpy_dtype
+        assert get_numpy_dtype("Int32") == np.dtype(np.int32)
+    
+    def test_uint8(self):
+        from rxplus.audio import get_numpy_dtype
+        assert get_numpy_dtype("UInt8") == np.dtype(np.uint8)
+    
+    def test_int24_stored_as_int32(self):
+        from rxplus.audio import get_numpy_dtype
+        # Int24 is stored in int32 container
+        assert get_numpy_dtype("Int24") == np.dtype(np.int32)
+    
+    def test_invalid_format_raises(self):
+        from rxplus.audio import get_numpy_dtype
+        with pytest.raises(ValueError):
+            get_numpy_dtype("invalid")
+
+
+class TestConvertAudioFormat:
+    """Tests for convert_audio_format function."""
+    
+    def test_same_format_noop(self):
+        from rxplus.audio import convert_audio_format
+        audio = np.array([1, 2, 3], dtype=np.int16)
+        result = convert_audio_format(audio, "Int16", "Int16")
+        assert np.array_equal(result, audio)
+    
+    def test_float32_to_int16(self):
+        from rxplus.audio import convert_audio_format
+        f32 = np.array([0.0, 0.5, -0.5, 1.0, -1.0], dtype=np.float32)
+        int16 = convert_audio_format(f32, "Float32", "Int16")
+        
+        assert int16.dtype == np.int16
+        assert int16[0] == 0
+        assert int16[1] == 16383  # 0.5 * 32767
+        assert int16[2] == -16383  # -0.5 * 32767
+        assert int16[3] == 32767  # 1.0 clamped
+        assert int16[4] == -32767  # -1.0 clamped
+    
+    def test_int16_to_float32(self):
+        from rxplus.audio import convert_audio_format
+        int16 = np.array([0, 16384, -16384, 32767, -32768], dtype=np.int16)
+        f32 = convert_audio_format(int16, "Int16", "Float32")
+        
+        assert f32.dtype == np.float32
+        assert f32[0] == 0.0
+        assert 0.4 < f32[1] < 0.6  # ~0.5
+        assert -0.6 < f32[2] < -0.4  # ~-0.5
+    
+    def test_int16_to_uint8(self):
+        from rxplus.audio import convert_audio_format
+        int16 = np.array([0, 16384, -16384], dtype=np.int16)
+        uint8 = convert_audio_format(int16, "Int16", "UInt8")
+        
+        assert uint8.dtype == np.uint8
+        assert uint8[0] == 128  # zero point at 128
+        assert uint8[1] > 128  # positive
+        assert uint8[2] < 128  # negative
+    
+    def test_uint8_to_float32(self):
+        from rxplus.audio import convert_audio_format
+        uint8 = np.array([0, 128, 255], dtype=np.uint8)
+        f32 = convert_audio_format(uint8, "UInt8", "Float32")
+        
+        assert f32.dtype == np.float32
+        assert f32[0] == -1.0  # 0 maps to -1.0
+        assert f32[1] == 0.0  # 128 maps to 0.0
+        assert f32[2] == pytest.approx(1.0, abs=0.01)  # 255 maps to ~1.0
+    
+    def test_clipping_on_overflow(self):
+        from rxplus.audio import convert_audio_format
+        # Values outside [-1.0, 1.0] should be clipped
+        f32 = np.array([-2.0, 2.0], dtype=np.float32)
+        int16 = convert_audio_format(f32, "Float32", "Int16")
+        
+        assert int16[0] == -32767  # clipped to min
+        assert int16[1] == 32767  # clipped to max
+
+
+# =============================================================================
 # RxMicrophone Tests
 # =============================================================================
 

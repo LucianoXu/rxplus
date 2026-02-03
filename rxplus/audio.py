@@ -58,6 +58,95 @@ def get_sf_format(format: PCMFormat) -> tuple[str, str]:
         raise ValueError(f"Unexpected PCMFormat: {format}")
 
 
+def get_numpy_dtype(format: PCMFormat) -> np.dtype:
+    """Return the numpy dtype for the given PCM format.
+    
+    Args:
+        format: PCM format string ("UInt8", "Int16", "Int24", "Int32", "Float32")
+        
+    Returns:
+        Corresponding numpy dtype
+        
+    Raises:
+        ValueError: If format is not recognized
+    """
+    dtype_map: dict[PCMFormat, np.dtype] = {
+        "UInt8": np.dtype(np.uint8),
+        "Int16": np.dtype(np.int16),
+        "Int24": np.dtype(np.int32),  # Int24 stored in int32
+        "Int32": np.dtype(np.int32),
+        "Float32": np.dtype(np.float32),
+    }
+    if format not in dtype_map:
+        raise ValueError(f"Unexpected PCMFormat: {format}")
+    return dtype_map[format]
+
+
+def convert_audio_format(
+    audio: np.ndarray,
+    source_format: PCMFormat,
+    target_format: PCMFormat,
+) -> np.ndarray:
+    """Convert audio data between different PCM formats.
+    
+    Handles proper scaling when converting between integer and floating-point
+    representations:
+    - Float32 uses range [-1.0, 1.0]
+    - Int16 uses range [-32768, 32767]
+    - Int32 uses full 32-bit range
+    - UInt8 uses range [0, 255] with 128 as center
+    
+    Args:
+        audio: Input audio array (any shape, will be treated as samples)
+        source_format: Current format of the audio
+        target_format: Desired output format
+        
+    Returns:
+        Audio array converted to target format with proper scaling
+        
+    Example:
+        >>> # Convert Float32 [-1.0, 1.0] to Int16 [-32768, 32767]
+        >>> audio_int16 = convert_audio_format(audio_f32, "Float32", "Int16")
+        >>> # Convert Int16 back to Float32
+        >>> audio_f32 = convert_audio_format(audio_int16, "Int16", "Float32")
+    """
+    if source_format == target_format:
+        return audio
+    
+    # First normalize to Float32 range [-1.0, 1.0]
+    if source_format == "Float32":
+        normalized = audio.astype(np.float32)
+    elif source_format == "Int16":
+        normalized = audio.astype(np.float32) / 32768.0
+    elif source_format == "Int32":
+        normalized = audio.astype(np.float32) / np.iinfo(np.int32).max
+    elif source_format == "Int24":
+        max24 = 2**23 - 1
+        normalized = audio.astype(np.float32) / max24
+    elif source_format == "UInt8":
+        normalized = (audio.astype(np.float32) - 128.0) / 128.0
+    else:
+        raise ValueError(f"Unexpected source format: {source_format}")
+    
+    # Clip to valid range
+    normalized = np.clip(normalized, -1.0, 1.0)
+    
+    # Convert from normalized Float32 to target format
+    if target_format == "Float32":
+        return normalized
+    elif target_format == "Int16":
+        return (normalized * 32767).astype(np.int16)
+    elif target_format == "Int32":
+        return (normalized * np.iinfo(np.int32).max).astype(np.int32)
+    elif target_format == "Int24":
+        max24 = 2**23 - 1
+        return (normalized * max24).astype(np.int32)
+    elif target_format == "UInt8":
+        return ((normalized * 127.5) + 128.0).astype(np.uint8)
+    else:
+        raise ValueError(f"Unexpected target format: {target_format}")
+
+
 def resample_audio(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
     """Resample audio to a new sample rate using ``scipy.signal.resample_poly``."""
     if orig_sr == target_sr:

@@ -28,7 +28,10 @@ try:
         PCMFormat,
         RxMicrophone,
         RxSpeaker,
+        convert_audio_format,
         create_wavfile,
+        get_numpy_dtype,
+        resample_audio,
         save_wavfile,
     )
     _HAS_AUDIO = True
@@ -96,7 +99,10 @@ __all__ = [
 if _HAS_AUDIO:
     __all__.extend([
         "PCMFormat",
+        "convert_audio_format",
         "create_wavfile",
+        "get_numpy_dtype",
+        "resample_audio",
         "RxMicrophone",
         "RxSpeaker",
         "save_wavfile",
