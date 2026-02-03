@@ -511,6 +511,7 @@ class RxWSServer(Subject):
                 ping_interval=self.ping_interval,
                 ping_timeout=self.ping_timeout,
                 max_size=None,
+                process_request=self._process_request,
             )
             self._log(
                 f"WebSocket server started on {self.host}:{self.port}", "INFO"
@@ -518,6 +519,44 @@ class RxWSServer(Subject):
         except asyncio.CancelledError:
             self._log(f"WebSocket server task cancelled.", "INFO")
             raise
+    
+    async def _process_request(self, connection, request):
+        """Handle HTTP request before WebSocket upgrade.
+        
+        This catches invalid requests (like regular HTTP) that cannot be
+        upgraded to WebSocket connections. Returns an HTTP response tuple
+        for invalid requests, or None to proceed with WebSocket upgrade.
+        
+        Args:
+            connection: The WebSocket connection object
+            request: The HTTP Request object with headers
+        """
+        # Access headers from the request object
+        headers = request.headers
+        path = request.path
+        
+        # Check for valid WebSocket upgrade request
+        connection_header = headers.get("Connection", "")
+        upgrade_header = headers.get("Upgrade", "")
+        
+        # WebSocket upgrade requires "Upgrade" in Connection header and "websocket" in Upgrade header
+        if "upgrade" not in connection_header.lower() or upgrade_header.lower() != "websocket":
+            self._log(
+                f"Rejected non-WebSocket request on {path}: "
+                f"Connection={connection_header!r}, Upgrade={upgrade_header!r}",
+                "WARN"
+            )
+            # Return HTTP response to reject the request
+            from websockets.http11 import Response
+            return Response(
+                426,
+                "Upgrade Required",
+                websockets.Headers([("Content-Type", "text/plain")]),
+                b"WebSocket upgrade required. This is a WebSocket endpoint.\n"
+            )
+        
+        # Proceed with WebSocket handshake
+        return None
 
     # ---------------- threaded event loop plumbing ---------------- #
     def _run_server_loop(self):
