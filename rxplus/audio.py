@@ -390,12 +390,22 @@ class RxMicrophone(Subject):
     # --------------------------------------------------------------------- #
     def _pyaudio_callback(self, in_data, frame_count, time_info, status):
         """Forward audio frames from PyAudio to observers."""
+        from reactivex.internal.exceptions import DisposedException
+
         try:
             super().on_next(in_data)
 
+        except DisposedException:
+            # Subject has been disposed - stop the stream gracefully
+            return (None, pyaudio.paAbort)
+
         except Exception as exc:
             rx_exception = RxException(exc, note="Error in PyAudio callback")
-            super().on_error(rx_exception)
+            try:
+                super().on_error(rx_exception)
+            except DisposedException:
+                # Subject disposed during error handling - just abort
+                pass
             return (None, pyaudio.paAbort)
 
         return (None, pyaudio.paContinue)
