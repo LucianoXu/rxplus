@@ -119,7 +119,7 @@ def format_log_record(record: LogRecord) -> str:
         span_id_hex = f"{record.span_id:016x}"
         trace_part = f" [{trace_id_hex[:8]}:{span_id_hex[:8]}]"
 
-    return f"[{record.severity_text}] {timestamp_str}{trace_part} {source}\t: {record.body}\n"
+    return f"{timestamp_str} [{record.severity_text}] {trace_part} {source}\t: {record.body}\n"
 
 
 def format_log_record_json(record: LogRecord) -> str:
@@ -153,6 +153,184 @@ def format_log_record_json(record: LogRecord) -> str:
         data["span_id"] = f"{record.span_id:016x}"
 
     return json.dumps(data, default=str) + "\n"
+
+
+# =============================================================================
+# Console Log Record Exporter
+# =============================================================================
+
+
+class ConsoleLogRecordExporter(LogRecordExporter):
+    """OTel LogRecordExporter that writes CLI-friendly output to stderr.
+    
+    Unlike OTel's ConsoleLogExporter which outputs verbose JSON,
+    this exporter produces human-readable format suitable for CLI applications.
+    
+    Example output:
+        [INFO] 2026-02-03T10:30:00Z MyComponent: Connection established
+        [DEBUG] 2026-02-03T10:30:01Z MyComponent: Processing message
+    """
+    
+    def export(self, batch: Sequence[ReadableLogRecord]) -> LogRecordExportResult:
+        """Export log records to stderr in CLI-friendly format.
+        
+        Args:
+            batch: Sequence of ReadableLogRecord objects to export.
+            
+        Returns:
+            LogRecordExportResult.SUCCESS on success.
+        """
+        import sys
+        try:
+            for readable_record in batch:
+                record = readable_record.log_record
+                sys.stderr.write(format_log_record(record))
+            sys.stderr.flush()
+            return LogRecordExportResult.SUCCESS
+        except Exception:
+            return LogRecordExportResult.FAILURE
+    
+    def shutdown(self) -> None:
+        """Shutdown the exporter (no-op for console)."""
+        pass
+    
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        """Force flush any buffered data.
+        
+        Returns:
+            True always, as stderr is line-buffered.
+        """
+        import sys
+        sys.stderr.flush()
+        return True
+
+
+# =============================================================================
+# OTel Logger Wrapper
+# =============================================================================
+
+from opentelemetry._logs import SeverityNumber
+
+
+class OTelLogger:
+    """Thin wrapper for OTel Logger with convenient emit methods.
+    
+    Provides a familiar logging interface (info, debug, warning, error)
+    while emitting logs via the OTel API.
+    
+    Example:
+        >>> logger = OTelLogger(logger_provider.get_logger("myapp"), source="MyClass")
+        >>> logger.info("Connection established", peer_id="abc123")
+        >>> logger.error("Failed to connect", host="localhost", port=8765)
+    """
+    
+    def __init__(self, logger, source: str):
+        """Initialize OTel logger wrapper.
+        
+        Args:
+            logger: OTel Logger instance from LoggerProvider.get_logger()
+            source: Source identifier for log.source attribute
+        """
+        self._logger = logger
+        self._source = source
+    
+    def info(self, message: str, **attrs) -> None:
+        """Emit INFO level log.
+        
+        Args:
+            message: Log message body
+            **attrs: Additional attributes to include
+        """
+        self._emit(SeverityNumber.INFO, "INFO", message, attrs)
+    
+    def debug(self, message: str, **attrs) -> None:
+        """Emit DEBUG level log.
+        
+        Args:
+            message: Log message body
+            **attrs: Additional attributes to include
+        """
+        self._emit(SeverityNumber.DEBUG, "DEBUG", message, attrs)
+    
+    def warning(self, message: str, **attrs) -> None:
+        """Emit WARN level log.
+        
+        Args:
+            message: Log message body
+            **attrs: Additional attributes to include
+        """
+        self._emit(SeverityNumber.WARN, "WARN", message, attrs)
+    
+    def error(self, message: str, **attrs) -> None:
+        """Emit ERROR level log.
+        
+        Args:
+            message: Log message body
+            **attrs: Additional attributes to include
+        """
+        self._emit(SeverityNumber.ERROR, "ERROR", message, attrs)
+    
+    def _emit(self, severity_number: SeverityNumber, severity_text: str, 
+              message: str, attrs: dict) -> None:
+        """Emit a log record.
+        
+        Args:
+            severity_number: OTel severity number
+            severity_text: Human-readable severity text
+            message: Log message body
+            attrs: Additional attributes
+        """
+        record = LogRecord(
+            timestamp=time.time_ns(),
+            body=message,
+            severity_text=severity_text,
+            severity_number=severity_number,
+            attributes={"log.source": self._source, **attrs},
+        )
+        self._logger.emit(record)
+
+
+# =============================================================================
+# Default Providers
+# =============================================================================
+
+from typing import Optional
+
+_default_tracer_provider: Optional[TracerProvider] = None
+_default_logger_provider: Optional[LoggerProvider] = None
+
+
+def get_default_providers(
+    service_name: str = "rxplus",
+) -> tuple[TracerProvider, LoggerProvider]:
+    """Get or create default providers with console output.
+    
+    Lazily initializes default providers on first call. Returns the same
+    providers on subsequent calls (singleton pattern).
+    
+    The default configuration uses ConsoleLogRecordExporter for CLI-friendly
+    output to stderr. Users can override by passing custom providers to
+    component constructors.
+    
+    Args:
+        service_name: Service name for the default providers (only used on first call).
+    
+    Returns:
+        Tuple of (TracerProvider, LoggerProvider) for injection into components.
+        
+    Example:
+        >>> tracer_provider, logger_provider = get_default_providers()
+        >>> server = RxWSServer(config, logger_provider=logger_provider)
+    """
+    global _default_tracer_provider, _default_logger_provider
+    
+    if _default_logger_provider is None:
+        _default_tracer_provider, _default_logger_provider = configure_telemetry(
+            service_name=service_name,
+            log_exporter=ConsoleLogRecordExporter(),
+        )
+    
+    return _default_tracer_provider, _default_logger_provider
 
 
 # =============================================================================

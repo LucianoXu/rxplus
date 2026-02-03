@@ -1,3 +1,5 @@
+- 2026-02-03
+    Update telemetry.py.
 - 2026-02-02
     Refined Audio and Video components. Tests constructed.
     Refined reconnection logic of RxWSClient.
