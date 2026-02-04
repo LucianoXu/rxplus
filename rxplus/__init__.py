@@ -56,6 +56,35 @@ except ImportError:
 
 
 # =============================================================================
+# Gateway exports (always available)
+# =============================================================================
+from .gateway import (  # noqa: F401
+    # Overflow strategies
+    OverflowPolicy,
+    DropOld,
+    DropNew,
+    BufferK,
+    Disconnect,
+    DisconnectError,
+    create_overflow_policy,
+    # Stream management
+    OverflowStrategy,
+    StreamState,
+    StreamInfo,
+    StreamTable,
+    # Connection management
+    ConnectionState,
+    Connection,
+    HelloPayload,
+    # Framing abstraction
+    Framing,
+    TaggedFrame,
+    # Gateway node
+    GatewayNode,
+)
+
+
+# =============================================================================
 # __all__ definition
 # =============================================================================
 __all__ = [
@@ -95,6 +124,25 @@ __all__ = [
     # CLI
     "from_cli",
     "to_cli",
+
+    # Gateway
+    "OverflowPolicy",
+    "DropOld",
+    "DropNew",
+    "BufferK",
+    "Disconnect",
+    "DisconnectError",
+    "create_overflow_policy",
+    "OverflowStrategy",
+    "StreamState",
+    "StreamInfo",
+    "StreamTable",
+    "ConnectionState",
+    "Connection",
+    "HelloPayload",
+    "Framing",
+    "TaggedFrame",
+    "GatewayNode",
 ]
 
 # Add audio exports to __all__ if available
