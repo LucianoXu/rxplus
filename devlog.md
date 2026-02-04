@@ -1,3 +1,5 @@
+- 2026-02-04
+    Added `rxplus.gateway` package - reusable reactive gateway infrastructure
 - 2026-02-03
     Update telemetry.py.
 - 2026-02-02
