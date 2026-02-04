@@ -753,12 +753,12 @@ class RxWSClient(Subject):
         # Connection state observable
         self._connection_state_subject: BehaviorSubject[ConnectionState] = BehaviorSubject(ConnectionState.DISCONNECTED)
         
-        self._start_loop_thread()
-
         # whether the connection is established. this will influence the caching strategy.
         self._connected = False
-        # flag to signal shutdown
+        # flag to signal shutdown - must be set before starting the thread
         self._shutdown_requested = False
+
+        self._start_loop_thread()
 
     def _log(self, body: str, level: str = "INFO") -> None:
         """Emit a log record via OTel logger if configured."""
