@@ -516,6 +516,18 @@ class RxWSServer(Subject):
             self._log(
                 f"WebSocket server started on {self.host}:{self.port}", "INFO"
             )
+        except OSError as e:
+            self._log(
+                f"FATAL: Failed to bind {self.host}:{self.port} — {e}. "
+                f"Another process may already be listening on this port.",
+                "ERROR",
+            )
+            # Propagate as an observable error so the owner is notified.
+            rx_exception = RxException(
+                e, source=self._name,
+                note=f"Port {self.port} bind failed",
+            )
+            super().on_error(rx_exception)
         except asyncio.CancelledError:
             self._log(f"WebSocket server task cancelled.", "INFO")
             raise
