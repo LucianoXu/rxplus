@@ -1,3 +1,5 @@
+- 2026-02-16
+    Added `StreamingResampler` in audio.
 - 2026-02-04
     Added `rxplus.gateway` package - reusable reactive gateway infrastructure
 - 2026-02-03

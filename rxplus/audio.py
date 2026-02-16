@@ -148,7 +148,14 @@ def convert_audio_format(
 
 
 def resample_audio(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
-    """Resample audio to a new sample rate using ``scipy.signal.resample_poly``."""
+    """Resample audio to a new sample rate using ``scipy.signal.resample_poly``.
+
+    .. note::
+
+        This function processes each call independently and does **not**
+        carry filter state between calls.  For chunk-by-chunk streaming
+        use :class:`StreamingResampler` instead.
+    """
     if orig_sr == target_sr:
         return audio
 
@@ -160,6 +167,115 @@ def resample_audio(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarra
 
     resampled = scipy.signal.resample_poly(audio, up, down, axis=0)
     return resampled.astype(audio.dtype, copy=False)
+
+
+class StreamingResampler:
+    """Stateful rational resampler for chunk-by-chunk audio processing.
+
+    Unlike :func:`resample_audio`, this class preserves the anti-aliasing
+    filter state across successive calls to :meth:`process`, eliminating
+    the click / buzz artefacts that occur at chunk boundaries when each
+    chunk is resampled independently.
+
+    Internally the resampler performs three steps:
+
+    1. **Upsample** by factor *up* (zero-insertion with gain compensation).
+    2. **Anti-alias lowpass filter** (Butterworth IIR in SOS form) with
+       persistent ``zi`` state via :func:`scipy.signal.sosfilt`.
+    3. **Decimate** by factor *down* with a phase counter that tracks the
+       correct decimation offset across chunks.
+
+    Args:
+        orig_sr:  Source sample rate (Hz).
+        target_sr: Target sample rate (Hz).
+        filter_order: Order of the Butterworth anti-aliasing filter.
+            Higher values give a sharper transition band at the cost of
+            more computation and potential ringing.
+
+    Example::
+
+        resampler = StreamingResampler(48_000, 16_000)
+        for chunk in mic_chunks:   # numpy int16 arrays
+            out = resampler.process(chunk)
+            send(out.tobytes())
+    """
+
+    def __init__(
+        self,
+        orig_sr: int,
+        target_sr: int,
+        filter_order: int = 8,
+    ) -> None:
+        self._orig_sr = orig_sr
+        self._target_sr = target_sr
+
+        if orig_sr == target_sr:
+            self._passthrough = True
+            return
+        self._passthrough = False
+
+        g = math.gcd(orig_sr, target_sr)
+        self._up: int = target_sr // g
+        self._down: int = orig_sr // g
+
+        # Anti-aliasing Butterworth lowpass.
+        # Cutoff at 90 % of the lower Nyquist rate (normalized to [0, 1]
+        # where 1 == Nyquist of the *effective* sample rate after upsampling).
+        max_rate = max(self._up, self._down)
+        wn = 0.9 / max_rate
+        self._sos: np.ndarray = scipy.signal.butter(
+            filter_order, wn, btype="low", output="sos",
+        )
+        # Initial filter state — start from zero.
+        self._zi: np.ndarray = scipy.signal.sosfilt_zi(self._sos) * 0.0
+
+        # Phase counter for decimation (0 … down-1).
+        self._decim_phase: int = 0
+
+    # ------------------------------------------------------------------ #
+
+    def process(self, audio: np.ndarray) -> np.ndarray:
+        """Resample one chunk and return the result.
+
+        The returned array has the same dtype as *audio*.
+
+        Args:
+            audio: 1-D numpy array of PCM samples.
+
+        Returns:
+            Resampled 1-D numpy array.  Length ≈ ``len(audio) * up / down``.
+        """
+        if self._passthrough:
+            return audio
+
+        original_dtype = audio.dtype
+        x = audio.astype(np.float64)
+
+        # --- Upsample: zero-insertion with gain compensation ---
+        if self._up > 1:
+            up_len = len(x) * self._up
+            upsampled = np.zeros(up_len, dtype=np.float64)
+            upsampled[:: self._up] = x * self._up
+            x = upsampled
+
+        # --- Anti-aliasing filter (stateful IIR) ---
+        x, self._zi = scipy.signal.sosfilt(self._sos, x, zi=self._zi)
+
+        # --- Decimate with phase tracking ---
+        if self._down > 1:
+            start = (self._down - self._decim_phase) % self._down
+            result = x[start :: self._down]
+            # Advance phase so the next chunk picks up where we left off.
+            self._decim_phase = (self._decim_phase + len(x)) % self._down
+            x = result
+
+        return x.astype(original_dtype, copy=False)
+
+    def reset(self) -> None:
+        """Reset the internal filter state and decimation phase."""
+        if not self._passthrough:
+            self._zi = scipy.signal.sosfilt_zi(self._sos) * 0.0
+            self._decim_phase = 0
 
 
 def _convert_channels(audio: np.ndarray, target_ch: int) -> np.ndarray:

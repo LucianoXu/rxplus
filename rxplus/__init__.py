@@ -28,6 +28,7 @@ try:
         PCMFormat,
         RxMicrophone,
         RxSpeaker,
+        StreamingResampler,
         convert_audio_format,
         create_wavfile,
         get_numpy_dtype,
