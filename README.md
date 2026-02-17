@@ -6,12 +6,22 @@
 
 The package supports modular installation with optional dependencies for audio and video features.
 
-### Basic Installation (core features only)
+### Conda Installation (recommended)
+```bash
+conda env create -f environment.yml
+conda activate rxplus
+pip install -e .
+```
+
+`environment.yml` installs the conda dependency `portaudio` from `conda-forge` and installs pip dependencies from `reqs.txt`.
+
+### Customized Installation
+#### Basic Installation (core features only)
 ```bash
 pip install git+https://github.com/LucianoXu/rxplus.git
 ```
 
-### Installation with Optional Features
+#### Installation with Optional Features
 ```bash
 # Audio support (microphone, speaker, wav files)
 pip install "git+https://github.com/LucianoXu/rxplus.git#egg=rxplus[audio]"
@@ -23,15 +33,16 @@ pip install "git+https://github.com/LucianoXu/rxplus.git#egg=rxplus[video]"
 pip install "git+https://github.com/LucianoXu/rxplus.git#egg=rxplus[all]"
 ```
 
-### Install from Source
+#### Install from Source
 ```bash
-python -m build && pip install .          # Basic only
+pip install -r reqs.txt                   # Basic dependencies
+python -m build && pip install .          # Basic package
 pip install -e ".[audio]"                 # With audio support
 pip install -e ".[video]"                 # With video support
 pip install -e ".[all]"                   # All features
 ```
 
-### System Dependencies for Audio
+#### System Dependencies for Audio
 The `pyaudio` module requires `portaudio` installed on your system.
 
 **Ubuntu/Debian:**

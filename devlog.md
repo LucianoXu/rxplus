@@ -1,3 +1,5 @@
+- 2026-02-17
+    Configured conda environment.yml.
 - 2026-02-16
     Added `StreamingResampler` in audio.
 - 2026-02-04
