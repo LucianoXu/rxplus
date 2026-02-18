@@ -2,6 +2,7 @@
 
 import asyncio
 import math
+import queue
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -568,7 +569,23 @@ class RxMicrophone(Subject):
 
 
 class RxSpeaker(Subject):
-    """Play incoming audio chunks through the system sound device."""
+    """Play incoming audio chunks through the system sound device.
+
+    ``on_next`` is **non-blocking**: audio data is placed on an internal
+    ``queue.Queue`` and consumed by a dedicated playback thread so that the
+    subscriber thread is freed immediately.
+
+    Args:
+        format: PCM sample format (default ``"Float32"``).
+        sample_rate: Playback sample rate in Hz (default 48 000).
+        channels: Number of audio channels (default 1).
+        device_index: PyAudio output device index (``None`` = default device).
+        playback_queue_maxsize: Maximum number of frames in the internal queue.
+            A value of 200 × 1 920 B ≈ 384 kB ≈ 4 s of 20 ms frames.
+            Frames are dropped (with a WARNING log) when the queue is full.
+    """
+
+    _SENTINEL = object()  # signals the playback thread to exit
 
     def __init__(
         self,
@@ -576,6 +593,7 @@ class RxSpeaker(Subject):
         sample_rate: int = 48_000,
         channels: int = 1,
         device_index: Optional[int] = None,
+        playback_queue_maxsize: int = 200,
     ):
 
         super().__init__()
@@ -597,23 +615,73 @@ class RxSpeaker(Subject):
         )
         self._stream.start_stream()
 
-    def _play_to_soundcard(self, chunk: bytes) -> None:
-        """
-        Send audio chunk to sound card using PyAudio.
-        Requires: pip install pyaudio
+        # ---------- Playback queue + thread ------------------------------------
+        self._queue: queue.Queue = queue.Queue(maxsize=playback_queue_maxsize)
+        self._playback_thread = threading.Thread(
+            target=self._playback_loop, daemon=True, name="RxSpeaker-playback"
+        )
+        self._playback_thread.start()
 
-        Parameters:
-            chunk: Audio data, shape [samples, channels]
-        """
+    # ------------------------------------------------------------------
+    # Internal playback loop
+    # ------------------------------------------------------------------
 
-        # Play the chunk
-        self._stream.write(chunk)
+    def _playback_loop(self) -> None:
+        """Consume frames from ``_queue`` and write them to PyAudio synchronously."""
+        while True:
+            item = self._queue.get()
+            if item is self._SENTINEL:
+                break
+            try:
+                if self._stream is not None:
+                    self._stream.write(item)
+            except Exception:
+                pass  # stream may have been closed
 
-        # Print status like the demo function
-        # print(f"Playing {len(chunk)} samples @ {self.sample_rate} Hz through sound card")
+    # ------------------------------------------------------------------
+    # Subject interface overrides
+    # ------------------------------------------------------------------
 
-    def on_next(self, chunk):
-        self._play_to_soundcard(chunk=chunk)
+    def on_next(self, chunk: bytes) -> None:  # type: ignore[override]
+        """Enqueue *chunk* for playback; returns immediately (non-blocking)."""
+        try:
+            self._queue.put_nowait(chunk)
+        except queue.Full:
+            # Drop the frame rather than blocking the caller.
+            pass
+
+    def on_completed(self) -> None:  # type: ignore[override]
+        """Signal the playback thread to finish and clean up resources."""
+        self._queue.put_nowait(self._SENTINEL)
+        self._playback_thread.join(timeout=5.0)
+        self._teardown()
+        super().on_completed()
+
+    def dispose(self) -> None:  # type: ignore[override]
+        """Dispose and clean up PyAudio resources."""
+        try:
+            self._queue.put_nowait(self._SENTINEL)
+        except queue.Full:
+            pass
+        self._playback_thread.join(timeout=5.0)
+        self._teardown()
+        super().dispose()
+
+    def _teardown(self) -> None:
+        """Close the PyAudio stream and terminate PyAudio."""
+        if getattr(self, "_stream", None):
+            try:
+                self._stream.stop_stream()
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
+        if getattr(self, "_pa", None):
+            try:
+                self._pa.terminate()
+            except Exception:
+                pass
+            self._pa = None
 
 
 # --------------------------------------------------------------------------
