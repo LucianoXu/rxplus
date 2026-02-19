@@ -676,3 +676,135 @@ class FileLogRecordExporter(LogRecordExporter):
         if self._file is not None and not self._file.closed:
             self._file.flush()
         return True
+
+
+# =============================================================================
+# OTel Metrics Support
+# =============================================================================
+
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import (
+    MetricExporter,
+    PeriodicExportingMetricReader,
+    ConsoleMetricExporter,
+)
+from opentelemetry.metrics import Counter, Histogram, Meter
+
+
+def configure_metrics(
+    service_name: str = "rxplus",
+    service_version: str = "",
+    metric_exporter: MetricExporter | None = None,
+    export_interval_ms: int = 10_000,
+) -> MeterProvider:
+    """Configure and return an OTel MeterProvider.
+
+    This function is separate from ``configure_telemetry`` to preserve
+    backward compatibility with existing callers that unpack a two-tuple
+    ``(TracerProvider, LoggerProvider)``.
+
+    Args:
+        service_name: Service identifier added to all metrics as a resource
+            attribute.
+        service_version: Service version resource attribute.
+        metric_exporter: Optional metric exporter (e.g.
+            ``OTLPMetricExporter``).  If ``None``, metrics are exported to
+            ``ConsoleMetricExporter`` at the configured interval.
+        export_interval_ms: Polling interval for
+            ``PeriodicExportingMetricReader`` (milliseconds).  Default 10 s.
+
+    Returns:
+        Configured :class:`MeterProvider`.
+
+    Example::
+
+        from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
+            OTLPMetricExporter,
+        )
+
+        meter_provider = configure_metrics(
+            service_name="dhproto.cpmo-backend",
+            metric_exporter=OTLPMetricExporter(
+                endpoint="http://otel-collector.example.com:13858",
+                insecure=True,
+            ),
+        )
+        helper = MetricsHelper(meter_provider, "dhproto.cpmo_backend")
+        counter = helper.counter("cpmo.audio.chunks.inbound")
+    """
+    resource = Resource.create({
+        "service.name": service_name,
+        "service.version": service_version,
+    })
+
+    exporter = metric_exporter if metric_exporter is not None else ConsoleMetricExporter()
+    reader = PeriodicExportingMetricReader(exporter, export_interval_millis=export_interval_ms)
+    return MeterProvider(resource=resource, metric_readers=[reader])
+
+
+class MetricsHelper:
+    """Convenience wrapper around an OTel ``Meter``.
+
+    Simplifies creation of counters and histograms for instrumentation inside
+    reactive components.
+
+    Args:
+        meter_provider: The :class:`MeterProvider` to obtain a meter from.
+        instrumentation_name: Identifies the instrumentation library (usually
+            the module or class name, e.g. ``"dhproto.cpmo_backend"``).
+
+    Example::
+
+        helper = MetricsHelper(meter_provider, "dhproto.cpmo_backend")
+        chunks_in = helper.counter(
+            "cpmo.audio.chunks.inbound",
+            description="Audio chunks received from client",
+        )
+        size_hist = helper.histogram(
+            "cpmo.audio.chunk_bytes.inbound",
+            description="Audio chunk sizes (bytes)",
+            unit="By",
+        )
+        # later:
+        chunks_in.add(1, {"namespace": ns})
+        size_hist.record(len(chunk), {"namespace": ns})
+    """
+
+    def __init__(self, meter_provider: MeterProvider, instrumentation_name: str):
+        self._meter: Meter = meter_provider.get_meter(instrumentation_name)
+
+    def counter(
+        self,
+        name: str,
+        description: str = "",
+        unit: str = "1",
+    ) -> Counter:
+        """Create (or retrieve) a monotonic counter instrument.
+
+        Args:
+            name: Metric name (e.g. ``"cpmo.audio.chunks.inbound"``).
+            description: Human-readable description.
+            unit: UCUM unit string (default ``"1"`` = dimensionless).
+
+        Returns:
+            OTel :class:`Counter` instrument.
+        """
+        return self._meter.create_counter(name, description=description, unit=unit)
+
+    def histogram(
+        self,
+        name: str,
+        description: str = "",
+        unit: str = "ms",
+    ) -> Histogram:
+        """Create (or retrieve) a histogram instrument.
+
+        Args:
+            name: Metric name (e.g. ``"cpmo.audio.chunk_bytes.inbound"``).
+            description: Human-readable description.
+            unit: UCUM unit string (default ``"ms"`` = milliseconds).
+
+        Returns:
+            OTel :class:`Histogram` instrument.
+        """
+        return self._meter.create_histogram(name, description=description, unit=unit)
