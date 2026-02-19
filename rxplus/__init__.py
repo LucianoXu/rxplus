@@ -14,6 +14,7 @@ Install with:
 from .cli import from_cli, to_cli  # noqa: F401
 from .duplex import Duplex, connect_adapter, make_duplex  # noqa: F401
 from .mechanism import RxException  # noqa: F401
+from .log_context import LogContext  # noqa: F401
 from .telemetry import configure_telemetry, FileLogRecordExporter, ConsoleLogRecordExporter, OTelLogger  # noqa: F401
 from .opt import redirect_to, stream_print_out, ErrorRestartSignal, retry_with_signal  # noqa: F401
 from .utils import TaggedData, tag, tag_filter, untag, FPSMonitor, BandwidthMonitor  # noqa: F401
@@ -99,6 +100,7 @@ __all__ = [
     "BandwidthMonitor",
 
     # Telemetry
+    "LogContext",
     "configure_telemetry",
     "FileLogRecordExporter",
     "ConsoleLogRecordExporter",

@@ -112,11 +112,14 @@ def format_log_record(record: LogRecord) -> str:
     timestamp_str = datetime.fromtimestamp(timestamp_ns / 1e9, tz=timezone.utc).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
-    source = (
-        record.attributes.get("log.source", "Unknown")
-        if record.attributes
-        else "Unknown"
-    )
+    attrs = record.attributes or {}
+    source = attrs.get("log.source", "Unknown")
+    service = attrs.get("service.name", "")
+    node = attrs.get("node.name", "")
+    scope = attrs.get("log.scope", "")
+
+    parts = [p for p in (service, node, scope) if p]
+    dim_prefix = "/".join(parts) + " " if parts else ""
 
     # Include trace context in output (from LogRecord fields)
     trace_part = ""
@@ -126,7 +129,10 @@ def format_log_record(record: LogRecord) -> str:
         span_id_hex = f"{record.span_id:016x}"
         trace_part = f" [{trace_id_hex[:8]}:{span_id_hex[:8]}]"
 
-    return f"{timestamp_str} [{record.severity_text}] {trace_part} {source}\t: {record.body}\n"
+    return (
+        f"{timestamp_str} [{record.severity_text}]{trace_part} "
+        f"{dim_prefix}{source}\t: {record.body}\n"
+    )
 
 
 def format_log_record_json(record: LogRecord) -> str:
@@ -218,81 +224,126 @@ class ConsoleLogRecordExporter(LogRecordExporter):
 
 from opentelemetry._logs import SeverityNumber
 
+from .log_context import LogContext
+
 
 class OTelLogger:
     """Thin wrapper for OTel Logger with convenient emit methods.
-    
+
     Provides a familiar logging interface (info, debug, warning, error)
-    while emitting logs via the OTel API.
-    
+    while emitting logs via the OTel API.  Supports dimensional
+    ``LogContext`` for structured attributes and severity filtering.
+
     Example:
         >>> logger = OTelLogger(logger_provider.get_logger("myapp"), source="MyClass")
         >>> logger.info("Connection established", peer_id="abc123")
         >>> logger.error("Failed to connect", host="localhost", port=8765)
+        >>>
+        >>> # With LogContext
+        >>> ctx = LogContext(service="dhproto", node="Backend@:13810")
+        >>> logger = OTelLogger(provider.get_logger("x"), source="X", context=ctx)
+        >>> child = logger.with_context(connection_id="ab12cd34")
     """
-    
-    def __init__(self, logger, source: str):
+
+    def __init__(
+        self,
+        logger,
+        source: str,
+        context: LogContext | None = None,
+        min_severity: SeverityNumber | None = None,
+    ):
         """Initialize OTel logger wrapper.
-        
+
         Args:
             logger: OTel Logger instance from LoggerProvider.get_logger()
             source: Source identifier for log.source attribute
+            context: Optional LogContext with dimensional attributes.
+            min_severity: Optional minimum severity — records below this
+                level are silently dropped.
         """
         self._logger = logger
         self._source = source
-    
+        self._context = context or LogContext()
+        self._min_severity = min_severity
+
     def info(self, message: str, **attrs) -> None:
         """Emit INFO level log.
-        
+
         Args:
             message: Log message body
             **attrs: Additional attributes to include
         """
         self._emit(SeverityNumber.INFO, "INFO", message, attrs)
-    
+
     def debug(self, message: str, **attrs) -> None:
         """Emit DEBUG level log.
-        
+
         Args:
             message: Log message body
             **attrs: Additional attributes to include
         """
         self._emit(SeverityNumber.DEBUG, "DEBUG", message, attrs)
-    
+
     def warning(self, message: str, **attrs) -> None:
         """Emit WARN level log.
-        
+
         Args:
             message: Log message body
             **attrs: Additional attributes to include
         """
         self._emit(SeverityNumber.WARN, "WARN", message, attrs)
-    
+
     def error(self, message: str, **attrs) -> None:
         """Emit ERROR level log.
-        
+
         Args:
             message: Log message body
             **attrs: Additional attributes to include
         """
         self._emit(SeverityNumber.ERROR, "ERROR", message, attrs)
-    
-    def _emit(self, severity_number: SeverityNumber, severity_text: str, 
+
+    def with_context(self, **overrides) -> "OTelLogger":
+        """Derive a child logger inheriting this logger's context with overrides.
+
+        Args:
+            **overrides: LogContext field overrides.  A ``source`` key is
+                popped and used as the child's source string.
+
+        Returns:
+            New OTelLogger sharing the same underlying OTel Logger but
+            with a derived LogContext.
+        """
+        new_source = overrides.pop("source", self._source)
+        return OTelLogger(
+            self._logger,
+            source=new_source,
+            context=self._context.child(**overrides),
+            min_severity=self._min_severity,
+        )
+
+    def _emit(self, severity_number: SeverityNumber, severity_text: str,
               message: str, attrs: dict) -> None:
         """Emit a log record.
-        
+
         Args:
             severity_number: OTel severity number
             severity_text: Human-readable severity text
             message: Log message body
             attrs: Additional attributes
         """
+        if self._min_severity and severity_number.value < self._min_severity.value:
+            return
+        merged = {
+            "log.source": self._source,
+            **self._context.as_attributes(),
+            **attrs,
+        }
         record = LogRecord(
             timestamp=time.time_ns(),
             body=message,
             severity_text=severity_text,
             severity_number=severity_number,
-            attributes={"log.source": self._source, **attrs},
+            attributes=merged,
         )
         self._logger.emit(record)
 

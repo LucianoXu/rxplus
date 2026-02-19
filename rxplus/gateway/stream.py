@@ -29,12 +29,11 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Dict, Literal, Optional
 import threading
-import logging
+
+from ..telemetry import OTelLogger
 
 # Type alias for overflow strategies
 OverflowStrategy = Literal["drop_old", "drop_new", "buffer_k", "disconnect"]
-
-logger = logging.getLogger("rxplus.gateway.stream")
 
 
 class StreamState(Enum):
@@ -101,10 +100,15 @@ class StreamTable:
         >>> table.close_stream(stream_id)
     """
     
-    def __init__(self):
-        """Initialize empty stream table."""
+    def __init__(self, otel_logger: OTelLogger | None = None):
+        """Initialize empty stream table.
+
+        Args:
+            otel_logger: Optional OTelLogger for stream lifecycle events.
+        """
         self._streams: Dict[bytes, StreamInfo] = {}
         self._lock = threading.RLock()  # Reentrant for nested calls
+        self._otel = otel_logger
     
     def open_stream(
         self,
@@ -144,10 +148,13 @@ class StreamTable:
             info.state = StreamState.OPEN
             self._streams[stream_id] = info
             
-            logger.info(
-                f"Stream opened: {stream_id.hex()[:16]}..., "
-                f"content_type={content_type}, delivery_mode={delivery_mode}"
-            )
+            if self._otel:
+                self._otel.info(
+                    "Stream opened",
+                    stream_id=stream_id.hex()[:16],
+                    content_type=content_type,
+                    delivery_mode=delivery_mode,
+                )
             return info
     
     def subscribe(
@@ -184,10 +191,13 @@ class StreamTable:
             info.buffer_limit = buffer_limit
             info.state = StreamState.ACTIVE
             
-            logger.info(
-                f"Stream subscribed: {stream_id.hex()[:16]}..., "
-                f"overflow={overflow}, buffer_limit={buffer_limit}"
-            )
+            if self._otel:
+                self._otel.info(
+                    "Stream subscribed",
+                    stream_id=stream_id.hex()[:16],
+                    overflow=overflow,
+                    buffer_limit=buffer_limit,
+                )
             return info
     
     def next_seq(self, stream_id: bytes) -> int:
@@ -234,10 +244,14 @@ class StreamTable:
             if has_gap:
                 info.gap_count += 1
                 gap_size = received_seq - info.expected_seq
-                logger.warning(
-                    f"Seq gap detected: stream={stream_id.hex()[:16]}..., "
-                    f"expected={info.expected_seq}, got={received_seq}, gap={gap_size}"
-                )
+                if self._otel:
+                    self._otel.warning(
+                        "Seq gap detected",
+                        stream_id=stream_id.hex()[:16],
+                        expected_seq=info.expected_seq,
+                        received_seq=received_seq,
+                        gap_size=gap_size,
+                    )
             
             # Always advance to received + 1 (broadcast mode accepts gaps)
             info.expected_seq = received_seq + 1
@@ -260,10 +274,13 @@ class StreamTable:
             previous_state = info.state
             info.state = StreamState.CLOSED
             
-            logger.info(
-                f"Stream closed: {stream_id.hex()[:16]}..., "
-                f"previous_state={previous_state.name}, gap_count={info.gap_count}"
-            )
+            if self._otel:
+                self._otel.info(
+                    "Stream closed",
+                    stream_id=stream_id.hex()[:16],
+                    previous_state=previous_state.name,
+                    gap_count=info.gap_count,
+                )
     
     def get_stream(self, stream_id: bytes) -> Optional[StreamInfo]:
         """Get stream info if exists.
@@ -335,10 +352,12 @@ class StreamTable:
             if info is None:
                 return None
             if info.state != StreamState.CLOSED:
-                logger.warning(
-                    f"Cannot remove stream {stream_id.hex()[:16]}... "
-                    f"in state {info.state.name}"
-                )
+                if self._otel:
+                    self._otel.warning(
+                        "Cannot remove stream (not closed)",
+                        stream_id=stream_id.hex()[:16],
+                        state=info.state.name,
+                    )
                 return None
             return self._streams.pop(stream_id, None)
     
