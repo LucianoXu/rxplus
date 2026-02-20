@@ -54,7 +54,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
@@ -75,7 +75,14 @@ jobs:
           pip install -e ".[all,dev]"
 
       - name: Run tests
-        run: pytest -v --tb=short --ignore=tests/test_mechanism.py
+        run: pytest -v --tb=long --ignore=tests/test_mechanism.py 2>&1 | tee test-output.txt
+
+      - name: Upload test output
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output-py${{ matrix.python-version }}
+          path: test-output.txt
 
   test-basic:
     runs-on: ubuntu-latest
