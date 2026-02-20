@@ -1,35 +1,38 @@
-import asyncio
-import threading
-import reactivex as rx
-from reactivex.scheduler.eventloop import AsyncIOScheduler
-from reactivex import operators as ops
-
 import argparse
+import asyncio
 
-import time
+import reactivex as rx
 
-from rxplus import RxWSServer, from_cli
+from rxplus import from_cli
 
 
 def build_parser(subparsers: argparse._SubParsersAction):
     parser = subparsers.add_parser("cli", help="try the cli operator")
-    parser.add_argument("--mode", type=str, default="loop", choices=["loop", "queue", "update"], 
-                        help="Mode for CLI interaction: 'loop' for continuous prompts, 'queue' for queuing questions, 'update' for replacing prompt text.")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="loop",
+        choices=["loop", "queue", "update"],
+        help=(
+            "Mode for CLI interaction: 'loop' for continuous prompts,"
+            " 'queue' for queuing questions,"
+            " 'update' for replacing prompt text."
+        ),
+    )
     parser.set_defaults(func=task)
+
 
 def task(parsed_args: argparse.Namespace):
 
     async def test_cli():
-        
+
         # Create an observable that emits values every 2 seconds
         source = rx.interval(2.0)
 
-        source.pipe(
-            from_cli(mode=parsed_args.mode)
-        ).subscribe(
+        source.pipe(from_cli(mode=parsed_args.mode)).subscribe(
             on_next=lambda value: print(f"Received from CLI: {value}\n"),
             on_error=lambda error: print(f"Error: {error}"),
-            on_completed=lambda: print("CLI input completed")
+            on_completed=lambda: print("CLI input completed"),
         )
 
         while True:

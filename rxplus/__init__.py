@@ -13,20 +13,31 @@ Install with:
 # =============================================================================
 from .cli import from_cli, to_cli  # noqa: F401
 from .duplex import Duplex, connect_adapter, make_duplex  # noqa: F401
-from .mechanism import RxException  # noqa: F401
 from .log_context import LogContext  # noqa: F401
-from .telemetry import (  # noqa: F401
-    configure_telemetry,
-    configure_metrics,
-    FileLogRecordExporter,
-    ConsoleLogRecordExporter,
-    OTelLogger,
-    MetricsHelper,
+from .mechanism import RxException  # noqa: F401
+from .opt import (  # noqa: F401
+    ErrorRestartSignal,
+    redirect_to,
+    retry_with_signal,
+    stream_print_out,
 )
-from .opt import redirect_to, stream_print_out, ErrorRestartSignal, retry_with_signal  # noqa: F401
-from .utils import TaggedData, tag, tag_filter, untag, FPSMonitor, BandwidthMonitor  # noqa: F401
+from .telemetry import (  # noqa: F401
+    ConsoleLogRecordExporter,
+    FileLogRecordExporter,
+    MetricsHelper,
+    OTelLogger,
+    configure_metrics,
+    configure_telemetry,
+)
+from .utils import (  # noqa: F401
+    BandwidthMonitor,
+    FPSMonitor,
+    TaggedData,
+    tag,
+    tag_filter,
+    untag,
+)
 from .ws import RxWSClient, RxWSClientGroup, RxWSServer, WSDatatype, WSStr  # noqa: F401
-
 
 # =============================================================================
 # Audio exports (optional - requires rxplus[audio])
@@ -43,6 +54,7 @@ try:
         resample_audio,
         save_wavfile,
     )
+
     _HAS_AUDIO = True
 except ImportError:
     _HAS_AUDIO = False
@@ -54,11 +66,12 @@ except ImportError:
 try:
     from .graphic import (  # noqa: F401
         create_screen_capture,
-        rgb_ndarray_to_jpeg_bytes,
         jpeg_bytes_to_rgb_ndarray,
-        rgb_ndarray_to_png_bytes,
         png_bytes_to_rgb_ndarray,
+        rgb_ndarray_to_jpeg_bytes,
+        rgb_ndarray_to_png_bytes,
     )
+
     _HAS_VIDEO = True
 except ImportError:
     _HAS_VIDEO = False
@@ -68,30 +81,29 @@ except ImportError:
 # Gateway exports (always available)
 # =============================================================================
 from .gateway import (  # noqa: F401
-    # Overflow strategies
-    OverflowPolicy,
-    DropOld,
-    DropNew,
     BufferK,
-    Disconnect,
-    DisconnectError,
-    create_overflow_policy,
-    # Stream management
-    OverflowStrategy,
-    StreamState,
-    StreamInfo,
-    StreamTable,
+    Connection,
     # Connection management
     ConnectionState,
-    Connection,
-    HelloPayload,
+    Disconnect,
+    DisconnectError,
+    DropNew,
+    DropOld,
     # Framing abstraction
     Framing,
-    TaggedFrame,
     # Gateway node
     GatewayNode,
+    HelloPayload,
+    # Overflow strategies
+    OverflowPolicy,
+    # Stream management
+    OverflowStrategy,
+    StreamInfo,
+    StreamState,
+    StreamTable,
+    TaggedFrame,
+    create_overflow_policy,
 )
-
 
 # =============================================================================
 # __all__ definition
@@ -105,7 +117,6 @@ __all__ = [
     "untag",
     "FPSMonitor",
     "BandwidthMonitor",
-
     # Telemetry
     "LogContext",
     "configure_telemetry",
@@ -114,29 +125,24 @@ __all__ = [
     "ConsoleLogRecordExporter",
     "OTelLogger",
     "MetricsHelper",
-
     # Operators
     "stream_print_out",
     "redirect_to",
     "ErrorRestartSignal",
     "retry_with_signal",
-
     # WebSocket
     "WSDatatype",
     "WSStr",
     "RxWSServer",
     "RxWSClient",
     "RxWSClientGroup",
-
     # Duplex
     "Duplex",
     "make_duplex",
     "connect_adapter",
-
     # CLI
     "from_cli",
     "to_cli",
-
     # Gateway
     "OverflowPolicy",
     "DropOld",
@@ -159,23 +165,27 @@ __all__ = [
 
 # Add audio exports to __all__ if available
 if _HAS_AUDIO:
-    __all__.extend([
-        "PCMFormat",
-        "convert_audio_format",
-        "create_wavfile",
-        "get_numpy_dtype",
-        "resample_audio",
-        "RxMicrophone",
-        "RxSpeaker",
-        "save_wavfile",
-    ])
+    __all__.extend(
+        [
+            "PCMFormat",
+            "convert_audio_format",
+            "create_wavfile",
+            "get_numpy_dtype",
+            "resample_audio",
+            "RxMicrophone",
+            "RxSpeaker",
+            "save_wavfile",
+        ]
+    )
 
 # Add video exports to __all__ if available
 if _HAS_VIDEO:
-    __all__.extend([
-        "create_screen_capture",
-        "rgb_ndarray_to_jpeg_bytes",
-        "jpeg_bytes_to_rgb_ndarray",
-        "rgb_ndarray_to_png_bytes",
-        "png_bytes_to_rgb_ndarray",
-    ])
+    __all__.extend(
+        [
+            "create_screen_capture",
+            "rgb_ndarray_to_jpeg_bytes",
+            "jpeg_bytes_to_rgb_ndarray",
+            "rgb_ndarray_to_png_bytes",
+            "png_bytes_to_rgb_ndarray",
+        ]
+    )

@@ -1,16 +1,13 @@
 """Miscellaneous Rx operators used by ``rxplus``."""
 
-import os
 import time
-from typing import Any, Callable, Literal, Optional
+from collections.abc import Callable
+from typing import Any
 
 from attr import dataclass
-import reactivex as rx
-from reactivex import Observable, Observer, Subject, create
-from reactivex.disposable import SerialDisposable, Disposable
-from reactivex import operators as ops
-
 from opentelemetry.trace import Span, StatusCode
+from reactivex import Observable, Observer, create
+from reactivex.disposable import Disposable, SerialDisposable
 
 from .mechanism import RxException
 
@@ -47,9 +44,10 @@ def stream_print_out(prompt: str = "Stream-Print-Out"):
     return _stream_print_out
 
 
-def redirect_to(cond: Callable[[Any], bool], redirect_target: Observer|Callable):
+def redirect_to(cond: Callable[[Any], bool], redirect_target: Observer | Callable):
     """
-    The operator redirect the items to the specified observer (or function), and forward other items.
+    Redirect items to the specified observer (or function),
+    and forward other items.
     """
 
     def _redirect_to(source):
@@ -81,10 +79,11 @@ def redirect_to(cond: Callable[[Any], bool], redirect_target: Observer|Callable)
 
 @dataclass
 class ErrorRestartSignal:
-    '''
+    """
     A signal emitted when a retry is triggered by `retry_with_signal`.
     The underlying error is contained in the `error` attribute.
-    '''
+    """
+
     error: RxException
     attempts: int
 
@@ -101,16 +100,16 @@ class ErrorRestartSignal:
                 "error.message": str(self.error.exception),
                 "error.source": self.error.source or "",
                 "error.note": self.error.note or "",
-            }
+            },
         )
         span.set_status(StatusCode.ERROR, f"Retry attempt {self.attempts}")
 
 
 def retry_with_signal(
-    max_retries: Optional[int] = None,
+    max_retries: int | None = None,
     *,
     delay_s: float | Callable[[int, RxException], float] = 0.0,
-    should_retry: Optional[Callable[[RxException], bool]] = None,
+    should_retry: Callable[[RxException], bool] | None = None,
 ):
     """
     Operator: on upstream error, emit a `ErrorRestartSignal` and retry.
@@ -146,25 +145,37 @@ def retry_with_signal(
 
                 def _on_error(err: Exception):
                     if not isinstance(err, RxException):
-                        err = RxException(err, source="retry_with_signal", note="Non-RxException in retry_with_signal")
+                        err = RxException(
+                            err,
+                            source="retry_with_signal",
+                            note="Non-RxException in retry_with_signal",
+                        )
                         observer.on_error(err)
                         return
-                    
+
                     nonlocal attempts
                     if should_retry is not None and not should_retry(err):
                         observer.on_error(err)
                         return
-                    
+
                     if max_retries is not None and attempts >= max_retries:
                         observer.on_error(err)
                         return
-                    
+
                     attempts += 1
 
                     try:
-                        observer.on_next(ErrorRestartSignal(error=err, attempts=attempts))
+                        observer.on_next(
+                            ErrorRestartSignal(error=err, attempts=attempts)
+                        )
                     except Exception as e:
-                        observer.on_error(RxException(e, source="retry_with_signal", note="Error emitting restart signal"))
+                        observer.on_error(
+                            RxException(
+                                e,
+                                source="retry_with_signal",
+                                note="Error emitting restart signal",
+                            )
+                        )
                         return
 
                     _delay(attempts, err)

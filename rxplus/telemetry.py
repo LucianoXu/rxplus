@@ -11,22 +11,33 @@ import json
 import os
 import re
 import time
+from collections.abc import Sequence
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
-from typing import Literal, Sequence
+from datetime import UTC, datetime, timedelta
+from io import TextIOWrapper
+from typing import Literal
 
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SpanExporter, BatchSpanProcessor
+from opentelemetry._logs import LogRecord, SeverityNumber
+from opentelemetry.metrics import Counter, Histogram, Meter
 from opentelemetry.sdk._logs import LoggerProvider
-from opentelemetry.sdk._logs.export import (
-    LogRecordExporter,
-    BatchLogRecordProcessor,
-    SimpleLogRecordProcessor,
-    LogRecordExportResult,
-)
 from opentelemetry.sdk._logs._internal import ReadableLogRecord
+from opentelemetry.sdk._logs.export import (
+    BatchLogRecordProcessor,
+    LogRecordExporter,
+    LogRecordExportResult,
+    SimpleLogRecordProcessor,
+)
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import (
+    ConsoleMetricExporter,
+    MetricExporter,
+    PeriodicExportingMetricReader,
+)
 from opentelemetry.sdk.resources import Resource
-from opentelemetry._logs import LogRecord
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
+
+from .log_context import LogContext
 
 
 def configure_telemetry(
@@ -46,10 +57,13 @@ def configure_telemetry(
     Args:
         service_name: Service identifier for resource attributes.
         service_version: Service version for resource attributes.
-        span_exporter: Optional span exporter (e.g., OTLPSpanExporter, ConsoleSpanExporter).
-        log_exporter: Optional log exporter (e.g., OTLPLogExporter, ConsoleLogExporter).
-        batch_logs: If True, use BatchLogRecordProcessor (better for network exporters).
-            If False, use SimpleLogRecordProcessor (immediate output, better for console).
+        span_exporter: Optional span exporter
+            (e.g., OTLPSpanExporter, ConsoleSpanExporter).
+        log_exporter: Optional log exporter
+            (e.g., OTLPLogExporter, ConsoleLogExporter).
+        batch_logs: If True, use BatchLogRecordProcessor
+            (better for network exporters). If False, use
+            SimpleLogRecordProcessor (immediate, better for console).
 
     Returns:
         Tuple of (TracerProvider, LoggerProvider) for injection into components.
@@ -57,23 +71,25 @@ def configure_telemetry(
     Example:
         >>> from opentelemetry.sdk.trace.export import ConsoleSpanExporter
         >>> from opentelemetry.sdk._logs.export import ConsoleLogExporter
-        >>> 
+        >>>
         >>> tracer_provider, logger_provider = configure_telemetry(
         ...     service_name="my-app",
         ...     span_exporter=ConsoleSpanExporter(),
         ...     log_exporter=ConsoleLogExporter(),
         ... )
-        >>> 
+        >>>
         >>> server = RxWSServer(
         ...     {"host": "::", "port": 8888},
         ...     tracer_provider=tracer_provider,
         ...     logger_provider=logger_provider,
         ... )
     """
-    resource = Resource.create({
-        "service.name": service_name,
-        "service.version": service_version,
-    })
+    resource = Resource.create(
+        {
+            "service.name": service_name,
+            "service.version": service_version,
+        }
+    )
 
     tracer_provider = TracerProvider(resource=resource)
     if span_exporter:
@@ -82,9 +98,13 @@ def configure_telemetry(
     logger_provider = LoggerProvider(resource=resource)
     if log_exporter:
         if batch_logs:
-            logger_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
+            logger_provider.add_log_record_processor(
+                BatchLogRecordProcessor(log_exporter)
+            )
         else:
-            logger_provider.add_log_record_processor(SimpleLogRecordProcessor(log_exporter))
+            logger_provider.add_log_record_processor(
+                SimpleLogRecordProcessor(log_exporter)
+            )
 
     return tracer_provider, logger_provider
 
@@ -109,7 +129,7 @@ def format_log_record(record: LogRecord) -> str:
         Formatted string suitable for file or console output.
     """
     timestamp_ns = record.timestamp or 0
-    timestamp_str = datetime.fromtimestamp(timestamp_ns / 1e9, tz=timezone.utc).strftime(
+    timestamp_str = datetime.fromtimestamp(timestamp_ns / 1e9, tz=UTC).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
     attrs = record.attributes or {}
@@ -119,7 +139,7 @@ def format_log_record(record: LogRecord) -> str:
     scope = attrs.get("log.scope", "")
 
     parts = [p for p in (service, node, scope) if p]
-    dim_prefix = "/".join(parts) + " " if parts else ""
+    dim_prefix = "/".join(str(v) for v in parts) + " " if parts else ""
 
     # Include trace context in output (from LogRecord fields)
     trace_part = ""
@@ -131,7 +151,7 @@ def format_log_record(record: LogRecord) -> str:
 
     return (
         f"{timestamp_str} [{record.severity_text}]{trace_part} "
-        f"{dim_prefix}{source}\t: {record.body}\n"
+        f"{dim_prefix}{source}\t: {record.body!r}\n"
     )
 
 
@@ -151,10 +171,12 @@ def format_log_record_json(record: LogRecord) -> str:
     timestamp_ns = record.timestamp or 0
 
     data = {
-        "timestamp": datetime.fromtimestamp(timestamp_ns / 1e9, tz=timezone.utc).isoformat(),
+        "timestamp": datetime.fromtimestamp(timestamp_ns / 1e9, tz=UTC).isoformat(),
         "timestamp_ns": timestamp_ns,
         "severity_text": record.severity_text,
-        "severity_number": record.severity_number.value if record.severity_number else None,
+        "severity_number": record.severity_number.value
+        if record.severity_number
+        else None,
         "body": record.body,
         "attributes": dict(record.attributes) if record.attributes else {},
     }
@@ -175,25 +197,26 @@ def format_log_record_json(record: LogRecord) -> str:
 
 class ConsoleLogRecordExporter(LogRecordExporter):
     """OTel LogRecordExporter that writes CLI-friendly output to stderr.
-    
+
     Unlike OTel's ConsoleLogExporter which outputs verbose JSON,
     this exporter produces human-readable format suitable for CLI applications.
-    
+
     Example output:
         [INFO] 2026-02-03T10:30:00Z MyComponent: Connection established
         [DEBUG] 2026-02-03T10:30:01Z MyComponent: Processing message
     """
-    
+
     def export(self, batch: Sequence[ReadableLogRecord]) -> LogRecordExportResult:
         """Export log records to stderr in CLI-friendly format.
-        
+
         Args:
             batch: Sequence of ReadableLogRecord objects to export.
-            
+
         Returns:
             LogRecordExportResult.SUCCESS on success.
         """
         import sys
+
         try:
             for readable_record in batch:
                 record = readable_record.log_record
@@ -202,18 +225,19 @@ class ConsoleLogRecordExporter(LogRecordExporter):
             return LogRecordExportResult.SUCCESS
         except Exception:
             return LogRecordExportResult.FAILURE
-    
+
     def shutdown(self) -> None:
         """Shutdown the exporter (no-op for console)."""
         pass
-    
+
     def force_flush(self, timeout_millis: int = 30000) -> bool:
         """Force flush any buffered data.
-        
+
         Returns:
             True always, as stderr is line-buffered.
         """
         import sys
+
         sys.stderr.flush()
         return True
 
@@ -221,10 +245,6 @@ class ConsoleLogRecordExporter(LogRecordExporter):
 # =============================================================================
 # OTel Logger Wrapper
 # =============================================================================
-
-from opentelemetry._logs import SeverityNumber
-
-from .log_context import LogContext
 
 
 class OTelLogger:
@@ -321,8 +341,13 @@ class OTelLogger:
             min_severity=self._min_severity,
         )
 
-    def _emit(self, severity_number: SeverityNumber, severity_text: str,
-              message: str, attrs: dict) -> None:
+    def _emit(
+        self,
+        severity_number: SeverityNumber,
+        severity_text: str,
+        message: str,
+        attrs: dict,
+    ) -> None:
         """Emit a log record.
 
         Args:
@@ -352,43 +377,42 @@ class OTelLogger:
 # Default Providers
 # =============================================================================
 
-from typing import Optional
 
-_default_tracer_provider: Optional[TracerProvider] = None
-_default_logger_provider: Optional[LoggerProvider] = None
+_default_tracer_provider: TracerProvider | None = None
+_default_logger_provider: LoggerProvider | None = None
 
 
 def get_default_providers(
     service_name: str = "rxplus",
 ) -> tuple[TracerProvider, LoggerProvider]:
     """Get or create default providers with console output.
-    
+
     Lazily initializes default providers on first call. Returns the same
     providers on subsequent calls (singleton pattern).
-    
+
     The default configuration uses ConsoleLogRecordExporter for CLI-friendly
     output to stderr with immediate (non-batched) processing.
     Users can override by passing custom providers to component constructors.
-    
+
     Args:
         service_name: Service name for the default providers (only used on first call).
-    
+
     Returns:
         Tuple of (TracerProvider, LoggerProvider) for injection into components.
-        
+
     Example:
         >>> tracer_provider, logger_provider = get_default_providers()
         >>> server = RxWSServer(config, logger_provider=logger_provider)
     """
     global _default_tracer_provider, _default_logger_provider
-    
+
     if _default_logger_provider is None:
         _default_tracer_provider, _default_logger_provider = configure_telemetry(
             service_name=service_name,
             log_exporter=ConsoleLogRecordExporter(),
             batch_logs=False,  # Immediate output for CLI
         )
-    
+
     # At this point both providers are guaranteed to be initialized
     assert _default_tracer_provider is not None
     return _default_tracer_provider, _default_logger_provider
@@ -427,11 +451,11 @@ class FileLogRecordExporter(LogRecordExporter):
     Example:
         >>> from opentelemetry.sdk._logs import LoggerProvider
         >>> from opentelemetry.sdk._logs.export import SimpleLogRecordProcessor
-        >>> 
+        >>>
         >>> exporter = FileLogRecordExporter("app.log", format="text")
         >>> provider = LoggerProvider()
         >>> provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
-        >>> 
+        >>>
         >>> # Or with JSON format and rotation
         >>> exporter = FileLogRecordExporter(
         ...     "logs/app.log",
@@ -463,14 +487,16 @@ class FileLogRecordExporter(LogRecordExporter):
 
         # Current active log file path (with timestamp)
         self._current_logfile: str | None = None
-        self._file = None
+        self._file: TextIOWrapper | None = None
 
         # Rotation tracking
         self._record_count = 0
         self._file_created_time: datetime | None = None
 
         # Select formatter based on format
-        self._formatter = format_log_record_json if format == "json" else format_log_record
+        self._formatter = (
+            format_log_record_json if format == "json" else format_log_record
+        )
 
     @property
     def logfile(self) -> str | None:
@@ -635,7 +661,8 @@ class FileLogRecordExporter(LogRecordExporter):
             batch: Sequence of ReadableLogRecord objects to export.
 
         Returns:
-            LogRecordExportResult.SUCCESS on success, LogRecordExportResult.FAILURE on error.
+            LogRecordExportResult.SUCCESS on success,
+            LogRecordExportResult.FAILURE on error.
         """
         try:
             self._ensure_file_open()
@@ -682,14 +709,6 @@ class FileLogRecordExporter(LogRecordExporter):
 # OTel Metrics Support
 # =============================================================================
 
-from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import (
-    MetricExporter,
-    PeriodicExportingMetricReader,
-    ConsoleMetricExporter,
-)
-from opentelemetry.metrics import Counter, Histogram, Meter
-
 
 def configure_metrics(
     service_name: str = "rxplus",
@@ -732,13 +751,19 @@ def configure_metrics(
         helper = MetricsHelper(meter_provider, "dhproto.cpmo_backend")
         counter = helper.counter("cpmo.audio.chunks.inbound")
     """
-    resource = Resource.create({
-        "service.name": service_name,
-        "service.version": service_version,
-    })
+    resource = Resource.create(
+        {
+            "service.name": service_name,
+            "service.version": service_version,
+        }
+    )
 
-    exporter = metric_exporter if metric_exporter is not None else ConsoleMetricExporter()
-    reader = PeriodicExportingMetricReader(exporter, export_interval_millis=export_interval_ms)
+    exporter = (
+        metric_exporter if metric_exporter is not None else ConsoleMetricExporter()
+    )
+    reader = PeriodicExportingMetricReader(
+        exporter, export_interval_millis=export_interval_ms
+    )
     return MeterProvider(resource=resource, metric_readers=[reader])
 
 

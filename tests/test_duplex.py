@@ -1,7 +1,6 @@
-import reactivex as rx
 from reactivex.subject import Subject
 
-from rxplus.duplex import make_duplex, connect_adapter
+from rxplus.duplex import connect_adapter, make_duplex
 
 
 def test_make_duplex_defaults():
@@ -22,10 +21,10 @@ def test_connect_adapter_propagates():
 
     cd = connect_adapter(a, b)
 
-    a.stream.on_next('first')
-    b.stream.on_next('second')
+    a.stream.on_next("first")
+    b.stream.on_next("second")
 
-    assert received_b == ['first']
-    assert received_a == ['second']
+    assert received_b == ["first"]
+    assert received_a == ["second"]
 
     cd.dispose()

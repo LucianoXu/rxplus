@@ -1,20 +1,19 @@
 """Tests for rxplus.mechanism module - trace context and ID generation."""
 
-import pytest
-import threading
 from concurrent.futures import ThreadPoolExecutor
+
+import pytest
 
 from rxplus import (
     RxException,
     SpanContext,
     TraceContext,
-    generate_trace_id,
     generate_span_id,
+    generate_trace_id,
     get_current_span,
     set_current_span,
     start_span,
 )
-
 
 # =============================================================================
 # Tests for generate_trace_id
@@ -125,7 +124,7 @@ def test_get_current_span_default_none():
 def test_set_current_span():
     """Verify set_current_span sets the context."""
     ctx = SpanContext(trace_id="a" * 32, span_id="b" * 16)
-    token = set_current_span(ctx)
+    set_current_span(ctx)
     try:
         assert get_current_span() == ctx
     finally:
@@ -142,6 +141,7 @@ def test_current_span_thread_isolation():
         set_current_span(ctx)
         # Small delay to increase chance of race condition if isolation fails
         import time
+
         time.sleep(0.01)
         results[thread_id] = get_current_span()
 

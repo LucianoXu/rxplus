@@ -1,18 +1,19 @@
 import argparse
 import time
 
-from rxplus import (
-    stream_print_out,
-    RxWSServer,
-    TaggedData,
-    untag,
-    configure_telemetry,
-)
-
-from opentelemetry._logs import SeverityNumber
 from opentelemetry._logs import LogRecord as OTelLogRecord
+from opentelemetry._logs import SeverityNumber
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+
+from rxplus import (
+    RxWSServer,
+    TaggedData,
+    configure_telemetry,
+    stream_print_out,
+    untag,
+)
+
 
 def build_parser(subparsers: argparse._SubParsersAction):
     parser = subparsers.add_parser("wsserver", help="start the ws server.")
@@ -30,7 +31,7 @@ def build_parser(subparsers: argparse._SubParsersAction):
 def task(parsed_args: argparse.Namespace):
     """
     Demonstrate WebSocket server with OTel telemetry.
-    
+
     This server:
     1. Creates spans for operations
     2. Emits logs via OTel
@@ -39,28 +40,25 @@ def task(parsed_args: argparse.Namespace):
     # Configure OTel with OTLP exporters
     log_exporter = OTLPLogExporter(endpoint=f"{parsed_args.otlp_endpoint}/v1/logs")
     span_exporter = OTLPSpanExporter(endpoint=f"{parsed_args.otlp_endpoint}/v1/traces")
-    
+
     tracer_provider, logger_provider = configure_telemetry(
         log_exporter=log_exporter,
         span_exporter=span_exporter,
     )
-    
+
     # Create server with telemetry providers
     sender = RxWSServer(
         {
-            'host': parsed_args.host,
-            'port': parsed_args.port,
+            "host": parsed_args.host,
+            "port": parsed_args.port,
         },
-        datatype='string',
+        datatype="string",
         tracer_provider=tracer_provider,
         logger_provider=logger_provider,
     )
 
     # Subscribe to print received data
-    sender.pipe(
-        stream_print_out(prompt="[RECEIVED] "),
-        untag()
-    ).subscribe(
+    sender.pipe(stream_print_out(prompt="[RECEIVED] "), untag()).subscribe(
         on_next=lambda x: None,  # Already printed
         on_error=lambda e: print(f"Error: {e}"),
         on_completed=lambda: print("Server completed"),
@@ -83,7 +81,7 @@ def task(parsed_args: argparse.Namespace):
             # Create a span for this operation
             with tracer.start_as_current_span("send_message") as span:
                 span.set_attribute("message_id", i)
-                
+
                 # Emit a log record
                 log_record = OTelLogRecord(
                     timestamp=time.time_ns(),

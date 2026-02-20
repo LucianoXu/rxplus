@@ -1,15 +1,14 @@
 """Utility helpers used across ``rxplus`` modules."""
 
-import traceback
-from typing import Callable, TypeVar, Generic
-
 import time
+import traceback
+from collections.abc import Callable
 
-from reactivex import operators as ops, Observable
+from reactivex import Observable
+from reactivex import operators as ops
 
-TagT = TypeVar("TagT")
-InnerDataT = TypeVar("InnerDataT")
-class TaggedData(Generic[TagT, InnerDataT]):
+
+class TaggedData[TagT, InnerDataT]:
     """
     A class to hold data with a tag.
 
@@ -29,22 +28,30 @@ class TaggedData(Generic[TagT, InnerDataT]):
         return f"(tag={self.tag}, {str(self.data)})"
 
 
-def untag() -> Callable[[Observable[TaggedData[object, InnerDataT]]], Observable[InnerDataT]]:
+def untag[InnerDataT]() -> Callable[
+    [Observable[TaggedData[object, InnerDataT]]], Observable[InnerDataT]
+]:
     """Return an operator that extracts the ``data`` attribute."""
 
     return ops.map(lambda x: x.data)  # type: ignore
 
 
-def tag(tag: TagT) -> Callable[[Observable[InnerDataT]], Observable[TaggedData[TagT, InnerDataT]]]:
+def tag[TagT, InnerDataT](
+    tag: TagT,
+) -> Callable[[Observable[InnerDataT]], Observable[TaggedData[TagT, InnerDataT]]]:
     """Return an operator that wraps items in :class:`TaggedData`."""
 
     return ops.map(lambda x: TaggedData(tag, x))
 
 
-def tag_filter(tag: TagT) -> Callable[[Observable[InnerDataT]], Observable[TaggedData[TagT, InnerDataT]]]:
-    """Return an operator that filters ``TaggedData`` by ``tag``. It will drop non-``TaggedData`` items."""
+def tag_filter[TagT, InnerDataT](
+    tag: TagT,
+) -> Callable[[Observable[InnerDataT]], Observable[TaggedData[TagT, InnerDataT]]]:
+    """Return an operator that filters ``TaggedData`` by ``tag``.
 
-    return ops.filter(lambda x: isinstance(x, TaggedData) and x.tag == tag)
+    It will drop non-``TaggedData`` items."""
+
+    return ops.filter(lambda x: isinstance(x, TaggedData) and x.tag == tag)  # type: ignore[return-value]
 
 
 def get_short_error_info(e: Exception) -> str:
@@ -111,7 +118,9 @@ class BandwidthMonitor:
     ``ops.do_action``.
     """
 
-    def __init__(self, interval: float = 1.0, scale: float = 1.0, unit: str = "B/s") -> None:
+    def __init__(
+        self, interval: float = 1.0, scale: float = 1.0, unit: str = "B/s"
+    ) -> None:
         """
         Args:
             interval: Time window in seconds for computing the moving average.

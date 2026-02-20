@@ -1,10 +1,9 @@
 """Helpers for building bidirectional Rx adapters."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional
 
-import reactivex as rx
-from reactivex import Observable, Observer
+from reactivex import Observable
 from reactivex.disposable import CompositeDisposable
 from reactivex.subject import Subject
 
@@ -15,9 +14,7 @@ class Duplex:
     stream: Subject  # outbound
 
 
-def make_duplex(
-    sink: Optional[Subject] = None, stream: Optional[Subject] = None
-) -> Duplex:
+def make_duplex(sink: Subject | None = None, stream: Subject | None = None) -> Duplex:
     if sink is None:
         sink = Subject()  # inbound
     if stream is None:
@@ -36,13 +33,14 @@ def get_sink_stream(adapter: Duplex | Subject):
 def connect_adapter(
     adapterA: Duplex | Subject,
     adapterB: Duplex | Subject,
-    A_to_B_pipeline: Optional[tuple[Callable[[Observable], Observable], ...]] = None,
-    B_to_A_pipeline: Optional[tuple[Callable[[Observable], Observable], ...]] = None,
+    A_to_B_pipeline: tuple[Callable[[Observable], Observable], ...] | None = None,
+    B_to_A_pipeline: tuple[Callable[[Observable], Observable], ...] | None = None,
 ) -> CompositeDisposable:
     """
     Connect two duplex adapters or subjects together.
     The data from adapterA will be sent to adapterB, and vice versa.
-    If `A_to_B_pipeline` is provided, it will be applied to the stream of adapterA before sending to adapterB. Same for `B_to_A_pipeline`.
+    If `A_to_B_pipeline` is provided, it will be applied to the stream
+    of adapterA before sending to adapterB. Same for `B_to_A_pipeline`.
 
     Return a `CompositeDisposable` that can be used to manage the subscriptions.
     To disconnect the adapters, call `dispose()` on the returned `CompositeDisposable`.

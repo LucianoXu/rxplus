@@ -1,7 +1,5 @@
 """Tests for CLI utilities."""
 
-import pytest
-from reactivex import operators as ops
 from reactivex.subject import Subject
 
 from rxplus import to_cli
@@ -81,4 +79,3 @@ class TestToCli:
 
         # Original values pass through unchanged
         assert results == [42, {"key": "value"}]
-

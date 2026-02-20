@@ -1,4 +1,4 @@
-name: Tests
+name: CI
 
 on:
   push:
@@ -7,11 +7,53 @@ on:
     branches: [main]
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install ruff
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: Ruff lint check
+        run: ruff check .
+
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install system dependencies for audio
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y portaudio19-dev libasound2-dev
+
+      - name: Install package with all dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[all,dev]"
+
+      - name: Run mypy
+        run: mypy rxplus
+
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
@@ -32,11 +74,9 @@ jobs:
           pip install -e ".[all,dev]"
 
       - name: Run tests
-        run: |
-          pytest tests/ -v --ignore=tests/test_mechanism.py
+        run: pytest --cov=rxplus --cov-report=term-missing -v --ignore=tests/test_mechanism.py
 
   test-basic:
-    # Test that basic installation works without optional dependencies
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,7 +84,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
 
       - name: Install basic package only
         run: |
@@ -52,5 +92,4 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run basic tests
-        run: |
-          pytest tests/ -v --ignore=tests/test_audio.py --ignore=tests/test_graphic.py --ignore=tests/test_mechanism.py
+        run: pytest --cov=rxplus --cov-report=term-missing -v --ignore=tests/test_audio.py --ignore=tests/test_graphic.py --ignore=tests/test_mechanism.py

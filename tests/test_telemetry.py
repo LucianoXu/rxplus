@@ -12,18 +12,18 @@ import sys
 import time
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from opentelemetry.sdk._logs import LoggerProvider
-from opentelemetry.sdk._logs.export import SimpleLogRecordProcessor, LogRecordExportResult
-from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry._logs import LogRecord, SeverityNumber
+from opentelemetry.sdk._logs import LoggerProvider
+from opentelemetry.sdk._logs.export import (
+    LogRecordExportResult,
+)
+from opentelemetry.sdk.trace import TracerProvider
 
 from rxplus.telemetry import (
     ConsoleLogRecordExporter,
     OTelLogger,
-    get_default_providers,
     configure_telemetry,
+    get_default_providers,
 )
 
 
@@ -33,7 +33,7 @@ class TestConsoleLogRecordExporter:
     def test_export_formats_correctly(self):
         """Verify output format matches expected CLI format."""
         exporter = ConsoleLogRecordExporter()
-        
+
         # Create a mock ReadableLogRecord
         record = LogRecord(
             timestamp=int(time.time() * 1e9),
@@ -42,21 +42,21 @@ class TestConsoleLogRecordExporter:
             severity_number=SeverityNumber.INFO,
             attributes={"log.source": "TestSource"},
         )
-        
+
         # Create a mock ReadableLogRecord wrapper
         class MockReadableLogRecord:
             def __init__(self, log_record):
                 self.log_record = log_record
-        
+
         readable_record = MockReadableLogRecord(record)
-        
+
         # Capture stderr
         captured = io.StringIO()
-        with patch.object(sys, 'stderr', captured):
+        with patch.object(sys, "stderr", captured):
             result = exporter.export([readable_record])
-        
+
         output = captured.getvalue()
-        
+
         assert result == LogRecordExportResult.SUCCESS
         assert "[INFO]" in output
         assert "TestSource" in output
@@ -65,11 +65,11 @@ class TestConsoleLogRecordExporter:
     def test_export_handles_empty_batch(self):
         """Verify empty batch returns success."""
         exporter = ConsoleLogRecordExporter()
-        
+
         captured = io.StringIO()
-        with patch.object(sys, 'stderr', captured):
+        with patch.object(sys, "stderr", captured):
             result = exporter.export([])
-        
+
         assert result == LogRecordExportResult.SUCCESS
         assert captured.getvalue() == ""
 
@@ -91,15 +91,15 @@ class TestOTelLogger:
         """Verify INFO/DEBUG/WARN/ERROR map to correct severity numbers."""
         mock_logger = MagicMock()
         otel_logger = OTelLogger(mock_logger, source="TestSource")
-        
+
         # Test each level
         otel_logger.info("info message")
         otel_logger.debug("debug message")
         otel_logger.warning("warning message")
         otel_logger.error("error message")
-        
+
         assert mock_logger.emit.call_count == 4
-        
+
         # Verify severity numbers
         calls = mock_logger.emit.call_args_list
         assert calls[0][0][0].severity_number == SeverityNumber.INFO
@@ -111,12 +111,12 @@ class TestOTelLogger:
         """Verify severity text is set correctly."""
         mock_logger = MagicMock()
         otel_logger = OTelLogger(mock_logger, source="TestSource")
-        
+
         otel_logger.info("test")
         otel_logger.debug("test")
         otel_logger.warning("test")
         otel_logger.error("test")
-        
+
         calls = mock_logger.emit.call_args_list
         assert calls[0][0][0].severity_text == "INFO"
         assert calls[1][0][0].severity_text == "DEBUG"
@@ -127,9 +127,9 @@ class TestOTelLogger:
         """Verify log.source attribute is set from source parameter."""
         mock_logger = MagicMock()
         otel_logger = OTelLogger(mock_logger, source="MyComponent")
-        
+
         otel_logger.info("test message")
-        
+
         record = mock_logger.emit.call_args[0][0]
         assert record.attributes["log.source"] == "MyComponent"
 
@@ -137,9 +137,9 @@ class TestOTelLogger:
         """Verify additional keyword arguments are included as attributes."""
         mock_logger = MagicMock()
         otel_logger = OTelLogger(mock_logger, source="TestSource")
-        
+
         otel_logger.info("test message", peer_id="abc123", port=8765)
-        
+
         record = mock_logger.emit.call_args[0][0]
         assert record.attributes["peer_id"] == "abc123"
         assert record.attributes["port"] == 8765
@@ -148,9 +148,9 @@ class TestOTelLogger:
         """Verify message is set as log record body."""
         mock_logger = MagicMock()
         otel_logger = OTelLogger(mock_logger, source="TestSource")
-        
+
         otel_logger.info("Hello, world!")
-        
+
         record = mock_logger.emit.call_args[0][0]
         assert record.body == "Hello, world!"
 
@@ -158,11 +158,11 @@ class TestOTelLogger:
         """Verify timestamp is set to current time."""
         mock_logger = MagicMock()
         otel_logger = OTelLogger(mock_logger, source="TestSource")
-        
+
         before = time.time_ns()
         otel_logger.info("test")
         after = time.time_ns()
-        
+
         record = mock_logger.emit.call_args[0][0]
         assert before <= record.timestamp <= after
 
@@ -175,15 +175,17 @@ class TestGetDefaultProviders:
         # Note: This modifies global state, so we need to be careful
         # In a real test suite, we'd want to reset the globals
         tracer_provider, logger_provider = get_default_providers("test-service")
-        
+
         assert isinstance(tracer_provider, TracerProvider)
         assert isinstance(logger_provider, LoggerProvider)
 
     def test_singleton_returns_same_providers(self):
         """Verify lazy initialization returns same providers on subsequent calls."""
         tracer1, logger1 = get_default_providers("service1")
-        tracer2, logger2 = get_default_providers("service2")  # Different name, same providers
-        
+        tracer2, logger2 = get_default_providers(
+            "service2"
+        )  # Different name, same providers
+
         # Should return the same instances (singleton pattern)
         assert tracer1 is tracer2
         assert logger1 is logger2
@@ -197,7 +199,7 @@ class TestConfigureTelemetry:
         tracer_provider, logger_provider = configure_telemetry(
             service_name="test-app",
         )
-        
+
         assert isinstance(tracer_provider, TracerProvider)
         assert isinstance(logger_provider, LoggerProvider)
 
@@ -205,13 +207,13 @@ class TestConfigureTelemetry:
         """Verify custom log exporter receives logs."""
         mock_exporter = MagicMock()
         mock_exporter.export.return_value = LogRecordExportResult.SUCCESS
-        
+
         tracer_provider, logger_provider = configure_telemetry(
             service_name="test-app",
             log_exporter=mock_exporter,
             batch_logs=False,  # Use SimpleLogRecordProcessor for immediate export
         )
-        
+
         # Get a logger and emit a log
         logger = logger_provider.get_logger("test")
         record = LogRecord(
@@ -221,7 +223,7 @@ class TestConfigureTelemetry:
             severity_number=SeverityNumber.INFO,
         )
         logger.emit(record)
-        
+
         # Verify exporter was called
         assert mock_exporter.export.called
 
@@ -237,20 +239,20 @@ class TestIntegration:
             log_exporter=ConsoleLogRecordExporter(),
             batch_logs=False,
         )
-        
+
         # Create OTelLogger
         otel_logger = OTelLogger(
             logger_provider.get_logger("integration.test"),
             source="IntegrationTest",
         )
-        
+
         # Capture stderr and emit logs
         captured = io.StringIO()
-        with patch.object(sys, 'stderr', captured):
+        with patch.object(sys, "stderr", captured):
             otel_logger.info("Integration test message", key="value")
-        
+
         output = captured.getvalue()
-        
+
         # Verify output contains expected parts
         assert "[INFO]" in output
         assert "IntegrationTest" in output

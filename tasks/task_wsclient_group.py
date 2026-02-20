@@ -11,14 +11,16 @@ def build_parser(subparsers: argparse._SubParsersAction):
     parser.add_argument("--path", type=str, default="/")
     parser.set_defaults(func=task)
 
+
 def task(parsed_args: argparse.Namespace):
     receiver = RxWSClientGroup(
         {
-            'host' : parsed_args.host, 
-            'port' : parsed_args.port,
+            "host": parsed_args.host,
+            "port": parsed_args.port,
         },
-        datatype='string')
-    
+        datatype="string",
+    )
+
     receiver.subscribe(print, on_error=print)
 
     i = 0

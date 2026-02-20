@@ -5,22 +5,19 @@ import math
 import queue
 import threading
 import time
-from abc import ABC, abstractmethod
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Literal
 
 import numpy as np
 import pyaudio
 import reactivex as rx
 import scipy
 import soundfile as sf
-from reactivex import Observable, Observer, Subject, create
-from reactivex import operators as ops
+from reactivex import Observable, Subject
 from reactivex.disposable import CompositeDisposable, Disposable
 from reactivex.scheduler import ThreadPoolScheduler
 from reactivex.scheduler.eventloop import AsyncIOScheduler
 
 from .mechanism import RxException
-from .utils import TaggedData, get_full_error_info, get_short_error_info
 
 PCMFormat = Literal["UInt8", "Int16", "Int24", "Int32", "Float32"]
 
@@ -61,13 +58,13 @@ def get_sf_format(format: PCMFormat) -> tuple[str, str]:
 
 def get_numpy_dtype(format: PCMFormat) -> np.dtype:
     """Return the numpy dtype for the given PCM format.
-    
+
     Args:
         format: PCM format string ("UInt8", "Int16", "Int24", "Int32", "Float32")
-        
+
     Returns:
         Corresponding numpy dtype
-        
+
     Raises:
         ValueError: If format is not recognized
     """
@@ -89,22 +86,22 @@ def convert_audio_format(
     target_format: PCMFormat,
 ) -> np.ndarray:
     """Convert audio data between different PCM formats.
-    
+
     Handles proper scaling when converting between integer and floating-point
     representations:
     - Float32 uses range [-1.0, 1.0]
     - Int16 uses range [-32768, 32767]
     - Int32 uses full 32-bit range
     - UInt8 uses range [0, 255] with 128 as center
-    
+
     Args:
         audio: Input audio array (any shape, will be treated as samples)
         source_format: Current format of the audio
         target_format: Desired output format
-        
+
     Returns:
         Audio array converted to target format with proper scaling
-        
+
     Example:
         >>> # Convert Float32 [-1.0, 1.0] to Int16 [-32768, 32767]
         >>> audio_int16 = convert_audio_format(audio_f32, "Float32", "Int16")
@@ -113,25 +110,25 @@ def convert_audio_format(
     """
     if source_format == target_format:
         return audio
-    
+
     # First normalize to Float32 range [-1.0, 1.0]
     if source_format == "Float32":
         normalized = audio.astype(np.float32)
     elif source_format == "Int16":
         normalized = audio.astype(np.float32) / 32768.0
     elif source_format == "Int32":
-        normalized = audio.astype(np.float32) / np.iinfo(np.int32).max
+        normalized = audio.astype(np.float32) / np.float32(np.iinfo(np.int32).max)
     elif source_format == "Int24":
-        max24 = 2**23 - 1
+        max24 = np.float32(2**23 - 1)
         normalized = audio.astype(np.float32) / max24
     elif source_format == "UInt8":
         normalized = (audio.astype(np.float32) - 128.0) / 128.0
     else:
         raise ValueError(f"Unexpected source format: {source_format}")
-    
+
     # Clip to valid range
     normalized = np.clip(normalized, -1.0, 1.0)
-    
+
     # Convert from normalized Float32 to target format
     if target_format == "Float32":
         return normalized
@@ -140,8 +137,7 @@ def convert_audio_format(
     elif target_format == "Int32":
         return (normalized * np.iinfo(np.int32).max).astype(np.int32)
     elif target_format == "Int24":
-        max24 = 2**23 - 1
-        return (normalized * max24).astype(np.int32)
+        return (normalized * (2**23 - 1)).astype(np.int32)
     elif target_format == "UInt8":
         return ((normalized * 127.5) + 128.0).astype(np.uint8)
     else:
@@ -225,7 +221,10 @@ class StreamingResampler:
         max_rate = max(self._up, self._down)
         wn = 0.9 / max_rate
         self._sos: np.ndarray = scipy.signal.butter(
-            filter_order, wn, btype="low", output="sos",
+            filter_order,
+            wn,
+            btype="low",
+            output="sos",
         )
         # Initial filter state — start from zero.
         self._zi: np.ndarray = scipy.signal.sosfilt_zi(self._sos) * 0.0
@@ -304,7 +303,9 @@ def _convert_channels(audio: np.ndarray, target_ch: int) -> np.ndarray:
         if target_ch == 1:
             return audio.mean(axis=1, keepdims=True).astype(audio.dtype)
         result = audio[:, : target_ch - 1]
-        mixed = audio[:, target_ch - 1 :].mean(axis=1, keepdims=True).astype(audio.dtype)
+        mixed = (
+            audio[:, target_ch - 1 :].mean(axis=1, keepdims=True).astype(audio.dtype)
+        )
         return np.concatenate([result, mixed], axis=1)
     else:
         # Upmix: duplicate last channel
@@ -369,7 +370,7 @@ def create_wavfile(
     target_channels: int = 1,
     target_format: PCMFormat = "Float32",
     frames_per_chunk: int = 1_024,
-    scheduler: Optional[rx.abc.SchedulerBase] = None,
+    scheduler: rx.abc.SchedulerBase | None = None,
 ):
     """
     Create an Observable that loads a local WAV file and emits it chunk‑by‑chunk.
@@ -385,7 +386,7 @@ def create_wavfile(
     """
 
     def subscribe(
-        observer: rx.abc.ObserverBase, scheduler_: Optional[rx.abc.SchedulerBase] = None
+        observer: rx.abc.ObserverBase, scheduler_: rx.abc.SchedulerBase | None = None
     ) -> rx.abc.DisposableBase:
 
         try:
@@ -399,7 +400,7 @@ def create_wavfile(
             scheduler
             or scheduler_
             or (
-                AsyncIOScheduler(loop)  # type: ignore[assignment]
+                AsyncIOScheduler(loop)  # type: ignore[arg-type]
                 if running
                 else ThreadPoolScheduler(1)
             )
@@ -449,7 +450,8 @@ class RxMicrophone(Subject):
     """
     A reactivex Subject that emits audio data from the microphone.
 
-    This class is a Subject that emits audio data from the microphone. It can be used to create a stream of audio data.
+    This class is a Subject that emits audio data from the microphone.
+    It can be used to create a stream of audio data.
     """
 
     def __init__(
@@ -458,8 +460,8 @@ class RxMicrophone(Subject):
         sample_rate: int = 48_000,
         channels: int = 1,
         frames_per_buffer: int = 1_024,
-        device_index: Optional[int] = None,
-        loop: Optional[asyncio.AbstractEventLoop] = None,
+        device_index: int | None = None,
+        loop: asyncio.AbstractEventLoop | None = None,
     ) -> None:
         super().__init__()
 
@@ -592,7 +594,7 @@ class RxSpeaker(Subject):
         format: PCMFormat = "Float32",
         sample_rate: int = 48_000,
         channels: int = 1,
-        device_index: Optional[int] = None,
+        device_index: int | None = None,
         playback_queue_maxsize: int = 200,
     ):
 
@@ -642,7 +644,7 @@ class RxSpeaker(Subject):
     # Subject interface overrides
     # ------------------------------------------------------------------
 
-    def on_next(self, chunk: bytes) -> None:  # type: ignore[override]
+    def on_next(self, chunk: bytes) -> None:
         """Enqueue *chunk* for playback; returns immediately (non-blocking)."""
         try:
             self._queue.put_nowait(chunk)
@@ -650,14 +652,14 @@ class RxSpeaker(Subject):
             # Drop the frame rather than blocking the caller.
             pass
 
-    def on_completed(self) -> None:  # type: ignore[override]
+    def on_completed(self) -> None:
         """Signal the playback thread to finish and clean up resources."""
         self._queue.put_nowait(self._SENTINEL)
         self._playback_thread.join(timeout=5.0)
         self._teardown()
         super().on_completed()
 
-    def dispose(self) -> None:  # type: ignore[override]
+    def dispose(self) -> None:
         """Dispose and clean up PyAudio resources."""
         try:
             self._queue.put_nowait(self._SENTINEL)

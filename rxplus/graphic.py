@@ -2,26 +2,25 @@
 
 import asyncio
 import time
-from typing import Any, Optional, Union
-
 from io import BytesIO
+from typing import Any
 
-import numpy as np
 import mss
+import numpy as np
 import reactivex as rx
 from PIL import Image
 from reactivex import Observable
-from reactivex import operators as ops
 from reactivex.disposable import CompositeDisposable, Disposable
 from reactivex.scheduler import ThreadPoolScheduler
 from reactivex.scheduler.eventloop import AsyncIOScheduler
 
 from .mechanism import RxException
 
+
 def create_screen_capture(
     fps: float = 10.0,
-    monitor: Union[int, dict, None] = None,
-    scheduler: Optional[rx.abc.SchedulerBase] = None,
+    monitor: int | dict | None = None,
+    scheduler: rx.abc.SchedulerBase | None = None,
 ) -> Observable[np.ndarray]:
     """
     Create an observable that captures the screen at a specified FPS.
@@ -34,7 +33,7 @@ def create_screen_capture(
             - int: Monitor index (0=all monitors combined, 1=primary, 2+=secondary)
             - dict: Region specification {"left": x, "top": y, "width": w, "height": h}
 
-    Output stream: 
+    Output stream:
         Observable emitting NumPy arrays representing RGB frames of the screen.
     """
 
@@ -46,7 +45,7 @@ def create_screen_capture(
     previous_time = 0.5 * interval
 
     def subscribe(
-        observer: rx.abc.ObserverBase, scheduler_: Optional[rx.abc.SchedulerBase] = None
+        observer: rx.abc.ObserverBase, scheduler_: rx.abc.SchedulerBase | None = None
     ) -> rx.abc.DisposableBase:
 
         try:
@@ -60,7 +59,7 @@ def create_screen_capture(
             scheduler
             or scheduler_
             or (
-                AsyncIOScheduler(loop)  # type: ignore[assignment]
+                AsyncIOScheduler(loop)  # type: ignore[arg-type]
                 if running
                 else ThreadPoolScheduler(1)
             )
@@ -68,9 +67,8 @@ def create_screen_capture(
 
         disposed = False
 
-
         async def _async_loop(_: rx.abc.SchedulerBase, __: Any) -> None:
-            """Capture loop that uses asyncio.sleep so the event‑loop is never blocked."""
+            """Capture loop; uses asyncio.sleep to avoid blocking."""
             nonlocal disposed, previous_time, sleep_time
 
             try:
@@ -84,9 +82,11 @@ def create_screen_capture(
                         _monitor = monitor  # dict region
 
                     while not disposed and True:
-                        rgb = np.array(sct.grab(_monitor))[:, :, :3][:, :, ::-1]  # BGRA -> RGB
+                        rgb = np.array(sct.grab(_monitor))[:, :, :3][
+                            :, :, ::-1
+                        ]  # BGRA -> RGB
                         observer.on_next(rgb)
-                        # adjust the sleep time based on the interval. experiments show that this is critical.
+                        # Adjust sleep time based on interval (critical).
                         current_time = time.time()
                         elapsed = current_time - previous_time
                         sleep_time += 0.5 * (interval - elapsed)
@@ -95,11 +95,11 @@ def create_screen_capture(
                         if sleep_time > 0:
                             await asyncio.sleep(sleep_time)
                         else:
-                            sleep_time = 0.
-                        
+                            sleep_time = 0.0
+
             except Exception as error:
-                observer.on_error(RxException(
-                    error, note=f"Error while capturing screen")
+                observer.on_error(
+                    RxException(error, note="Error while capturing screen")
                 )
 
         def _sync_loop(_: rx.abc.SchedulerBase, __: Any) -> None:
@@ -117,9 +117,11 @@ def create_screen_capture(
                         _monitor = monitor  # dict region
 
                     while not disposed and True:
-                        rgb = np.array(sct.grab(_monitor))[:, :, :3][:, :, ::-1]  # BGRA -> RGB
+                        rgb = np.array(sct.grab(_monitor))[:, :, :3][
+                            :, :, ::-1
+                        ]  # BGRA -> RGB
                         observer.on_next(rgb)
-                        # adjust the sleep time based on the interval. experiments show that this is critical.
+                        # Adjust sleep time based on interval (critical).
                         current_time = time.time()
                         elapsed = current_time - previous_time
                         sleep_time += 0.5 * (interval - elapsed)
@@ -128,13 +130,13 @@ def create_screen_capture(
                         if sleep_time > 0:
                             time.sleep(sleep_time)
                         else:
-                            sleep_time = 0.
-                        
+                            sleep_time = 0.0
+
             except Exception as error:
-                observer.on_error(RxException(
-                    error, note=f"Error while capturing screen")
+                observer.on_error(
+                    RxException(error, note="Error while capturing screen")
                 )
-            
+
         def dispose() -> None:
             nonlocal disposed
             disposed = True
@@ -144,11 +146,13 @@ def create_screen_capture(
             # spawn async task on the current event‑loop
             assert loop is not None, "AsyncIOScheduler requires an event loop"
             task = loop.create_task(_async_loop(_scheduler, None))
-            capture_disp: rx.abc.DisposableBase = Disposable(lambda: (task.cancel(), None)[1])
+            capture_disp: rx.abc.DisposableBase = Disposable(
+                lambda: (task.cancel(), None)[1]
+            )
         else:
             # run in a worker thread
             capture_disp = _scheduler.schedule(_sync_loop)
-        
+
         return CompositeDisposable(capture_disp, Disposable(dispose))
 
     return Observable(subscribe)
@@ -170,7 +174,7 @@ def rgb_ndarray_to_jpeg_bytes(frame: np.ndarray, quality: int = 80) -> bytes:
     bytes
         JPEG encoded image data.
     """
-    
+
     width, height = frame.shape[1], frame.shape[0]
 
     img = Image.frombytes("RGB", (width, height), frame.tobytes())
@@ -181,6 +185,7 @@ def rgb_ndarray_to_jpeg_bytes(frame: np.ndarray, quality: int = 80) -> bytes:
         jpeg_data = output.getvalue()
 
     return jpeg_data
+
 
 def jpeg_bytes_to_rgb_ndarray(jpeg: bytes) -> np.ndarray:
     """
@@ -197,8 +202,8 @@ def jpeg_bytes_to_rgb_ndarray(jpeg: bytes) -> np.ndarray:
         Image as RGB array (copy, contiguous).
     """
     with Image.open(BytesIO(jpeg)) as im:
-        rgb = im.convert("RGB")        # ensure 3-channel
-        return np.asarray(rgb)         # shape (H, W, 3), dtype uint8
+        rgb = im.convert("RGB")  # ensure 3-channel
+        return np.asarray(rgb)  # shape (H, W, 3), dtype uint8
 
 
 def rgb_ndarray_to_png_bytes(frame: np.ndarray, compression: int = 6) -> bytes:
@@ -244,5 +249,5 @@ def png_bytes_to_rgb_ndarray(png: bytes) -> np.ndarray:
         Image as RGB array (copy, contiguous).
     """
     with Image.open(BytesIO(png)) as im:
-        rgb = im.convert("RGB")        # ensure 3-channel
-        return np.asarray(rgb)         # shape (H, W, 3), dtype uint8
+        rgb = im.convert("RGB")  # ensure 3-channel
+        return np.asarray(rgb)  # shape (H, W, 3), dtype uint8

@@ -4,8 +4,6 @@ These tests verify that the package can be imported correctly depending on
 which optional dependencies are installed.
 """
 
-import sys
-
 
 def test_basic_imports():
     """Test that basic imports work without optional dependencies."""

@@ -1,5 +1,4 @@
 import argparse
-from typing import Optional
 import time
 
 import numpy as np
@@ -9,7 +8,8 @@ from rxplus import RxWSServer, TaggedData
 
 def build_parser(subparsers: argparse._SubParsersAction):
     parser = subparsers.add_parser(
-        "np_matrix_server", help="WebSocket server streaming small numpy matrices (object frames)."
+        "np_matrix_server",
+        help="WebSocket server streaming small numpy matrices (object frames).",
     )
     parser.add_argument("--host", type=str, default="::")
     parser.add_argument("--port", type=int, default=8888)
@@ -28,7 +28,9 @@ def build_parser(subparsers: argparse._SubParsersAction):
     parser.set_defaults(func=task)
 
 
-def _make_random_matrix(rng: np.random.Generator, rows: int, cols: int, dtype: np.dtype) -> np.ndarray:
+def _make_random_matrix(
+    rng: np.random.Generator, rows: int, cols: int, dtype: np.dtype
+) -> np.ndarray:
     if np.issubdtype(dtype, np.floating):
         return rng.random((rows, cols), dtype=dtype)
     else:

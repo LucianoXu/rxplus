@@ -10,7 +10,7 @@ reactive gateways with:
 
 Example:
     >>> from rxplus.gateway import GatewayNode, TaggedFrame
-    >>> 
+    >>>
     >>> # Create a custom framing class implementing the Framing protocol
     >>> class MyFraming:
     ...     @classmethod
@@ -24,7 +24,7 @@ Example:
     ...     def is_hello(self) -> bool: ...
     ...     def is_hello_ack(self) -> bool: ...
     ...     def get_hello_node_id(self) -> bytes | None: ...
-    >>> 
+    >>>
     >>> # Use with GatewayNode
     >>> node = GatewayNode[MyFraming](
     ...     host="::", port=8765, framing_cls=MyFraming
@@ -32,28 +32,10 @@ Example:
 """
 
 # Overflow strategies
-from .overflow import (
-    OverflowPolicy,
-    DropOld,
-    DropNew,
-    BufferK,
-    Disconnect,
-    DisconnectError,
-    create_overflow_policy,
-)
-
-# Stream management
-from .stream import (
-    OverflowStrategy,
-    StreamState,
-    StreamInfo,
-    StreamTable,
-)
-
 # Connection management
 from .connection import (
-    ConnectionState,
     Connection,
+    ConnectionState,
     HelloPayload,
 )
 
@@ -66,6 +48,23 @@ from .framing import (
 # Gateway node
 from .node import (
     GatewayNode,
+)
+from .overflow import (
+    BufferK,
+    Disconnect,
+    DisconnectError,
+    DropNew,
+    DropOld,
+    OverflowPolicy,
+    create_overflow_policy,
+)
+
+# Stream management
+from .stream import (
+    OverflowStrategy,
+    StreamInfo,
+    StreamState,
+    StreamTable,
 )
 
 __all__ = [

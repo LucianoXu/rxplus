@@ -1,15 +1,15 @@
 import argparse
 import time
 
+from opentelemetry._logs import LogRecord as OTelLogRecord
+from opentelemetry._logs import SeverityNumber
+from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+
 from rxplus import (
     RxWSClient,
     configure_telemetry,
 )
-
-from opentelemetry._logs import SeverityNumber
-from opentelemetry._logs import LogRecord as OTelLogRecord
-from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
 
 def build_parser(subparsers: argparse._SubParsersAction):
@@ -29,7 +29,7 @@ def build_parser(subparsers: argparse._SubParsersAction):
 def task(parsed_args: argparse.Namespace):
     """
     Demonstrate WebSocket client with OTel telemetry.
-    
+
     This client:
     1. Connects to a WebSocket server
     2. Creates spans for operations
@@ -39,20 +39,20 @@ def task(parsed_args: argparse.Namespace):
     # Configure OTel with OTLP exporters
     log_exporter = OTLPLogExporter(endpoint=f"{parsed_args.otlp_endpoint}/v1/logs")
     span_exporter = OTLPSpanExporter(endpoint=f"{parsed_args.otlp_endpoint}/v1/traces")
-    
+
     tracer_provider, logger_provider = configure_telemetry(
         log_exporter=log_exporter,
         span_exporter=span_exporter,
     )
-    
+
     # Create client with telemetry providers
     receiver = RxWSClient(
         {
-            'host': parsed_args.host,
-            'port': parsed_args.port,
-            'path': parsed_args.path,
+            "host": parsed_args.host,
+            "port": parsed_args.port,
+            "path": parsed_args.path,
         },
-        datatype='string',
+        datatype="string",
         buffer_while_disconnected=True,
         tracer_provider=tracer_provider,
         logger_provider=logger_provider,
@@ -69,7 +69,9 @@ def task(parsed_args: argparse.Namespace):
     tracer = tracer_provider.get_tracer("task_wsclient")
     logger = logger_provider.get_logger("task_wsclient")
 
-    print(f"Client connecting to {parsed_args.host}:{parsed_args.port}{parsed_args.path}")
+    print(
+        f"Client connecting to {parsed_args.host}:{parsed_args.port}{parsed_args.path}"
+    )
     print(f"Telemetry exported via OTLP to: {parsed_args.otlp_endpoint}")
     print("Will send messages every 2 seconds...")
     print("-" * 60)
@@ -82,7 +84,7 @@ def task(parsed_args: argparse.Namespace):
             # Create a span for this operation
             with tracer.start_as_current_span("send_ping") as span:
                 span.set_attribute("ping_id", i)
-                
+
                 # Emit a log record
                 log_record = OTelLogRecord(
                     timestamp=time.time_ns(),

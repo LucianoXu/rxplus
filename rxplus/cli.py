@@ -1,7 +1,8 @@
 """Command-line interface utilities."""
 
 import asyncio
-from typing import Callable, Literal
+from collections.abc import Callable
+from typing import Literal
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
@@ -11,40 +12,43 @@ from reactivex import Observable
 def to_cli(prefix: str = "") -> Callable[[Observable], Observable]:
     """
     Display upstream items to terminal without interrupting active prompts.
-    
+
     Uses prompt_toolkit's patch_stdout() for safe interleaving with from_cli().
     Values pass through unchanged downstream.
-    
+
     Parameters
     ----------
     prefix : str, default ""
         String to prepend to each displayed item.
-    
+
     Returns
     -------
     Callable[[Observable], Observable]
         An operator that can be used with pipe().
-    
+
     Example
     -------
     >>> source.pipe(
     ...     to_cli(prefix="[recv] ")
     ... ).subscribe()
     """
+
     def _to_cli(source: Observable) -> Observable:
         def subscribe(observer, scheduler=None):
             def on_next(value):
                 with patch_stdout():
                     print(f"{prefix}{value}")
                 observer.on_next(value)
-            
+
             return source.subscribe(
                 on_next=on_next,
                 on_error=observer.on_error,
                 on_completed=observer.on_completed,
                 scheduler=scheduler,
             )
+
         return Observable(subscribe)
+
     return _to_cli
 
 
@@ -80,9 +84,9 @@ def from_cli(
 
         def subscribe(observer, scheduler=None):
             # Runtime state ---------------------------------------------------
-            session = PromptSession()
+            session: PromptSession = PromptSession()
             _loop = loop or asyncio.get_running_loop()
-            waiting_prompts = asyncio.Queue()  # All pending questions
+            waiting_prompts: asyncio.Queue = asyncio.Queue()  # All pending questions
             current_prompt = {"text": ""}  # Mutable reference for live updates
             awaiting_input = {"flag": False}  # True while prompt_async is waiting
             done = asyncio.Event()  # Signals graceful shutdown

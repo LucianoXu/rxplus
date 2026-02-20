@@ -1,0 +1,23 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.2
+    hooks:
+      - id: ruff-format
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: mypy rxplus/
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: pytest
+        name: pytest
+        entry: pytest --cov=rxplus --cov-report=term-missing --ignore=tests/test_mechanism.py
+        language: system
+        pass_filenames: false
+        always_run: true

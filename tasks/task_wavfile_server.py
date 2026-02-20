@@ -1,36 +1,39 @@
-from typing import Literal, get_args
-import reactivex as rx
+import argparse
+import time
+from typing import get_args
+
 from reactivex import Subject
 from reactivex import operators as ops
-import numpy as np
 
-import argparse
-
-import threading
-import time
 import rxplus
-from rxplus import create_wavfile, RxWSServer, TaggedData, untag, tag
-from reactivex.scheduler import ThreadPoolScheduler
+from rxplus import RxWSServer, create_wavfile, tag
 
 
 def build_parser(subparsers: argparse._SubParsersAction):
     parser = subparsers.add_parser("wavfile_server", help="start the wavfile server.")
     parser.add_argument("--path", type=str, default="")
-    parser.add_argument("--format", help="the format of sound", type=str, choices=get_args(rxplus.PCMFormat), default="Float32")
+    parser.add_argument(
+        "--format",
+        help="the format of sound",
+        type=str,
+        choices=get_args(rxplus.PCMFormat),
+        default="Float32",
+    )
     parser.add_argument("--sr", type=int, help="target sampling rate", default=48000)
     parser.add_argument("--ch", type=int, help="target channel number", default=1)
     parser.add_argument("--host", type=str, default="::")
     parser.add_argument("--port", type=int, default=8888)
     parser.set_defaults(func=task)
 
+
 def task(parsed_args: argparse.Namespace):
 
     sender = RxWSServer(
         {
-            'host' : parsed_args.host, 
-            'port' : parsed_args.port,
-        }, 
-        datatype='bytes'
+            "host": parsed_args.host,
+            "port": parsed_args.port,
+        },
+        datatype="bytes",
     )
 
     # create the network with some cli output
@@ -45,11 +48,8 @@ def task(parsed_args: argparse.Namespace):
         wav_path=parsed_args.path,
         target_format=parsed_args.format,
         target_sample_rate=parsed_args.sr,
-        target_channels=parsed_args.ch
-    ).pipe(
-        ops.map(lambda d: d.tobytes()),
-        ops.repeat()
-    )
+        target_channels=parsed_args.ch,
+    ).pipe(ops.map(lambda d: d.tobytes()), ops.repeat())
 
     # create the source
     wavfile.subscribe(data)

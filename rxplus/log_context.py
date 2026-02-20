@@ -8,7 +8,7 @@ to every log record emitted by an ``OTelLogger`` carrying this context.
 used independently for attribute bundling and child-context derivation.
 """
 
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 
 
 @dataclass(frozen=True)

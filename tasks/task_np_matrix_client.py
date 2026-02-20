@@ -1,13 +1,15 @@
 import argparse
-import numpy as np
 import time
+
+import numpy as np
 
 from rxplus import RxWSClient
 
 
 def build_parser(subparsers: argparse._SubParsersAction):
     parser = subparsers.add_parser(
-        "np_matrix_client", help="WebSocket client for small numpy matrices (object frames)."
+        "np_matrix_client",
+        help="WebSocket client for small numpy matrices (object frames).",
     )
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8888)
@@ -20,8 +22,12 @@ def build_parser(subparsers: argparse._SubParsersAction):
         default="float32",
         choices=["float32", "float64", "int16", "int32"],
     )
-    parser.add_argument("--tx_fps", type=float, default=1.0, help="Transmit matrices per second")
-    parser.add_argument("--seed", type=int, default=0, help="Local random seed for transmitted matrices")
+    parser.add_argument(
+        "--tx_fps", type=float, default=1.0, help="Transmit matrices per second"
+    )
+    parser.add_argument(
+        "--seed", type=int, default=0, help="Local random seed for transmitted matrices"
+    )
     parser.set_defaults(func=task)
 
 
@@ -38,7 +44,10 @@ def task(parsed_args: argparse.Namespace):
     # Print inbound matrices
     def on_next(arr):
         if isinstance(arr, np.ndarray):
-            print(f"Received array shape={arr.shape} dtype={arr.dtype} sum={arr.sum():.3f}")
+            print(
+                f"Received array shape={arr.shape} "
+                f"dtype={arr.dtype} sum={arr.sum():.3f}"
+            )
         else:
             print(f"Received (non-ndarray): {type(arr)} -> {arr}")
 
@@ -50,8 +59,7 @@ def task(parsed_args: argparse.Namespace):
     rows, cols = parsed_args.rows, parsed_args.cols
     dtype = np.dtype(parsed_args.dtype)
 
-
-    try:    
+    try:
         while True:
             time.sleep(dt)
             if np.issubdtype(dtype, np.floating):
@@ -59,6 +67,6 @@ def task(parsed_args: argparse.Namespace):
             else:
                 arr = rng.integers(low=0, high=100, size=(rows, cols), dtype=dtype)
             client.on_next(arr)
-            
+
     except KeyboardInterrupt:
         print("\nKeyboard Interrupt.")
