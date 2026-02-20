@@ -72,10 +72,10 @@ jobs:
       - name: Install package with all dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[all,dev]" || pip install -e ".[video,dev]"
+          pip install -e ".[all,dev]"
 
       - name: Run tests
-        run: pytest --cov=rxplus --cov-report=term-missing -v --ignore=tests/test_mechanism.py
+        run: pytest -v --tb=short --ignore=tests/test_mechanism.py
 
   test-basic:
     runs-on: ubuntu-latest
@@ -93,4 +93,4 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run basic tests
-        run: pytest --cov=rxplus --cov-report=term-missing -v --ignore=tests/test_audio.py --ignore=tests/test_graphic.py --ignore=tests/test_mechanism.py
+        run: pytest -v --tb=short --ignore=tests/test_audio.py --ignore=tests/test_graphic.py --ignore=tests/test_mechanism.py

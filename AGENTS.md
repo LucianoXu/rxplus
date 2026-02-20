@@ -1,18 +1,26 @@
-# Instruction for Agents
+# rxplus
 
-## Explanations for commands
+`rxplus` is a Python library that provides a collection of extensions for the `reactivex` library.
 
-The explanation of commands are provided as follows. The expanations also suit for commands that have similar meanings.
+## Build & Development
 
-### maintain the repository
-You can help maintain the repository in the following way:
-- Compare `README.md` with the code, and update `README.md` according to the changes.
-- Scan the code and write/refine the documentation and docstring.
-- Tide up import commands, including removing unused import commands and sort other import commands. More general dependencies (e.g., well-known packages and public libraries) should appear above the more specific dependencies (e.g., local files).
-- Suggest better variable/class/function names.
+- Python: 3.13
+- Environment: `conda activate rxplus`
+- Pre-commit hooks: `pre-commit install`
+- Test: `pytest --cov=rxplus --cov-report=term-missing`
+- Lint: `ruff check .`
+- Format: `ruff format .`
+- Type check: `mypy rxplus`
 
-### check and fix linter
-For interpreter languages like Python, you should run the linter on the code and investigate the errors. Then you should suggest ways to fix the linter errors while preserving the function of the code.
+## Coding Style
 
-### check TODO
-You should scan the repository and search for the `TODO` comment, understand the target, and provide code fix or suggestions.
+- Formatting/linting: ruff + mypy
+- Avoid `Any` types; use explicit type annotations
+- Keep files under ~700 LOC; split when it improves clarity
+- Add brief comments for non-obvious logic
+
+## Commit Guidelines
+
+- Write concise, descriptive commit messages
+- Run `pre-commit` before committing
+- Keep PRs focused on a single concern
