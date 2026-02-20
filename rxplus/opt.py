@@ -2,7 +2,6 @@
 
 import time
 from collections.abc import Callable
-from typing import Any
 
 from attr import dataclass
 from opentelemetry.trace import Span, StatusCode
@@ -44,22 +43,24 @@ def stream_print_out(prompt: str = "Stream-Print-Out"):
     return _stream_print_out
 
 
-def redirect_to(cond: Callable[[Any], bool], redirect_target: Observer | Callable):
+def redirect_to[T](
+    cond: Callable[[T], bool],
+    redirect_target: Observer[T] | Callable[[T], object],
+) -> Callable[[Observable[T]], Observable[T]]:
     """
     Redirect items to the specified observer (or function),
     and forward other items.
     """
 
-    def _redirect_to(source):
-        def subscribe(observer, scheduler=None):
-
+    def _redirect_to(source: Observable[T]) -> Observable[T]:
+        def subscribe(observer: Observer[T], scheduler=None):
             # determine the redirection function
             if callable(redirect_target):
                 redirect_fun = redirect_target
             else:
                 redirect_fun = redirect_target.on_next
 
-            def on_next(value: Any) -> None:
+            def on_next(value: T) -> None:
                 if cond(value):
                     redirect_fun(value)
                 else:
@@ -72,7 +73,7 @@ def redirect_to(cond: Callable[[Any], bool], redirect_target: Observer | Callabl
                 scheduler=scheduler,
             )
 
-        return Observable(subscribe)
+        return Observable(subscribe)  # type: ignore[arg-type]
 
     return _redirect_to
 
@@ -105,12 +106,12 @@ class ErrorRestartSignal:
         span.set_status(StatusCode.ERROR, f"Retry attempt {self.attempts}")
 
 
-def retry_with_signal(
+def retry_with_signal[T](
     max_retries: int | None = None,
     *,
     delay_s: float | Callable[[int, RxException], float] = 0.0,
     should_retry: Callable[[RxException], bool] | None = None,
-):
+) -> Callable[[Observable[T]], Observable[T | ErrorRestartSignal]]:
     """
     Operator: on upstream error, emit a `ErrorRestartSignal` and retry.
 
@@ -119,13 +120,18 @@ def retry_with_signal(
     - should_retry: predicate on the underlying Exception to decide retry.
     """
 
-    def _op(source: Observable[Any]) -> Observable[Any]:
-        def _subscribe(observer, scheduler=None):
+    def _op(
+        source: Observable[T],
+    ) -> Observable[T | ErrorRestartSignal]:
+        def _subscribe(
+            observer: Observer[T | ErrorRestartSignal],
+            scheduler=None,
+        ):
             attempts = 0
             disposed = False
             sd = SerialDisposable()
 
-            def _delay(attempt: int, err: RxException):
+            def _delay(attempt: int, err: RxException) -> None:
                 try:
                     d = delay_s(attempt, err) if callable(delay_s) else float(delay_s)
                 except Exception:
@@ -136,14 +142,14 @@ def retry_with_signal(
                     except Exception:
                         pass
 
-            def _subscribe_once():
+            def _subscribe_once() -> None:
                 if disposed:
                     return
 
-                def _on_next(v: Any):
+                def _on_next(v: T) -> None:
                     observer.on_next(v)
 
-                def _on_error(err: Exception):
+                def _on_error(err: Exception) -> None:
                     if not isinstance(err, RxException):
                         err = RxException(
                             err,
@@ -192,7 +198,7 @@ def retry_with_signal(
 
             _subscribe_once()
 
-            def _dispose():
+            def _dispose() -> None:
                 nonlocal disposed
                 disposed = True
                 try:
@@ -203,6 +209,6 @@ def retry_with_signal(
 
             return Disposable(_dispose)
 
-        return create(_subscribe)
+        return create(_subscribe)  # type: ignore[arg-type]
 
     return _op

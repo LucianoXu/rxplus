@@ -28,14 +28,20 @@ Example:
     >>> conn.peer_node_id = received_node_id
 """
 
+from __future__ import annotations
+
 import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Literal
 
 from reactivex.disposable import CompositeDisposable
 
 from .stream import StreamTable
+
+if TYPE_CHECKING:
+    from ..duplex import Duplex
+    from ..ws import RxWSClient
 
 
 class ConnectionState(Enum):
@@ -81,8 +87,8 @@ class Connection:
     created_at: float = field(default_factory=time.time)
 
     # Internal fields (not part of public API)
-    _duplex: Any | None = field(default=None, repr=False)
-    _ws_client: Any | None = field(default=None, repr=False)
+    _duplex: Duplex | None = field(default=None, repr=False)
+    _ws_client: RxWSClient | None = field(default=None, repr=False)
     _disposables: CompositeDisposable = field(
         default_factory=CompositeDisposable, repr=False
     )

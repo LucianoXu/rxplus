@@ -47,12 +47,11 @@ from ..duplex import make_duplex
 from ..telemetry import OTelLogger, get_default_providers
 from ..utils import TaggedData
 from ..ws import (
-    ConnectionState as WSConnectionState,
-)
-from ..ws import (
     RetryPolicy,
     RxWSClient,
     RxWSServer,
+    WSConnectionConfig,
+    WSConnectionState,
 )
 from .connection import Connection, ConnectionState
 from .framing import Framing, TaggedFrame
@@ -174,7 +173,7 @@ class GatewayNode[F: Framing]:
 
         # Internal server for accepting inbound connections
         self._server = RxWSServer(
-            {"host": host, "port": port},
+            WSConnectionConfig(host=host, port=port),
             datatype="bytes",
             ping_interval=ping_interval,
             ping_timeout=ping_timeout,
@@ -383,7 +382,7 @@ class GatewayNode[F: Framing]:
 
         # Create WebSocket client with auto-reconnect
         ws_client = RxWSClient(
-            {"host": host, "port": port, "path": unique_path},
+            WSConnectionConfig(host=host, port=port, path=unique_path),
             datatype="bytes",
             retry_policy=self._retry_policy,
             ping_interval=self._ping_interval,
@@ -422,7 +421,7 @@ class GatewayNode[F: Framing]:
                 ops.map(lambda data: self._handle_outbound_data(conn, data)),  # type: ignore[arg-type]
                 ops.filter(lambda x: x is not None),
             ).subscribe(
-                on_next=lambda tagged: self._sink.on_next(tagged),
+                on_next=lambda tagged: self._sink.on_next(tagged),  # type: ignore[arg-type]
                 on_error=lambda e: self._otel_logger.error(
                     f"Client pipeline error for {conn.conn_id.hex()[:16]}: {e}"
                 ),

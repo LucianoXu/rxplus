@@ -1,16 +1,18 @@
+import dataclasses
+
 import pytest
 
 from rxplus.ws import (
-    ConnectionState,
     RetryPolicy,
     RxWSClient,
     RxWSClientGroup,
     RxWSServer,
-    WS_Channels,
     WSBytes,
+    WSChannels,
+    WSConnectionConfig,
+    WSConnectionState,
     WSObject,
     WSStr,
-    _validate_conn_cfg,
     wsdt_factory,
 )
 
@@ -94,41 +96,44 @@ def test_wsobject_tagged_data_serialization():
 
 
 # =============================================================================
-# Connection configuration validation tests
+# WSConnectionConfig tests
 # =============================================================================
 
 
-def test_validate_conn_cfg_valid():
-    """Valid config should not raise."""
-    _validate_conn_cfg({"host": "localhost", "port": 8888}, ["host", "port"])
+def test_ws_connection_config_valid():
+    """Valid WSConnectionConfig construction."""
+    cfg = WSConnectionConfig(host="localhost", port=8080)
+    assert cfg.host == "localhost"
+    assert cfg.port == 8080
 
 
-def test_validate_conn_cfg_missing_host():
-    """Missing host should raise ValueError."""
-    with pytest.raises(ValueError, match="missing required keys.*host"):
-        _validate_conn_cfg({"port": 8888}, ["host", "port"])
+def test_ws_connection_config_default_path():
+    """Default path should be '/'."""
+    cfg = WSConnectionConfig(host="localhost", port=8080)
+    assert cfg.path == "/"
 
 
-def test_validate_conn_cfg_missing_port():
-    """Missing port should raise ValueError."""
-    with pytest.raises(ValueError, match="missing required keys.*port"):
-        _validate_conn_cfg({"host": "localhost"}, ["host", "port"])
+def test_ws_connection_config_custom_path():
+    """Custom path should be preserved."""
+    cfg = WSConnectionConfig(host="localhost", port=8080, path="/ws")
+    assert cfg.path == "/ws"
 
 
-def test_validate_conn_cfg_missing_multiple():
-    """Missing multiple keys should list all."""
-    with pytest.raises(ValueError, match="missing required keys"):
-        _validate_conn_cfg({}, ["host", "port"])
+def test_ws_connection_config_frozen():
+    """WSConnectionConfig should be immutable (frozen dataclass)."""
+    cfg = WSConnectionConfig(host="localhost", port=8080)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.host = "other"  # type: ignore[misc]
 
 
 # =============================================================================
-# WS_Channels thread safety tests
+# WSChannels thread safety tests
 # =============================================================================
 
 
 def test_ws_channels_add_remove_client():
     """Test thread-safe client registration."""
-    channels = WS_Channels(datatype="string")
+    channels = WSChannels(datatype="string")
 
     mock_ws = object()
     mock_queue = object()
@@ -144,7 +149,7 @@ def test_ws_channels_add_remove_client():
 
 def test_ws_channels_get_queues_snapshot():
     """Test snapshot returns a copy for safe iteration."""
-    channels = WS_Channels(datatype="string")
+    channels = WSChannels(datatype="string")
 
     q1, q2 = object(), object()
     channels.add_client(object(), q1)
@@ -162,18 +167,11 @@ def test_ws_channels_get_queues_snapshot():
 # =============================================================================
 
 
-def test_server_requires_host_and_port():
-    """Server should validate conn_cfg."""
-    with pytest.raises(ValueError, match="missing required keys"):
-        RxWSServer({"host": "localhost"})  # missing port
-
-    with pytest.raises(ValueError, match="missing required keys"):
-        RxWSServer({"port": 8888})  # missing host
-
-
 def test_server_accepts_valid_config():
-    """Server should accept valid config."""
-    server = RxWSServer({"host": "localhost", "port": 0}, name="test-server")
+    """Server should accept valid WSConnectionConfig."""
+    server = RxWSServer(
+        WSConnectionConfig(host="localhost", port=0), name="test-server"
+    )
     assert server.host == "localhost"
     assert server._name == "test-server"
     server.on_completed()
@@ -184,15 +182,9 @@ def test_server_accepts_valid_config():
 # =============================================================================
 
 
-def test_client_requires_host_and_port():
-    """Client should validate conn_cfg."""
-    with pytest.raises(ValueError, match="missing required keys"):
-        RxWSClient({"host": "localhost"})  # missing port
-
-
 def test_client_buffer_while_disconnected_default():
     """Default buffer_while_disconnected should be False."""
-    client = RxWSClient({"host": "localhost", "port": 9999})
+    client = RxWSClient(WSConnectionConfig(host="localhost", port=9999))
     assert client._buffer_while_disconnected is False
     client.on_completed()
 
@@ -200,7 +192,7 @@ def test_client_buffer_while_disconnected_default():
 def test_client_buffer_while_disconnected_enabled():
     """buffer_while_disconnected can be enabled."""
     client = RxWSClient(
-        {"host": "localhost", "port": 9999},
+        WSConnectionConfig(host="localhost", port=9999),
         buffer_while_disconnected=True,
     )
     assert client._buffer_while_disconnected is True
@@ -212,16 +204,10 @@ def test_client_buffer_while_disconnected_enabled():
 # =============================================================================
 
 
-def test_client_group_requires_host_and_port():
-    """ClientGroup should validate conn_cfg."""
-    with pytest.raises(ValueError, match="missing required keys"):
-        RxWSClientGroup({"host": "localhost"})  # missing port
-
-
 def test_client_group_passes_buffer_while_disconnected():
     """ClientGroup should pass buffer_while_disconnected to child clients."""
     group = RxWSClientGroup(
-        {"host": "localhost", "port": 9999},
+        WSConnectionConfig(host="localhost", port=9999),
         buffer_while_disconnected=True,
     )
     assert group._buffer_while_disconnected is True
@@ -229,23 +215,23 @@ def test_client_group_passes_buffer_while_disconnected():
 
 
 # =============================================================================
-# ConnectionState enum tests
+# WSConnectionState enum tests
 # =============================================================================
 
 
 def test_connection_state_enum_values():
-    """Verify all ConnectionState values are defined correctly."""
-    assert ConnectionState.DISCONNECTED.value == "disconnected"
-    assert ConnectionState.CONNECTING.value == "connecting"
-    assert ConnectionState.CONNECTED.value == "connected"
-    assert ConnectionState.RECONNECTING.value == "reconnecting"
-    assert ConnectionState.CLOSED.value == "closed"
+    """Verify all WSConnectionState values are defined correctly."""
+    assert WSConnectionState.DISCONNECTED.value == "disconnected"
+    assert WSConnectionState.CONNECTING.value == "connecting"
+    assert WSConnectionState.CONNECTED.value == "connected"
+    assert WSConnectionState.RECONNECTING.value == "reconnecting"
+    assert WSConnectionState.CLOSED.value == "closed"
 
 
 def test_connection_state_is_enum():
-    """Verify ConnectionState members are proper enum instances."""
-    assert isinstance(ConnectionState.DISCONNECTED, ConnectionState)
-    assert ConnectionState.DISCONNECTED is ConnectionState.DISCONNECTED
+    """Verify WSConnectionState members are proper enum instances."""
+    assert isinstance(WSConnectionState.DISCONNECTED, WSConnectionState)
+    assert WSConnectionState.DISCONNECTED is WSConnectionState.DISCONNECTED
 
 
 # =============================================================================
@@ -290,7 +276,7 @@ def test_retry_policy_get_delay_jitter():
     """Verify jitter is applied within expected bounds."""
     policy = RetryPolicy(base_delay=10.0, backoff_factor=1.0, jitter=0.1)
 
-    # With jitter=0.1 and base_delay=10.0, delay should be 10.0 ± 1.0
+    # With jitter=0.1 and base_delay=10.0, delay should be 10.0 +/- 1.0
     delays = [policy.get_delay(0) for _ in range(100)]
 
     assert all(9.0 <= d <= 11.0 for d in delays), (
@@ -323,10 +309,10 @@ def test_retry_policy_custom_values():
 
 def test_client_has_connection_state_observable():
     """Client should expose connection_state property."""
-    client = RxWSClient({"host": "localhost", "port": 9999})
+    client = RxWSClient(WSConnectionConfig(host="localhost", port=9999))
 
     # Should be able to subscribe to connection_state
-    states = []
+    states: list[WSConnectionState] = []
     client.connection_state.subscribe(lambda s: states.append(s))
 
     # Should have received initial state
@@ -337,18 +323,18 @@ def test_client_has_connection_state_observable():
     time.sleep(0.1)
 
     assert len(states) >= 1
-    assert all(isinstance(s, ConnectionState) for s in states)
+    assert all(isinstance(s, WSConnectionState) for s in states)
 
     client.on_completed()
 
 
 def test_client_retry_policy_default():
     """Client should use default RetryPolicy when not provided."""
-    client = RxWSClient({"host": "localhost", "port": 9999})
+    client = RxWSClient(WSConnectionConfig(host="localhost", port=9999))
 
     assert isinstance(client._retry_policy, RetryPolicy)
-    # Default should use conn_retry_timeout as base_delay
-    assert client._retry_policy.base_delay == client.conn_retry_timeout
+    # Default RetryPolicy has base_delay=0.5
+    assert client._retry_policy.base_delay == 0.5
 
     client.on_completed()
 
@@ -357,7 +343,7 @@ def test_client_retry_policy_custom():
     """Client should use custom RetryPolicy when provided."""
     custom_policy = RetryPolicy(max_retries=3, base_delay=1.0)
     client = RxWSClient(
-        {"host": "localhost", "port": 9999},
+        WSConnectionConfig(host="localhost", port=9999),
         retry_policy=custom_policy,
     )
 
@@ -370,9 +356,9 @@ def test_client_retry_policy_custom():
 
 def test_client_emits_closed_on_completed():
     """Client should emit CLOSED state on on_completed."""
-    client = RxWSClient({"host": "localhost", "port": 9999})
+    client = RxWSClient(WSConnectionConfig(host="localhost", port=9999))
 
-    states = []
+    states: list[WSConnectionState] = []
     client.connection_state.subscribe(lambda s: states.append(s))
 
     import time
@@ -383,4 +369,4 @@ def test_client_emits_closed_on_completed():
     time.sleep(0.1)  # Let shutdown complete
 
     # CLOSED should be in the state history
-    assert ConnectionState.CLOSED in states
+    assert WSConnectionState.CLOSED in states
