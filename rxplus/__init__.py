@@ -13,7 +13,6 @@ Install with:
 # =============================================================================
 from .cli import from_cli, to_cli  # noqa: F401
 from .duplex import Duplex, connect_adapter, make_duplex  # noqa: F401
-from .log_context import LogContext  # noqa: F401
 from .mechanism import RxException  # noqa: F401
 from .opt import (  # noqa: F401
     ErrorRestartSignal,
@@ -24,6 +23,7 @@ from .opt import (  # noqa: F401
 from .telemetry import (  # noqa: F401
     ConsoleLogRecordExporter,
     FileLogRecordExporter,
+    LogContext,  # noqa: F401
     MetricsHelper,
     OTelLogger,
     configure_metrics,
@@ -37,7 +37,16 @@ from .utils import (  # noqa: F401
     tag_filter,
     untag,
 )
-from .ws import RxWSClient, RxWSClientGroup, RxWSServer, WSDatatype, WSStr  # noqa: F401
+from .ws import (  # noqa: F401
+    RxWSClient,
+    RxWSClientGroup,
+    RxWSServer,
+    WSChannels,
+    WSConnectionConfig,
+    WSConnectionState,
+    WSDatatype,
+    WSStr,
+)
 
 # =============================================================================
 # Audio exports (optional - requires rxplus[audio])
@@ -131,6 +140,9 @@ __all__ = [
     "ErrorRestartSignal",
     "retry_with_signal",
     # WebSocket
+    "WSConnectionConfig",
+    "WSConnectionState",
+    "WSChannels",
     "WSDatatype",
     "WSStr",
     "RxWSServer",

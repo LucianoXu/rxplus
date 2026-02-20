@@ -25,6 +25,9 @@ def test_basic_imports():
     assert hasattr(rxplus, "RxWSServer")
     assert hasattr(rxplus, "RxWSClient")
     assert hasattr(rxplus, "RxWSClientGroup")
+    assert hasattr(rxplus, "WSConnectionConfig")
+    assert hasattr(rxplus, "WSConnectionState")
+    assert hasattr(rxplus, "WSChannels")
 
     # Duplex exports
     assert hasattr(rxplus, "Duplex")
@@ -101,6 +104,9 @@ def test_all_exports():
         "RxWSServer",
         "RxWSClient",
         "RxWSClientGroup",
+        "WSConnectionConfig",
+        "WSConnectionState",
+        "WSChannels",
         "Duplex",
         "make_duplex",
         "connect_adapter",
