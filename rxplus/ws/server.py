@@ -377,7 +377,7 @@ class RxWSServer(Subject, OTelLoggingMixin):
                 ping_interval=self.ping_interval,
                 ping_timeout=self.ping_timeout,
                 max_size=None,
-                process_request=self._process_request,  # type: ignore[arg-type]
+                process_request=self._process_request,
             )
             if dual_sock is not None:
                 serve_kwargs["sock"] = dual_sock
