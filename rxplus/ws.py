@@ -9,6 +9,7 @@ threaded Observable/Observer (similar to `rx.interval` on a new thread).
 import asyncio
 import pickle
 import random
+import socket
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -501,18 +502,47 @@ class RxWSServer(Subject):
         except asyncio.CancelledError:
             raise
 
+    def _make_dual_stack_socket(self) -> socket.socket | None:
+        """Create a dual-stack IPv6 socket if the host is an IPv6 wildcard.
+
+        Returns a bound, listening socket with ``IPV6_V6ONLY=0`` so that both
+        IPv4 and IPv6 clients can connect.  Returns ``None`` when the host is
+        not an IPv6 wildcard address.
+        """
+        if self.host not in ("::", "::0"):
+            return None
+
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Accept both IPv4 and IPv6 connections on the same socket.
+        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        sock.bind((self.host, self.port))
+        sock.listen(100)
+        sock.setblocking(False)
+        return sock
+
     async def start_server(self):
         """Create the asyncio WebSocket server on the private loop."""
         try:
-            self.serve = await websockets.serve(
-                self.handle_client,
-                self.host,
-                self.port,
+            dual_sock = self._make_dual_stack_socket()
+            serve_kwargs: dict[str, Any] = dict(
                 ping_interval=self.ping_interval,
                 ping_timeout=self.ping_timeout,
                 max_size=None,
                 process_request=self._process_request,
             )
+            if dual_sock is not None:
+                serve_kwargs["sock"] = dual_sock
+                self.serve = await websockets.serve(
+                    self.handle_client, **serve_kwargs,
+                )
+            else:
+                self.serve = await websockets.serve(
+                    self.handle_client,
+                    self.host,
+                    self.port,
+                    **serve_kwargs,
+                )
             self._log(
                 f"WebSocket server started on {self.host}:{self.port}", "INFO"
             )
