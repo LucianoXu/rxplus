@@ -5,9 +5,10 @@ which runs a websockets server on a background thread.
 """
 
 import asyncio
+import socket
 import threading
 from collections.abc import Callable
-from typing import Literal
+from typing import Any, Literal
 
 import websockets
 from opentelemetry._logs import LoggerProvider
@@ -349,18 +350,48 @@ class RxWSServer(Subject, OTelLoggingMixin):
         except asyncio.CancelledError:
             raise
 
+    def _make_dual_stack_socket(self) -> socket.socket | None:
+        """Create a dual-stack IPv6 socket if the host is an IPv6 wildcard.
+
+        Returns a bound, listening socket with ``IPV6_V6ONLY=0`` so that both
+        IPv4 and IPv6 clients can connect.  Returns ``None`` when the host is
+        not an IPv6 wildcard address.
+        """
+        if self.host not in ("::", "::0"):
+            return None
+
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Accept both IPv4 and IPv6 connections on the same socket.
+        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        sock.bind((self.host, self.port))
+        sock.listen(100)
+        sock.setblocking(False)
+        return sock
+
     async def start_server(self) -> None:
         """Create the asyncio WebSocket server on the private loop."""
         try:
-            self.serve = await websockets.serve(
-                self.handle_client,  # type: ignore[arg-type]
-                self.host,
-                self.port,
+            dual_sock = self._make_dual_stack_socket()
+            serve_kwargs: dict[str, Any] = dict(
                 ping_interval=self.ping_interval,
                 ping_timeout=self.ping_timeout,
                 max_size=None,
                 process_request=self._process_request,  # type: ignore[arg-type]
             )
+            if dual_sock is not None:
+                serve_kwargs["sock"] = dual_sock
+                self.serve = await websockets.serve(
+                    self.handle_client,  # type: ignore[arg-type]
+                    **serve_kwargs,
+                )
+            else:
+                self.serve = await websockets.serve(
+                    self.handle_client,  # type: ignore[arg-type]
+                    self.host,
+                    self.port,
+                    **serve_kwargs,
+                )
             self._log(f"WebSocket server started on {self.host}:{self.port}", "INFO")
         except OSError as e:
             self._log(
