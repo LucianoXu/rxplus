@@ -23,6 +23,7 @@ from .logger import (
     format_log_record_json,
 )
 from .metrics import MetricsHelper
+from .tracing import traced_batch_operator, traced_operator
 
 __all__ = [
     # config
@@ -40,4 +41,7 @@ __all__ = [
     "LOG_FORMAT",
     # metrics
     "MetricsHelper",
+    # tracing operators
+    "traced_operator",
+    "traced_batch_operator",
 ]
