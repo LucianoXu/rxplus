@@ -101,6 +101,12 @@ class Accumulator:
         with self._lock:
             if session != self._session:
                 return  # from a session that ended: ignore it
+            if not self._flagged:
+                # On the busy deque *before* the counts are written: the
+                # clock thread then always finds this accumulator, and its
+                # close() waits for this lock (finding N4).
+                self._flagged = True
+                self._busy.append(self.ident)  # deque.append is thread-safe
             closed = self._shared.closed
             if k < closed:
                 # The clock thread closed this window after the caller read
@@ -125,9 +131,6 @@ class Accumulator:
                 t.lat_sum += duration
                 if duration > t.lat_max:
                     t.lat_max = duration
-            if not self._flagged:
-                self._flagged = True
-                self._busy.append(self.ident)  # deque.append is thread-safe
 
     # ------------------------------------------------------- clock thread only
 
@@ -144,6 +147,23 @@ class Accumulator:
         with self._lock:
             return min(self._windows) if self._windows else None
 
+    def pending(self) -> int:
+        """Number of windows holding counts (memory held for this id)."""
+        with self._lock:
+            return len(self._windows)
+
+    def drop_windows(self, before: int) -> int:
+        """Discard every window below ``before`` (Loss, finding N3); return
+        how many were discarded. The counted backlog is kept."""
+        with self._lock:
+            gone = [i for i in self._windows if i < before]
+            for i in gone:
+                del self._windows[i]
+            if not self._windows:
+                self._flagged = False
+            self._last_nonzero = False  # the recovery snapshot resets backlogs
+            return len(gone)
+
     def watched(self) -> bool:
         """Whether a depth signal may be due at every boundary."""
         with self._lock:
@@ -157,6 +177,22 @@ class Accumulator:
         """
         with self._lock:
             totals = self._windows.pop(k, None)
+            # Windows below k that are still here were recorded by a caller
+            # that read `closed` just before the clock thread advanced it:
+            # they count in window k (R3), never stranded.
+            for i in [i for i in self._windows if i < k]:
+                late = self._windows.pop(i)
+                if totals is None:
+                    totals = Totals()
+                totals.items += late.items
+                totals.bytes += late.bytes
+                totals.sized = totals.sized or late.sized
+                totals.dropped += late.dropped
+                totals.coalesced += late.coalesced
+                totals.lat_count += late.lat_count
+                totals.lat_sum += late.lat_sum
+                totals.lat_max = max(totals.lat_max, late.lat_max)
+                totals.delta += late.delta
             if sample is not None:
                 backlog = sample
             else:

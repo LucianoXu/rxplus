@@ -95,10 +95,15 @@ def r_ids(r, prefix: str) -> list[str]:
 def test_window_boundaries_do_not_drift(tmp_path):
     r, sink, clock = make(window=0.1)
     link = r.link(r.element("A"), r.element("B"))
-    clock.advance(100_000.05)  # a million windows later
+    for _ in range(16_667):  # a million windows, polled every 60 (keeping up)
+        clock.advance(6.0)
+        r.poll()
+    clock.advance(0.05)
     link.deliver()
     clock.advance(0.1)
     r.poll()
     (flow,) = by_type(sink.signals(), "flow")
-    assert flow["t0"] == r._st.T + 1_000_000 * 0.1
+    k = round((flow["t0"] - r._st.T) / 0.1)
+    assert k > 1_000_000
+    assert flow["t0"] == r._st.T + k * 0.1  # computed, never accumulated
     conform(sink, tmp_path)

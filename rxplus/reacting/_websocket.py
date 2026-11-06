@@ -209,13 +209,18 @@ class WSConnection:
         self._send(_TEXT, text.encode("utf-8"))
 
     def close(self, code: int = 1000) -> None:
-        """Send a Close frame (bounded by the send timeout) and release the
-        socket."""
-        if not self.closed:
+        """Send a Close frame if the connection is idle, and release the
+        socket. Never waits for a send in progress (a writer stuck on a peer
+        that stopped reading): the socket is shut down under it instead."""
+        if not self.closed and self._send_lock.acquire(blocking=False):
             try:
-                self._send(_CLOSE, struct.pack("!H", code))
+                if not self._close_sent:
+                    self._close_sent = True
+                    self._sock.sendall(_frame(_CLOSE, struct.pack("!H", code)))
             except OSError:
                 pass
+            finally:
+                self._send_lock.release()
         self.abort()
 
     def abort(self) -> None:

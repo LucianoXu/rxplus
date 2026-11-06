@@ -22,7 +22,9 @@ one step of each, for deterministic tests.
 """
 
 import atexit
+import os
 import threading
+import time
 import weakref
 from collections import deque
 from collections.abc import Callable
@@ -45,6 +47,8 @@ from .sinks import Sink
 
 _NOTIFY_EVENTS = 4096  # wake the clock thread early when this many are pending
 _MAX_IDLE = 0.05  # longest sleep of the clock thread, seconds
+_MAX_LAG = 64  # windows the clock thread may fall behind before Loss
+_MAX_PENDING = 100_000  # window totals it may hold (lag x busy) before Loss
 
 type _Sampler = Callable[[], int]
 
@@ -142,7 +146,7 @@ class Reporter:
                 th.start()
         else:
             self.poll()
-        atexit.register(_close_at_exit, weakref.ref(self))
+        _REPORTERS.add(self)
 
     # ------------------------------------------------------------------ public
 
@@ -245,17 +249,25 @@ class Reporter:
         if self._closed:
             return
         if self._threads:
+            # One deadline for the whole close (finding N1).
+            deadline = time.monotonic() + max(timeout, 0.0)
+
+            def left() -> float:
+                return max(deadline - time.monotonic(), 0.0)
+
             clock, writer = self._threads
             with self._lock:
                 self._closing = True
                 self._cond.notify_all()
-            clock.join(timeout)
+            clock.join(left())
             with self._qcond:
                 self._qcond.notify_all()
-            writer.join(timeout)
+            writer.join(left())
             if writer.is_alive():
-                _call(self._sink.close)  # unblocks a write stuck on the network
-                writer.join(0.5)
+                # The writer is stuck on the network: the sink's close never
+                # waits for it (it shuts the socket down), which unblocks it.
+                _call(self._sink.close)
+                writer.join(min(left(), 0.1))
         else:
             self.poll()
             self._closing = True
@@ -292,6 +304,8 @@ class Reporter:
     ) -> None:
         """Append an event stamped now (caller holds the lock, so events are
         in ``t`` order)."""
+        if self._closed:
+            return  # nobody will process it (closed, or a forked child)
         self._events.append(_Event(kind, self._st.now(), data))
         if len(self._events) >= _NOTIFY_EVENTS:
             self._cond.notify_all()
@@ -461,6 +475,12 @@ class Reporter:
         k = st.closed
         if end <= k:
             return
+        self._drain_busy()
+        if end - k > _MAX_LAG or (end - k) * len(self._busy_ids) > _MAX_PENDING:
+            # The clock thread fell behind by more windows than it may keep
+            # counts for: treat the backlog of windows as Loss (finding N3).
+            self._lose_windows(end)
+            return
         # From here on, a late hot-path event for a window < end counts in
         # window `end` (accumulators read st.closed under their lock).
         st.closed = end
@@ -484,10 +504,39 @@ class Reporter:
             self._close_one(k)
             k += 1
 
+    def _lose_windows(self, end: int) -> None:
+        """Skip windows below ``end`` as Loss: discard their counts, leave a
+        ``seq`` gap of at least the number of windows dropped, resend a
+        snapshot. Keeps accumulator memory bounded when the clock lags."""
+        st = self._st
+        skipped = end - st.closed
+        st.closed = end  # late events now count in window `end`
+        self._drain_busy()
+        lost = 0
+        for ident in self._busy_ids | self._watched:
+            acc = self._accs.get(ident)
+            if acc is not None:
+                lost += acc.drop_windows(end)
+        lost += skipped * len(self._watched)  # depth signals not created
+        self._busy_ids = {
+            i for i in self._busy_ids if (a := self._accs.get(i)) and a.pending()
+        }
+        self._watched = {i for i in self._watched if i in self._accs}
+        self._seq += max(lost, 1)
+        t = st.T + end * st.w
+        attrs: Signal = {"protocol": PROTOCOL}
+        if self._label is not None:
+            attrs["label"] = self._label
+        attrs.update(self._mirror.snapshot(t, new_session=False))
+        self._emit("snapshot", t, attrs, exempt=True)
+
     def _drain_busy(self) -> None:
         busy = self._busy
+        accs = self._accs
         while busy:
-            self._busy_ids.add(busy.popleft())
+            ident = busy.popleft()
+            if ident in accs:  # a removed handle's late entry is dropped (N5)
+                self._busy_ids.add(ident)
 
     def _close_one(self, k: int) -> None:
         st = self._st
@@ -498,7 +547,12 @@ class Reporter:
             if st.session != session:
                 return  # a Loss began a new session: these windows are gone
             acc = self._accs.get(ident)
-            if acc is None or not self._mirror.exists(ident):
+            if acc is None:
+                # Removed: forget it (it was leaking one entry per removal).
+                self._busy_ids.discard(ident)
+                self._watched.discard(ident)
+                continue
+            if not self._mirror.exists(ident):
                 continue
             sample = None
             if acc.sampler is not None:
@@ -544,7 +598,14 @@ class Reporter:
             if acc.next_window() is None:
                 self._busy_ids.discard(ident)
 
-    def _emit(self, typ: str, t: float, attrs: Signal, opening: bool = False) -> None:
+    def _emit(
+        self,
+        typ: str,
+        t: float,
+        attrs: Signal,
+        opening: bool = False,
+        exempt: bool = False,
+    ) -> None:
         """Create one signal; Loss when the queue overflows (spec, Loss)."""
         if not self._session_open:
             return
@@ -556,7 +617,10 @@ class Reporter:
             self._q.append((line, opening, self._session_epoch))
             if opening:
                 self._opening_queued = True
-            if len(self._q) <= 1 or len(self._q) + self._inflight <= self._queue_limit:
+            # A snapshot that follows a Loss (or opens a session) is never
+            # itself discarded; every other line counts strictly, the batch
+            # in flight included.
+            if exempt or opening or len(self._q) + self._inflight <= self._queue_limit:
                 self._qcond.notify()
                 return
             restart = self._opening_queued
@@ -571,7 +635,7 @@ class Reporter:
             if self._label is not None:
                 attrs["label"] = self._label
             attrs.update(self._mirror.snapshot(t, new_session=False))
-            self._emit("snapshot", t, attrs)
+            self._emit("snapshot", t, attrs, exempt=True)
 
     # ------------------------------------------------------------------ writer
 
@@ -670,10 +734,37 @@ def _call(fn: Callable[[], object]) -> object:
         return None
 
 
-def _close_at_exit(ref: "weakref.ReferenceType[Reporter]") -> None:
-    reporter = ref()
-    if reporter is not None:
+_REPORTERS: "weakref.WeakSet[Reporter]" = weakref.WeakSet()
+
+
+@atexit.register
+def _close_at_exit() -> None:
+    """Close every open reporter at interpreter exit (flushes file sinks)."""
+    for reporter in list(_REPORTERS):
         reporter.close(timeout=1.0)
+
+
+def _disable_after_fork() -> None:
+    """In a forked child, every reporter of the parent is disabled.
+
+    The child has no clock or writer thread, and it must not touch the
+    parent's connection (closing a shared socket would shut it down for the
+    parent too). Its reporters report nothing; a child that wants to report
+    creates its own reporter.
+    """
+    for reporter in list(_REPORTERS):
+        reporter._st.live = False
+        reporter._closing = True
+        reporter._closed = True
+        reporter._threads = []
+        reporter._events = []
+        reporter._accs.clear()
+        reporter._q.clear()
+    _REPORTERS.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_disable_after_fork)
 
 
 __all__ = ["LinkKind", "Reporter"]

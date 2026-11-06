@@ -463,3 +463,185 @@ def test_file_sink_format(tmp_path):
         raw.endswith(b"\n") and b"\r" not in raw and not raw.startswith(b"\xef\xbb\xbf")
     )
     assert "😀".encode() in raw
+
+
+# ------------------------------------------------------ re-review of #22
+
+
+def test_a_lagging_clock_turns_old_windows_into_loss(tmp_path):
+    # N3: windows the clock thread could not close in time are not kept
+    # without bound; they become a Loss (seq gap + snapshot).
+    r, sink, clock = make(window=0.1)
+    links = [r.link(r.element(f"A{i}"), r.element(f"B{i}")) for i in range(20)]
+    r.poll()
+    for _ in range(200):  # 200 windows of counts, never closed
+        for link in links:
+            link.deliver()
+        clock.advance(0.1)
+    assert max(link._acc.pending() for link in links) <= 200
+    r.poll()
+    assert max(link._acc.pending() for link in links) == 0
+    sigs = sink.signals()
+    seqs = [s["seq"] for s in sigs]
+    gap = [i for i in range(1, len(seqs)) if seqs[i] != seqs[i - 1] + 1]
+    assert gap and sigs[gap[0]]["type"] == "snapshot"
+    links[0].deliver()
+    clock.advance(0.1)
+    r.poll()
+    assert by_type(sink.signals(), "flow")  # reporting resumes
+    conform(sink, tmp_path)
+
+
+def test_late_record_racing_the_clock_is_not_stranded(tmp_path):
+    # N4: a record whose counts land after the clock closed that window is
+    # counted in a later window, never left behind.
+    r, sink, clock = make(window=0.1)
+    a, b, c = r.element("A"), r.element("B"), r.element("C")
+    l1, l2 = r.link(a, b), r.link(b, c)
+    r.poll()
+
+    class Busy(deque):
+        hit = False
+
+        clock_thread: threading.Thread | None = None
+
+        def append(self, ident: str) -> None:
+            super().append(ident)
+            if ident == l1.id and not Busy.hit:
+                Busy.hit = True
+                clock.advance(0.1)  # the window ends ...
+                # ... and the clock thread closes it while this record still
+                # holds the accumulator lock (a GIL switch at this point).
+                Busy.clock_thread = threading.Thread(target=r._step)
+                Busy.clock_thread.start()
+                time.sleep(0.1)
+
+    busy = Busy(r._busy)
+    r._busy = busy
+    for acc in r._accs.values():
+        acc._busy = busy
+    clock.advance(0.05)
+    l2.deliver()
+    l1.deliver(5)
+    assert Busy.clock_thread is not None
+    Busy.clock_thread.join(5)
+    for _ in range(3):
+        clock.advance(0.1)
+        r.poll()
+    reported = sum(
+        f["items"] for f in by_type(sink.signals(), "flow") if f["link"] == l1.id
+    )
+    assert reported == 5
+    assert l1._acc.pending() == 0
+    conform(sink, tmp_path)
+
+
+def test_removed_handles_leave_the_busy_set():
+    # N5: one entry leaked per removal.
+    r, sink, clock = make(window=0.1)
+    for _ in range(50):
+        link = r.link(r.element("A"), r.element("B"))
+        link.deliver()
+        link.remove()
+        clock.advance(0.1)
+        r.poll()
+    clock.advance(0.2)
+    r.poll()
+    assert len(r._busy_ids) <= 1
+
+
+def test_queue_of_one_never_holds_two_unwritten(tmp_path):
+    r, sink, clock = make(queue=1)
+    sink.hold()
+    # (timer=False: nothing is in flight; the bound is on the queue itself)
+    for i in range(5):
+        r.element(f"E{i}")
+    r._step()
+    assert len(r._q) <= 1 + 1  # at most the recovery snapshot beyond the bound
+    sink.release()
+    r.poll()
+    conform(sink, tmp_path)
+
+
+def test_close_honours_its_timeout_with_a_stalled_observer():
+    # N1: close(timeout=1.0) took 8 s: sink.close() waited for the send lock.
+    server = RawServer("noread")
+    r = Reporter("ex", WebSocketSink(server.url), window=0.1, queue=2000)
+    elements = [r.element(f"Element-with-a-longish-label-{i}") for i in range(1000)]
+    links = [r.link(elements[i], elements[i + 1]) for i in range(999)]
+    end = time.time() + 2.0
+    while time.time() < end:
+        for link in links:
+            link.deliver()
+    start = time.perf_counter()
+    r.close(timeout=1.0)
+    assert time.perf_counter() - start < 1.6
+    server.stop()
+
+
+def test_interpreter_exit_with_a_stalled_observer_is_bounded():
+    server = RawServer("noread")
+    code = textwrap.dedent(
+        f"""
+        import time
+        from rxplus.reacting import Reporter, WebSocketSink
+        r = Reporter("ex", WebSocketSink({server.url!r}), queue=2000)
+        els = [r.element(f"Element-with-a-longish-label-{{i}}") for i in range(1000)]
+        links = [r.link(els[i], els[i + 1]) for i in range(999)]
+        end = time.time() + 2.0
+        while time.time() < end:
+            for link in links:
+                link.deliver()
+        """
+    )
+    start = time.perf_counter()
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert time.perf_counter() - start < 5.0  # 2 s of work + a bounded close
+    server.stop()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+def test_a_forked_child_reports_nothing_and_leaves_the_parent_alone():
+    # N2.
+    server = RawServer("normal")
+    sink = WebSocketSink(server.url)
+    r = Reporter("fk", sink, window=0.01)
+    a, b = r.element("A"), r.element("B")
+    link = r.link(a, b)
+    assert _wait_for(lambda: r.live)
+    read, write = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # the child
+        ok = not r.live
+        for _ in range(20_000):
+            link.deliver()
+            a.span("x").end()
+        ok = ok and not r._events and not r._accs
+        os.write(write, b"1" if ok else b"0")
+        os._exit(0)  # without atexit; a normal exit is covered by _closed
+    os.close(write)
+    child_ok = os.read(read, 1)
+    os.waitpid(pid, 0)
+    time.sleep(0.3)
+    assert child_ok == b"1"
+    assert r.live and sink.is_open()  # the parent's connection is untouched
+    assert server.connections == 1
+    r.close()
+    server.stop()
+
+
+def test_close_folds_windows_left_behind_by_a_late_record():
+    # N4, the residual race: counts recorded into window 0 after the clock
+    # moved on are reported with the next window it closes.
+    class Shared:
+        closed = 0
+
+    shared = Shared()
+    acc = Accumulator("l1", deque(), shared)
+    acc.start_session(1)
+    acc.record(1, 0, items=3)  # read closed == 0 ...
+    shared.closed = 2  # ... the clock already closed windows 0 and 1
+    res = acc.close(2, None)
+    assert res.totals is not None and res.totals.items == 3
+    assert acc.pending() == 0
