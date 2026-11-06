@@ -14,7 +14,7 @@ import scipy
 import soundfile as sf
 from reactivex import Observable, Subject
 from reactivex.disposable import CompositeDisposable, Disposable
-from reactivex.scheduler import ThreadPoolScheduler
+from reactivex.scheduler import NewThreadScheduler
 from reactivex.scheduler.eventloop import AsyncIOScheduler
 
 from .mechanism import RxException
@@ -414,7 +414,10 @@ def create_wavfile(
             or (
                 AsyncIOScheduler(loop)  # type: ignore[arg-type]
                 if running
-                else ThreadPoolScheduler(1)
+                # One short-lived thread per subscription. A new
+                # ThreadPoolScheduler(1) per subscription was never shut
+                # down and left an idle worker thread behind every time.
+                else NewThreadScheduler()
             )
         )
 
