@@ -75,7 +75,7 @@ jobs:
           pip install -e ".[all,dev]"
 
       - name: Run tests
-        run: pytest -v --tb=long --ignore=tests/test_mechanism.py 2>&1 | tee test-output.txt
+        run: pytest -v --tb=long 2>&1 | tee test-output.txt
 
       - name: Upload test output
         if: failure()
@@ -100,4 +100,4 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run basic tests
-        run: pytest -v --tb=short --ignore=tests/test_audio.py --ignore=tests/test_graphic.py --ignore=tests/test_mechanism.py
+        run: pytest -v --tb=short --ignore=tests/test_audio.py --ignore=tests/test_graphic.py
