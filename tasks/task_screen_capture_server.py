@@ -8,6 +8,7 @@ from rxplus import (
     BandwidthMonitor,
     FPSMonitor,
     RxWSServer,
+    WSConnectionConfig,
     create_screen_capture,
     rgb_ndarray_to_jpeg_bytes,
     tag,
@@ -31,10 +32,10 @@ def build_parser(subparsers: argparse._SubParsersAction):
 
 def task(parsed_args: argparse.Namespace):
     sender = RxWSServer(
-        {
-            "host": parsed_args.host,
-            "port": parsed_args.port,
-        },
+        WSConnectionConfig(
+            host=parsed_args.host,
+            port=parsed_args.port,
+        ),
         datatype="bytes",
     )
 

@@ -3,7 +3,7 @@ import time
 from typing import get_args
 
 import rxplus
-from rxplus import RxSpeaker, RxWSClient
+from rxplus import RxSpeaker, RxWSClient, WSConnectionConfig
 
 
 def build_parser(subparsers: argparse._SubParsersAction):
@@ -24,10 +24,10 @@ def build_parser(subparsers: argparse._SubParsersAction):
 
 def task(parsed_args: argparse.Namespace):
     client = RxWSClient(
-        {
-            "host": parsed_args.host,
-            "port": parsed_args.port,
-        },
+        WSConnectionConfig(
+            host=parsed_args.host,
+            port=parsed_args.port,
+        ),
         datatype="bytes",
     )
 

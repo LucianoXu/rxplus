@@ -3,7 +3,7 @@ import time
 
 from reactivex import operators as ops
 
-from rxplus import RxWSClient, jpeg_bytes_to_rgb_ndarray
+from rxplus import RxWSClient, WSConnectionConfig, jpeg_bytes_to_rgb_ndarray
 
 
 def build_parser(subparsers: argparse._SubParsersAction):
@@ -16,10 +16,10 @@ def build_parser(subparsers: argparse._SubParsersAction):
 
 def task(parsed_args: argparse.Namespace):
     client = RxWSClient(
-        {
-            "host": parsed_args.host,
-            "port": parsed_args.port,
-        },
+        WSConnectionConfig(
+            host=parsed_args.host,
+            port=parsed_args.port,
+        ),
         datatype="bytes",
     )
 

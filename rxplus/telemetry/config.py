@@ -63,7 +63,7 @@ def configure_telemetry(
         ... )
         >>>
         >>> server = RxWSServer(
-        ...     {"host": "::", "port": 8888},
+        ...     WSConnectionConfig("::", 8888),
         ...     tracer_provider=tracer_provider,
         ...     logger_provider=logger_provider,
         ... )

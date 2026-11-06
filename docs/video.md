@@ -112,10 +112,15 @@ frame = png_bytes_to_rgb_ndarray(png)  # [H, W, 3] uint8
 ## Example: Screen Streaming
 
 ```python
-from rxplus import create_screen_capture, rgb_ndarray_to_jpeg_bytes, RxWSClient, TaggedData
+from rxplus import (
+    RxWSClient,
+    WSConnectionConfig,
+    create_screen_capture,
+    rgb_ndarray_to_jpeg_bytes,
+)
 from reactivex import operators as ops
 
-client = RxWSClient({"host": "server", "port": 8765, "path": "/screen"}, datatype="bytes")
+client = RxWSClient(WSConnectionConfig("server.example", 8765, "/screen"), datatype="bytes")
 
 create_screen_capture(fps=15.0).pipe(
     ops.map(lambda f: rgb_ndarray_to_jpeg_bytes(f, quality=70)),

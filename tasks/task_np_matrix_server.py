@@ -3,7 +3,7 @@ import time
 
 import numpy as np
 
-from rxplus import RxWSServer, TaggedData
+from rxplus import RxWSServer, TaggedData, WSConnectionConfig
 
 
 def build_parser(subparsers: argparse._SubParsersAction):
@@ -41,10 +41,10 @@ def _make_random_matrix(
 def task(parsed_args: argparse.Namespace):
 
     sender = RxWSServer(
-        {
-            "host": parsed_args.host,
-            "port": parsed_args.port,
-        },
+        WSConnectionConfig(
+            host=parsed_args.host,
+            port=parsed_args.port,
+        ),
         datatype="object",
     )
 

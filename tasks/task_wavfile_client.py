@@ -3,7 +3,7 @@ import time
 from typing import get_args
 
 import rxplus
-from rxplus import RxWSClient, save_wavfile
+from rxplus import RxWSClient, WSConnectionConfig, save_wavfile
 
 
 def build_parser(subparsers: argparse._SubParsersAction):
@@ -25,10 +25,10 @@ def build_parser(subparsers: argparse._SubParsersAction):
 
 def task(parsed_args: argparse.Namespace):
     client = RxWSClient(
-        {
-            "host": parsed_args.host,
-            "port": parsed_args.port,
-        },
+        WSConnectionConfig(
+            host=parsed_args.host,
+            port=parsed_args.port,
+        ),
         datatype="bytes",
     )
 
