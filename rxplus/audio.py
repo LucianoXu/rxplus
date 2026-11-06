@@ -144,6 +144,18 @@ def convert_audio_format(
         raise ValueError(f"Unexpected target format: {target_format}")
 
 
+def _cast_like(x: np.ndarray, dtype: np.dtype) -> np.ndarray:
+    """Cast filter output back to ``dtype``, saturating integer types.
+
+    Filtering overshoots near full scale (ringing); a plain ``astype`` to an
+    integer type would wrap such samples around to the opposite sign.
+    """
+    if np.issubdtype(dtype, np.integer):
+        info = np.iinfo(dtype)
+        x = np.clip(x, info.min, info.max)
+    return x.astype(dtype, copy=False)
+
+
 def resample_audio(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
     """Resample audio to a new sample rate using ``scipy.signal.resample_poly``.
 
@@ -163,7 +175,7 @@ def resample_audio(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarra
     down //= factor
 
     resampled = scipy.signal.resample_poly(audio, up, down, axis=0)
-    return resampled.astype(audio.dtype, copy=False)
+    return _cast_like(resampled, audio.dtype)
 
 
 class StreamingResampler:
@@ -269,7 +281,7 @@ class StreamingResampler:
             self._decim_phase = (self._decim_phase + len(x)) % self._down
             x = result
 
-        return x.astype(original_dtype, copy=False)
+        return _cast_like(x, original_dtype)
 
     def reset(self) -> None:
         """Reset the internal filter state and decimation phase."""
@@ -420,7 +432,7 @@ def create_wavfile(
 
             try:
                 count = 0
-                while not disposed and count * frames_per_chunk <= len(audio):
+                while not disposed and count * frames_per_chunk < len(audio):
                     # slice the wav and push
                     observer.on_next(
                         audio[count * frames_per_chunk : (count + 1) * frames_per_chunk]
@@ -654,7 +666,12 @@ class RxSpeaker(Subject):
 
     def on_completed(self) -> None:
         """Signal the playback thread to finish and clean up resources."""
-        self._queue.put_nowait(self._SENTINEL)
+        try:
+            # Wait for room behind the queued frames; with a full queue
+            # put_nowait raised queue.Full and nothing was cleaned up.
+            self._queue.put(self._SENTINEL, timeout=5.0)
+        except queue.Full:
+            pass
         self._playback_thread.join(timeout=5.0)
         self._teardown()
         super().on_completed()
