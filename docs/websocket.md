@@ -12,13 +12,13 @@ Data framing is abstracted via `WSDatatype` adapters supporting strings, raw byt
 
 ```python
 from rxplus import (
-    RetryPolicy,
     RxWSClient,
     RxWSClientGroup,
     RxWSServer,
     TaggedData,
     WSConnectionConfig,
 )
+from rxplus.ws import RetryPolicy
 ```
 
 ### Connection Configuration
