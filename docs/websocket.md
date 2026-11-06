@@ -115,3 +115,12 @@ group.subscribe(lambda td: print(f"[{td.tag}] received"))
 ## Threading Model
 
 Each `RxWSServer` / `RxWSClient` spawns a daemon thread running `asyncio.run_forever()`. All WebSocket I/O happens on that thread; Rx callbacks are invoked from there. Use schedulers if you need to marshal data to a specific thread.
+
+## Reconnection
+
+`RxWSClient` (and each child of `RxWSClientGroup`) retries according to its `RetryPolicy`:
+
+- One attempt (TCP connect plus handshake) may take at most `open_timeout` seconds (default `10.0`; `None` waits indefinitely). It is independent of the retry delays.
+- A failed attempt waits `RetryPolicy.get_delay(attempt)` (exponential backoff with jitter) before the next one.
+- A connection that stayed open at least `RetryPolicy.stable_after` seconds (default `1.0`) resets the backoff and is re-established at once when it drops. A connection that closes sooner counts as a failed attempt, so a server that accepts and immediately closes is retried with backoff rather than in a tight loop.
+- Every failed attempt counts toward `RetryPolicy.max_retries`, and so does every connection that closes within `stable_after`: with `max_retries=3`, a server that keeps accepting and closing at once ends the client with an error after three such drops. A stable connection that drops resets the count.

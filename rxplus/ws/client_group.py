@@ -51,6 +51,8 @@ class RxWSClientGroup(Subject):
         Custom name for log source identification. Child clients will use
         ``"{name}:{path}"`` as their source name. If not provided, child
         clients use their default naming.
+    open_timeout : float | None
+        Forwarded to child clients: maximum time for one connection attempt.
 
     Notes
     -----
@@ -72,6 +74,7 @@ class RxWSClientGroup(Subject):
         buffer_while_disconnected: bool = False,
         tracer_provider: TracerProvider | None = None,
         logger_provider: LoggerProvider | None = None,
+        open_timeout: float | None = 10.0,
     ):
         super().__init__()
 
@@ -103,6 +106,7 @@ class RxWSClientGroup(Subject):
                 buffer_while_disconnected=buffer_while_disconnected,
                 tracer_provider=tracer_provider,
                 logger_provider=logger_provider,
+                open_timeout=open_timeout,
             )
 
         self._client_factory = make_client
