@@ -136,7 +136,8 @@ def test_spans_on_threads_with_reconnects_conform(queue, tmp_path):
     for _ in range(10):
         time.sleep(0.05)
         sink.disconnect()
-        time.sleep(0.02)
+        # A drop the writer never sees (no write while it lasts) is no drop.
+        assert _wait_for(lambda: not r.live)
         sink.connect()
     stop.set()
     for t in threads:
@@ -721,3 +722,38 @@ def test_catch_up_that_falls_further_behind_becomes_loss(tmp_path):
     sigs = sink.signals()
     assert any(s["type"] == "snapshot" and s["seq"] > 0 for s in sigs)  # a Loss
     conform(sink, tmp_path)
+
+
+def test_loss_with_events_pending_keeps_t_monotone_and_the_graph(tmp_path):
+    # Re-review B: a Loss up to the current window while changes of the same
+    # step are still to be emitted: they go into the snapshot, never after it.
+    clock = ManualClock()
+    sink = MemorySink()
+    r = Reporter("test", sink, window=0.1, clock=clock, timer=False)
+    links = [r.link(r.element(f"A{i}"), r.element(f"B{i}")) for i in range(50)]
+    r.poll()
+    for _ in range(30):
+        for link in links:
+            link.deliver()
+        clock.advance(0.1)
+    late = [r.element(f"late{i}") for i in range(5)]  # pending in this step
+    st = r._st
+    orig = st.monotonic
+
+    def fast() -> float:
+        value = orig()
+        clock.advance(0.3)  # time runs away while the clock thread catches up
+        return value
+
+    st.monotonic = fast
+    r._step()
+    st.monotonic = orig
+    r.element("after")
+    clock.advance(0.2)
+    r.poll()
+    sigs = sink.signals()
+    ts = [s["t"] for s in sigs]
+    assert ts == sorted(ts)
+    state = conform(sink, tmp_path)
+    ids = {e["id"] for e in state["elements"]}
+    assert all(e.id in ids for e in late)

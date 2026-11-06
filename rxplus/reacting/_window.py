@@ -45,6 +45,8 @@ class WindowResult:
 
     totals: Totals | None
     depth: int | None  # backlog at the window's end; None: emit no depth
+    watched: bool = False  # a depth signal may be due at the next boundary
+    empty: bool = True  # no window with counts is left
 
 
 class Accumulator:
@@ -210,6 +212,10 @@ class Accumulator:
             else:
                 depth = None
             self._last_nonzero = backlog != 0
-            if not self._windows:
+            empty = not self._windows
+            if empty:
                 self._flagged = False  # the next event puts it on busy again
-            return WindowResult(totals, depth)
+            watched = (
+                self._last_nonzero or self._backlog != 0 or self.sampler is not None
+            )
+            return WindowResult(totals, depth, watched, empty)

@@ -104,6 +104,28 @@ Sinks:
   session: non-empty where required, no `/` in IDs, and encodable as UTF-8. A lone surrogate from
   `os.fsdecode` of a non-UTF-8 name raises `ValueError` at the call, never later.
 
+## Limits
+
+The clock thread closes each window in O(busy elements and links), at roughly 10–40 µs per busy one on
+CPython. Above a few thousand busy links per window it may fall behind. Rather than hold counts without
+bound, it turns the backlog into a **Loss**:
+
+| Limit | Value | Meaning |
+|---|---|---|
+| `queue` | your option (default 10 000) | lines created and not yet written, the batch being written included; above it, Loss |
+| lag | 64 windows | windows that ended but are not closed yet; above it, Loss |
+| pending window totals | 100 000 | estimated as busy elements and links × windows outstanding, checked every 1 000 elements or links while closing; above it, Loss |
+
+A Loss from the clock lagging gives up every window up to the current one and discards their counts. It
+applies every change not yet emitted (structural changes, span starts and ends) to the graph without its
+own signal, and sends a snapshot taken now, which includes those changes. The `seq` gap is at least the
+number of signals not sent, so observers see the loss; `t` never decreases. Each window total costs about
+160 bytes (measured), so the counts held stay under about 16 MB plus one check interval's worth.
+
+Measured with the reviewers' load probe: 4 threads delivering on random links, window 0.1 s, 30 s. Peak
+pending totals were about 98 000 with 10 000 busy links and about 111 000 with 20 000, that is, the
+limit plus at most one window's worth. Recordings made under that load pass the checker.
+
 ## Dataflow
 
 ```
