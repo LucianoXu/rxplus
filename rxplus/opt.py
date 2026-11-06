@@ -1,5 +1,6 @@
 """Miscellaneous Rx operators used by ``rxplus``."""
 
+import threading
 import time
 from collections.abc import Callable
 
@@ -133,6 +134,11 @@ def retry_with_signal[T](
             # source.subscribe() of the previous attempt (synchronous error);
             # the generation tells the outer call that it is no longer current.
             generation = 0
+            # Guards `generation` and the store into `sd`: a retry may run on
+            # another thread (asynchronous on_error) while the previous
+            # attempt's subscribe() is returning, and check-then-store must
+            # be atomic or the stale subscription can replace the live one.
+            generation_lock = threading.Lock()
             sd = SerialDisposable()
 
             def _delay(attempt: int, err: RxException) -> None:
@@ -150,8 +156,9 @@ def retry_with_signal[T](
                 nonlocal generation
                 if disposed:
                     return
-                generation += 1
-                my_generation = generation
+                with generation_lock:
+                    generation += 1
+                    my_generation = generation
 
                 def _on_next(v: T) -> None:
                     observer.on_next(v)
@@ -202,9 +209,11 @@ def retry_with_signal[T](
                     on_completed=observer.on_completed,
                     scheduler=scheduler,
                 )
-                if my_generation == generation:
-                    sd.disposable = subscription
-                else:
+                with generation_lock:
+                    current = my_generation == generation
+                    if current:
+                        sd.disposable = subscription
+                if not current:
                     # This attempt already failed and a retry took over while
                     # it was subscribing. Assigning it to the SerialDisposable
                     # would dispose the live retry subscription.
