@@ -288,8 +288,18 @@ class GatewayNode[F: Framing]:
             self._otel_logger.error("Invalid HELLO payload")
             return None
 
-        conn.peer_node_id = peer_node_id
-        conn._hello_received = True
+        rehandshake = False
+        with self._connections_lock:
+            if conn.direction == "inbound" and conn._hello_received:
+                # A second HELLO on an inbound connection means the peer's
+                # client reconnected (same path) and restarted the handshake.
+                # It waits for our HELLO as well as our HELLO_ACK, but we only
+                # send HELLO when a path is first seen, so restart our side.
+                rehandshake = True
+                conn._hello_ack_received = False
+                conn.state = ConnectionState.HANDSHAKING
+            conn.peer_node_id = peer_node_id
+            conn._hello_received = True
 
         self._otel_logger.debug(
             f"Received HELLO from {peer_node_id.hex()[:16]}"
@@ -301,6 +311,8 @@ class GatewayNode[F: Framing]:
             # Find path for this connection (copy under lock to avoid race)
             path = self._find_path_for_conn(conn.conn_id)
             if path:
+                if rehandshake:
+                    self._send_hello_to_path(path)
                 self._send_hello_ack_to_path(path)
         else:
             # Outbound: send via client
