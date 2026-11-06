@@ -229,6 +229,10 @@ class RxWSClient(Subject, OTelLoggingMixin):
             return
 
         loop = self._loop
+        if loop is not None and loop.is_closed():
+            # The client ended (terminal error); like after on_completed,
+            # values are dropped.
+            return
         if loop is None or self.queue is None:
             rx_exception = RxException(
                 RuntimeError("Client event loop not available"),
@@ -238,7 +242,11 @@ class RxWSClient(Subject, OTelLoggingMixin):
             super().on_error(rx_exception)
             return
 
-        loop.call_soon_threadsafe(self.queue.put_nowait, value)
+        try:
+            loop.call_soon_threadsafe(self.queue.put_nowait, value)
+        except RuntimeError:
+            # The loop closed between the check above and this call.
+            return
 
     def on_error(self, error: Exception) -> None:
         """Report connection errors."""
@@ -255,7 +263,12 @@ class RxWSClient(Subject, OTelLoggingMixin):
         """Shutdown the client, stop the event loop, and join the thread."""
         self._log("Closing...", "INFO")
         try:
-            if self._loop is not None:
+            loop_alive = (
+                self._loop is not None
+                and self._thread is not None
+                and self._thread.is_alive()
+            )
+            if loop_alive:
 
                 async def _async_close() -> None:
                     try:
@@ -279,9 +292,12 @@ class RxWSClient(Subject, OTelLoggingMixin):
                         asyncio.get_running_loop().stop()
 
                 assert self._loop is not None
-                self._loop.call_soon_threadsafe(
-                    lambda: self._loop.create_task(_async_close())  # type: ignore[union-attr]
-                )
+                try:
+                    self._loop.call_soon_threadsafe(
+                        lambda: self._loop.create_task(_async_close())  # type: ignore[union-attr]
+                    )
+                except RuntimeError:
+                    pass  # the loop ended on its own meanwhile
 
             if self._thread is not None:
                 self._thread.join(timeout=3.0)
@@ -458,6 +474,14 @@ class RxWSClient(Subject, OTelLoggingMixin):
                 self._log(
                     f"Connection to server {remote_desc} resources released.", "INFO"
                 )
+
+            if not self._shutdown_requested:
+                # Terminal error (retries exhausted, invalid URI, unexpected
+                # exception): nothing will reconnect, so release the loop
+                # thread instead of leaving it running forever.
+                self._shutdown_requested = True
+                self._connected = False
+                asyncio.get_running_loop().stop()
 
     # ---------------- threaded event loop plumbing ---------------- #
     async def _client_sender(

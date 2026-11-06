@@ -204,8 +204,13 @@ class RxWSServer(Subject, OTelLoggingMixin):
             super().on_error(rx_exception)
             return
 
+        if loop.is_closed():
+            return  # the server has ended; there is no client to send to
         for queue in ws_channels.get_queues_snapshot():
-            loop.call_soon_threadsafe(queue.put_nowait, data)
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, data)
+            except RuntimeError:
+                return  # the loop closed meanwhile
 
     def on_error(self, error: Exception) -> None:
         """Forward errors to subscribers."""
@@ -403,6 +408,8 @@ class RxWSServer(Subject, OTelLoggingMixin):
                 note=f"Port {self.port} bind failed",
             )
             super().on_error(rx_exception)
+            # Nothing is served: release the loop thread.
+            asyncio.get_running_loop().stop()
         except asyncio.CancelledError:
             self._log("WebSocket server task cancelled.", "INFO")
             raise
@@ -478,7 +485,12 @@ class RxWSServer(Subject, OTelLoggingMixin):
     def _shutdown_server(self) -> None:
         self._log("Closing...", "INFO")
         try:
-            if self._loop is not None:
+            loop_alive = (
+                self._loop is not None
+                and self._thread is not None
+                and self._thread.is_alive()
+            )
+            if loop_alive:
 
                 async def _async_close() -> None:
                     try:
@@ -497,9 +509,12 @@ class RxWSServer(Subject, OTelLoggingMixin):
                         asyncio.get_running_loop().stop()
 
                 assert self._loop is not None
-                self._loop.call_soon_threadsafe(
-                    lambda: self._loop.create_task(_async_close())  # type: ignore[union-attr]
-                )
+                try:
+                    self._loop.call_soon_threadsafe(
+                        lambda: self._loop.create_task(_async_close())  # type: ignore[union-attr]
+                    )
+                except RuntimeError:
+                    pass  # the loop ended on its own meanwhile
 
             if self._thread is not None:
                 self._thread.join(timeout=3.0)
