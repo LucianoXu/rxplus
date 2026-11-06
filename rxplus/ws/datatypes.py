@@ -7,8 +7,11 @@ wsdt_factory helper.
 
 import pickle
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
+
+WSDatatypeName = Literal["string", "bytes", "object"]
 
 
 @dataclass(frozen=True)
@@ -114,3 +117,23 @@ def wsdt_factory(datatype: Literal["string", "bytes", "object"]) -> WSDatatype:
         return WSObject()
     else:
         raise ValueError(f"Unsupported datatype '{datatype}'.")
+
+
+def _resolve_datatype_func(
+    datatype: Callable[[str], WSDatatypeName] | WSDatatypeName,
+) -> Callable[[str], WSDatatypeName]:
+    """Return the per-path datatype function for a fixed name or a callable."""
+    if isinstance(datatype, str):
+        if datatype not in ("string", "bytes", "object"):
+            raise ValueError(
+                f"Unsupported datatype '{datatype}'."
+                " Expected 'string', 'bytes', 'object', or a callable function."
+            )
+        fixed: WSDatatypeName = datatype
+        return lambda _path: fixed
+    if callable(datatype):
+        return datatype
+    raise ValueError(
+        f"Unsupported datatype '{datatype}'."
+        " Expected 'string', 'bytes', 'object', or a callable function."
+    )

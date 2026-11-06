@@ -370,3 +370,31 @@ def test_client_emits_closed_on_completed():
 
     # CLOSED should be in the state history
     assert WSConnectionState.CLOSED in states
+
+
+# =============================================================================
+# Datatype resolution
+# =============================================================================
+
+
+def test_resolve_datatype_func_fixed_name():
+    from rxplus.ws.datatypes import _resolve_datatype_func
+
+    f = _resolve_datatype_func("bytes")
+    assert f("/a") == "bytes"
+    assert f("/b") == "bytes"
+
+
+def test_resolve_datatype_func_callable():
+    from rxplus.ws.datatypes import _resolve_datatype_func
+
+    f = _resolve_datatype_func(lambda p: "object" if p == "/o" else "string")
+    assert f("/o") == "object"
+    assert f("/s") == "string"
+
+
+def test_resolve_datatype_func_invalid():
+    from rxplus.ws.datatypes import _resolve_datatype_func
+
+    with pytest.raises(ValueError, match="Unsupported datatype"):
+        _resolve_datatype_func("json")

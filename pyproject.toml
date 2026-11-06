@@ -57,7 +57,7 @@ all = [
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=7.0.0",
-    "ruff>=0.15.0",
+    "ruff==0.15.2",  # same as .pre-commit-config.yaml and CI
     "mypy>=1.19.0",
     "pre-commit>=4.0.0",
 ]

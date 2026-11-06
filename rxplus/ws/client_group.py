@@ -15,7 +15,7 @@ from reactivex import operators as ops
 
 from ..utils import TaggedData
 from .client import RetryPolicy, RxWSClient
-from .datatypes import WSConnectionConfig
+from .datatypes import WSConnectionConfig, _resolve_datatype_func
 
 
 class RxWSClientGroup(Subject):
@@ -79,17 +79,9 @@ class RxWSClientGroup(Subject):
         self._tracer_provider = tracer_provider
         self._logger_provider = logger_provider
         self._buffer_while_disconnected = buffer_while_disconnected
-        self.datatype_func: Callable[[str], Literal["string", "bytes", "object"]]
-        if datatype in ["string", "bytes", "object"]:
-            self.datatype_func = lambda path: datatype  # type: ignore[assignment,return-value]
-        elif callable(datatype):
-            self.datatype_func = datatype
-        else:
-            raise ValueError(
-                f"Unsupported datatype '{datatype}'."
-                " Expected 'string', 'bytes', 'object',"
-                " or a callable function."
-            )
+        self.datatype_func: Callable[[str], Literal["string", "bytes", "object"]] = (
+            _resolve_datatype_func(datatype)
+        )
 
         def make_client(path: str) -> RxWSClient:
             child_config = WSConnectionConfig(

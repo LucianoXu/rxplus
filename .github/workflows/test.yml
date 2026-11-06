@@ -18,7 +18,7 @@ jobs:
           python-version: "3.13"
 
       - name: Install dependencies
-        run: pip install ruff
+        run: pip install "ruff==0.15.2"  # keep in step with .pre-commit-config.yaml
 
       - name: Ruff format check
         run: ruff format --check .
