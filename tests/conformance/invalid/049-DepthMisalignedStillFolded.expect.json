@@ -1,0 +1,41 @@
+{
+  "state": {
+    "sources": {
+      "bad": {
+        "backlog": {
+          "a": {
+            "value": 3
+          }
+        },
+        "elements": [
+          {
+            "id": "a",
+            "label": "A"
+          },
+          {
+            "id": "b",
+            "label": "B"
+          }
+        ],
+        "ended": [],
+        "links": [
+          {
+            "from": "a",
+            "id": "l",
+            "kind": "data",
+            "to": "b"
+          }
+        ],
+        "lost": 0,
+        "spans": []
+      }
+    }
+  },
+  "valid": false,
+  "violations": [
+    {
+      "line": 3,
+      "rule": "window-bounds"
+    }
+  ]
+}

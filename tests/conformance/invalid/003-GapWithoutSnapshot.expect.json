@@ -1,0 +1,41 @@
+{
+  "state": {
+    "sources": {
+      "bad": {
+        "backlog": {},
+        "elements": [
+          {
+            "id": "a",
+            "label": "A"
+          },
+          {
+            "id": "b",
+            "label": "B"
+          },
+          {
+            "id": "c",
+            "label": "C"
+          }
+        ],
+        "ended": [],
+        "links": [
+          {
+            "from": "a",
+            "id": "l",
+            "kind": "data",
+            "to": "b"
+          }
+        ],
+        "lost": 1,
+        "spans": []
+      }
+    }
+  },
+  "valid": false,
+  "violations": [
+    {
+      "line": 3,
+      "rule": "loss-snapshot"
+    }
+  ]
+}

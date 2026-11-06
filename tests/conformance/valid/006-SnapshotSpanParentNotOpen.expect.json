@@ -1,0 +1,46 @@
+{
+  "state": {
+    "sources": {
+      "jobs": {
+        "backlog": {},
+        "elements": [
+          {
+            "id": "w",
+            "label": "Worker"
+          }
+        ],
+        "ended": [
+          {
+            "id": "w",
+            "label": "outer",
+            "span": "p",
+            "status": "ok",
+            "t0": 1762430400.01,
+            "t1": 1762430400.03
+          },
+          {
+            "id": "w",
+            "label": "inner",
+            "span": "c",
+            "status": "ok",
+            "t0": 1762430400.02,
+            "t1": 1762430400.21
+          }
+        ],
+        "links": [],
+        "lost": 5,
+        "spans": [
+          {
+            "id": "w",
+            "label": "nested",
+            "parent": "c",
+            "span": "d",
+            "t0": 1762430400.15
+          }
+        ]
+      }
+    }
+  },
+  "valid": true,
+  "violations": []
+}

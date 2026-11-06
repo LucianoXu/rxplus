@@ -1,0 +1,14 @@
+{"source":"demo","seq":0,"t":1762430400.0,"type":"snapshot","protocol":"reacting/1","label":"Demo pipeline","elements":[{"id":"input","label":"Input","kind":"stream"},{"id":"parser","label":"Parser","kind":"operator"},{"id":"parser.in","label":"in","parent":"parser"},{"id":"db","label":"Database","kind":"service"}],"links":[{"id":"l1","from":"input","to":"parser.in","kind":"data"},{"id":"l2","from":"parser","to":"db","kind":"call"}]}
+{"source":"demo","seq":1,"t":1762430400.05,"type":"add","elements":[{"id":"buf","label":"Buffer","kind":"buffer"}],"links":[{"id":"l3","from":"parser","to":"buf","kind":"data"}]}
+{"source":"demo","seq":2,"t":1762430400.12,"type":"span.start","span":"s1","id":"parser","label":"batch"}
+{"source":"demo","seq":3,"t":1762430400.13,"type":"span.start","span":"s2","id":"db","label":"insert","parent":"s1"}
+{"source":"demo","seq":4,"t":1762430400.2,"type":"flow","link":"l1","t0":1762430400.1,"items":120,"bytes":9600,"dropped":0,"coalesced":3}
+{"source":"demo","seq":5,"t":1762430400.2,"type":"flow","link":"l2","t0":1762430400.1,"items":1,"dropped":0,"coalesced":0}
+{"source":"demo","seq":6,"t":1762430400.2,"type":"depth","id":"l1","value":4,"capacity":64}
+{"source":"demo","seq":7,"t":1762430400.21,"type":"span.end","span":"s2","status":"ok"}
+{"source":"demo","seq":8,"t":1762430400.3,"type":"flow","link":"l1","t0":1762430400.2,"items":4,"bytes":320,"dropped":0,"coalesced":0}
+{"source":"demo","seq":9,"t":1762430400.3,"type":"latency","id":"l2","t0":1762430400.2,"count":1,"sum":0.08,"max":0.08}
+{"source":"demo","seq":10,"t":1762430400.3,"type":"depth","id":"l1","value":0,"capacity":64}
+{"source":"demo","seq":44,"t":1762430401.5,"type":"snapshot","protocol":"reacting/1","label":"Demo pipeline","elements":[{"id":"input","label":"Input","kind":"stream"},{"id":"parser","label":"Parser","kind":"operator"},{"id":"parser.in","label":"in","parent":"parser"},{"id":"db","label":"Database","kind":"service"},{"id":"buf","label":"Buffer","kind":"buffer"}],"links":[{"id":"l1","from":"input","to":"parser.in","kind":"data"},{"id":"l2","from":"parser","to":"db","kind":"call"},{"id":"l3","from":"parser","to":"buf","kind":"data"}],"spans":[{"span":"s1","id":"parser","label":"batch","t0":1762430400.12}]}
+{"source":"demo","seq":45,"t":1762430401.6,"type":"span.end","span":"s1","status":"error","error":"timeout"}
+{"source":"demo","seq":46,"t":1762430401.7,"type":"remove","ids":["buf"]}

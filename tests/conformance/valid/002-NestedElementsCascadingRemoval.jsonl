@@ -1,0 +1,12 @@
+{"source":"app","seq":0,"t":1762430400.0,"type":"snapshot","protocol":"reacting/1","label":"Nested pipeline","elements":[{"id":"pipe","label":"Pipeline","kind":"group"},{"id":"pipe.stage1","label":"Stage 1","parent":"pipe"},{"id":"pipe.stage1.op","label":"Map","parent":"pipe.stage1","kind":"operator"},{"id":"pipe.stage2","label":"Stage 2","parent":"pipe"},{"id":"sink","label":"Sink"},{"id":"src","label":"Source"}],"links":[{"id":"a","from":"src","to":"pipe.stage1.op","kind":"data"},{"id":"b","from":"pipe.stage1.op","to":"pipe.stage2","kind":"data"},{"id":"c","from":"pipe.stage2","to":"sink","kind":"data"},{"id":"d","from":"sink","to":"sink","kind":"call"}]}
+{"source":"app","seq":1,"t":1762430400.02,"type":"span.start","span":"sp1","id":"pipe.stage1.op","label":"map batch"}
+{"source":"app","seq":2,"t":1762430400.03,"type":"span.start","span":"sp2","id":"sink","label":"write"}
+{"source":"app","seq":3,"t":1762430400.04,"type":"span.start","span":"zz","id":"pipe.stage2","label":"stage work"}
+{"source":"app","seq":4,"t":1762430400.05,"type":"span.start","span":"aa","id":"pipe","label":"run","parent":"sp2"}
+{"source":"app","seq":5,"t":1762430400.1,"type":"flow","link":"a","t0":1762430400.0,"items":5,"dropped":0,"coalesced":0,"bytes":40}
+{"source":"app","seq":6,"t":1762430400.1,"type":"depth","id":"b","value":3}
+{"source":"app","seq":7,"t":1762430400.1,"type":"depth","id":"sink","value":2,"capacity":8}
+{"source":"app","seq":8,"t":1762430400.15,"type":"remove","ids":["pipe.stage1"]}
+{"source":"app","seq":9,"t":1762430400.2,"type":"depth","id":"sink","value":2,"capacity":8}
+{"source":"app","seq":10,"t":1762430400.25,"type":"remove","ids":["pipe"]}
+{"source":"app","seq":11,"t":1762430400.3,"type":"depth","id":"sink","value":0,"capacity":8}

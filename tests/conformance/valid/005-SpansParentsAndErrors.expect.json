@@ -1,0 +1,76 @@
+{
+  "state": {
+    "sources": {
+      "jobs": {
+        "backlog": {},
+        "elements": [
+          {
+            "id": "w1",
+            "label": "Worker 1"
+          },
+          {
+            "id": "w2",
+            "label": "Worker 2"
+          }
+        ],
+        "ended": [
+          {
+            "id": "w2",
+            "label": "fetch",
+            "parent": "child1",
+            "span": "grand",
+            "status": "ok",
+            "t0": 1762430400.03,
+            "t1": 1762430400.04
+          },
+          {
+            "error": "upstream failed",
+            "id": "w1",
+            "label": "request",
+            "span": "root",
+            "status": "error",
+            "t0": 1762430400.01,
+            "t1": 1762430400.05
+          },
+          {
+            "id": "w1",
+            "label": "retry",
+            "parent": "child1",
+            "span": "child2",
+            "status": "error",
+            "t0": 1762430400.06,
+            "t1": 1762430400.08
+          },
+          {
+            "id": "tmp",
+            "label": "temp work",
+            "parent": "child2",
+            "span": "t1",
+            "status": "error",
+            "t0": 1762430400.07,
+            "t1": 1762430400.09
+          }
+        ],
+        "links": [],
+        "lost": 0,
+        "spans": [
+          {
+            "id": "w2",
+            "label": "query",
+            "parent": "root",
+            "span": "child1",
+            "t0": 1762430400.02
+          },
+          {
+            "id": "w1",
+            "label": "late",
+            "span": "late",
+            "t0": 1762430400.095
+          }
+        ]
+      }
+    }
+  },
+  "valid": true,
+  "violations": []
+}

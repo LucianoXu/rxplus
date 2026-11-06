@@ -1,5 +1,10 @@
 """Convenience exports for the :mod:`rxplus` package.
 
+Exports are loaded lazily (PEP 562): ``import rxplus`` imports nothing
+else, and ``from rxplus import X`` imports only the submodule that defines
+``X``. This keeps ``import rxplus.reacting`` standard-library only (D10)
+and ``import rxplus`` cheap.
+
 This package supports optional dependencies for audio and video features.
 Install with:
     - `pip install rxplus` for basic features
@@ -8,50 +13,10 @@ Install with:
     - `pip install rxplus[all]` for all features
 """
 
-# =============================================================================
-# Basic exports (always available)
-# =============================================================================
-from .cli import from_cli, to_cli  # noqa: F401
-from .duplex import Duplex, connect_adapter, make_duplex  # noqa: F401
-from .mechanism import RxException  # noqa: F401
-from .opt import (  # noqa: F401
-    ErrorRestartSignal,
-    redirect_to,
-    retry_with_signal,
-    stream_print_out,
-)
-from .telemetry import (  # noqa: F401
-    ConsoleLogRecordExporter,
-    FileLogRecordExporter,
-    LogContext,  # noqa: F401
-    MetricsHelper,
-    OTelLogger,
-    configure_metrics,
-    configure_telemetry,
-)
-from .utils import (  # noqa: F401
-    BandwidthMonitor,
-    FPSMonitor,
-    TaggedData,
-    tag,
-    tag_filter,
-    untag,
-)
-from .ws import (  # noqa: F401
-    RxWSClient,
-    RxWSClientGroup,
-    RxWSServer,
-    WSChannels,
-    WSConnectionConfig,
-    WSConnectionState,
-    WSDatatype,
-    WSStr,
-)
+import importlib
+from typing import TYPE_CHECKING
 
-# =============================================================================
-# Audio exports (optional - requires rxplus[audio])
-# =============================================================================
-try:
+if TYPE_CHECKING:  # what type checkers and IDEs see
     from .audio import (  # noqa: F401
         PCMFormat,
         RxMicrophone,
@@ -63,16 +28,34 @@ try:
         resample_audio,
         save_wavfile,
     )
-
-    _HAS_AUDIO = True
-except ImportError:
-    _HAS_AUDIO = False
-
-
-# =============================================================================
-# Video exports (optional - requires rxplus[video])
-# =============================================================================
-try:
+    from .cli import (  # noqa: F401
+        from_cli,
+        to_cli,
+    )
+    from .duplex import (  # noqa: F401
+        Duplex,
+        connect_adapter,
+        make_duplex,
+    )
+    from .gateway import (  # noqa: F401
+        BufferK,
+        Connection,
+        ConnectionState,
+        Disconnect,
+        DisconnectError,
+        DropNew,
+        DropOld,
+        Framing,
+        GatewayNode,
+        HelloPayload,
+        OverflowPolicy,
+        OverflowStrategy,
+        StreamInfo,
+        StreamState,
+        StreamTable,
+        TaggedFrame,
+        create_overflow_policy,
+    )
     from .graphic import (  # noqa: F401
         create_screen_capture,
         jpeg_bytes_to_rgb_ndarray,
@@ -80,45 +63,114 @@ try:
         rgb_ndarray_to_jpeg_bytes,
         rgb_ndarray_to_png_bytes,
     )
+    from .mechanism import (  # noqa: F401
+        RxException,
+    )
+    from .opt import (  # noqa: F401
+        ErrorRestartSignal,
+        redirect_to,
+        retry_with_signal,
+        stream_print_out,
+    )
+    from .telemetry import (  # noqa: F401
+        ConsoleLogRecordExporter,
+        FileLogRecordExporter,
+        LogContext,
+        MetricsHelper,
+        OTelLogger,
+        configure_metrics,
+        configure_telemetry,
+    )
+    from .utils import (  # noqa: F401
+        BandwidthMonitor,
+        FPSMonitor,
+        TaggedData,
+        tag,
+        tag_filter,
+        untag,
+    )
+    from .ws import (  # noqa: F401
+        RxWSClient,
+        RxWSClientGroup,
+        RxWSServer,
+        WSChannels,
+        WSConnectionConfig,
+        WSConnectionState,
+        WSDatatype,
+        WSStr,
+    )
 
-    _HAS_VIDEO = True
-except ImportError:
-    _HAS_VIDEO = False
+# name -> submodule that defines it
+_EXPORTS: dict[str, str] = {
+    "from_cli": "cli",
+    "to_cli": "cli",
+    "Duplex": "duplex",
+    "connect_adapter": "duplex",
+    "make_duplex": "duplex",
+    "RxException": "mechanism",
+    "ErrorRestartSignal": "opt",
+    "redirect_to": "opt",
+    "retry_with_signal": "opt",
+    "stream_print_out": "opt",
+    "ConsoleLogRecordExporter": "telemetry",
+    "FileLogRecordExporter": "telemetry",
+    "LogContext": "telemetry",
+    "MetricsHelper": "telemetry",
+    "OTelLogger": "telemetry",
+    "configure_metrics": "telemetry",
+    "configure_telemetry": "telemetry",
+    "BandwidthMonitor": "utils",
+    "FPSMonitor": "utils",
+    "TaggedData": "utils",
+    "tag": "utils",
+    "tag_filter": "utils",
+    "untag": "utils",
+    "RxWSClient": "ws",
+    "RxWSClientGroup": "ws",
+    "RxWSServer": "ws",
+    "WSChannels": "ws",
+    "WSConnectionConfig": "ws",
+    "WSConnectionState": "ws",
+    "WSDatatype": "ws",
+    "WSStr": "ws",
+    "BufferK": "gateway",
+    "Connection": "gateway",
+    "ConnectionState": "gateway",
+    "Disconnect": "gateway",
+    "DisconnectError": "gateway",
+    "DropNew": "gateway",
+    "DropOld": "gateway",
+    "Framing": "gateway",
+    "GatewayNode": "gateway",
+    "HelloPayload": "gateway",
+    "OverflowPolicy": "gateway",
+    "OverflowStrategy": "gateway",
+    "StreamInfo": "gateway",
+    "StreamState": "gateway",
+    "StreamTable": "gateway",
+    "TaggedFrame": "gateway",
+    "create_overflow_policy": "gateway",
+}
+_AUDIO_EXPORTS: dict[str, str] = {
+    "PCMFormat": "audio",
+    "RxMicrophone": "audio",
+    "RxSpeaker": "audio",
+    "StreamingResampler": "audio",
+    "convert_audio_format": "audio",
+    "create_wavfile": "audio",
+    "get_numpy_dtype": "audio",
+    "resample_audio": "audio",
+    "save_wavfile": "audio",
+}
+_VIDEO_EXPORTS: dict[str, str] = {
+    "create_screen_capture": "graphic",
+    "jpeg_bytes_to_rgb_ndarray": "graphic",
+    "png_bytes_to_rgb_ndarray": "graphic",
+    "rgb_ndarray_to_jpeg_bytes": "graphic",
+    "rgb_ndarray_to_png_bytes": "graphic",
+}
 
-
-# =============================================================================
-# Gateway exports (always available)
-# =============================================================================
-from .gateway import (  # noqa: F401
-    BufferK,
-    Connection,
-    # Connection management
-    ConnectionState,
-    Disconnect,
-    DisconnectError,
-    DropNew,
-    DropOld,
-    # Framing abstraction
-    Framing,
-    # Gateway node
-    GatewayNode,
-    HelloPayload,
-    # Overflow strategies
-    OverflowPolicy,
-    # Stream management
-    OverflowStrategy,
-    StreamInfo,
-    StreamState,
-    StreamTable,
-    TaggedFrame,
-    create_overflow_policy,
-)
-
-# =============================================================================
-# __all__ definition
-# =============================================================================
-__all__ = [
-    # Core
+_BASIC_ALL = [
     "RxException",
     "TaggedData",
     "tag",
@@ -126,7 +178,6 @@ __all__ = [
     "untag",
     "FPSMonitor",
     "BandwidthMonitor",
-    # Telemetry
     "LogContext",
     "configure_telemetry",
     "configure_metrics",
@@ -134,12 +185,10 @@ __all__ = [
     "ConsoleLogRecordExporter",
     "OTelLogger",
     "MetricsHelper",
-    # Operators
     "stream_print_out",
     "redirect_to",
     "ErrorRestartSignal",
     "retry_with_signal",
-    # WebSocket
     "WSConnectionConfig",
     "WSConnectionState",
     "WSChannels",
@@ -148,14 +197,11 @@ __all__ = [
     "RxWSServer",
     "RxWSClient",
     "RxWSClientGroup",
-    # Duplex
     "Duplex",
     "make_duplex",
     "connect_adapter",
-    # CLI
     "from_cli",
     "to_cli",
-    # Gateway
     "OverflowPolicy",
     "DropOld",
     "DropNew",
@@ -174,30 +220,67 @@ __all__ = [
     "TaggedFrame",
     "GatewayNode",
 ]
+_AUDIO_ALL = [
+    "PCMFormat",
+    "convert_audio_format",
+    "create_wavfile",
+    "get_numpy_dtype",
+    "resample_audio",
+    "RxMicrophone",
+    "RxSpeaker",
+    "save_wavfile",
+]
+_VIDEO_ALL = [
+    "create_screen_capture",
+    "rgb_ndarray_to_jpeg_bytes",
+    "jpeg_bytes_to_rgb_ndarray",
+    "rgb_ndarray_to_png_bytes",
+    "png_bytes_to_rgb_ndarray",
+]
 
-# Add audio exports to __all__ if available
-if _HAS_AUDIO:
-    __all__.extend(
-        [
-            "PCMFormat",
-            "convert_audio_format",
-            "create_wavfile",
-            "get_numpy_dtype",
-            "resample_audio",
-            "RxMicrophone",
-            "RxSpeaker",
-            "save_wavfile",
-        ]
-    )
+_optional: dict[str, bool] = {}
 
-# Add video exports to __all__ if available
-if _HAS_VIDEO:
-    __all__.extend(
-        [
-            "create_screen_capture",
-            "rgb_ndarray_to_jpeg_bytes",
-            "jpeg_bytes_to_rgb_ndarray",
-            "rgb_ndarray_to_png_bytes",
-            "png_bytes_to_rgb_ndarray",
-        ]
+
+def _available(module: str) -> bool:
+    """Whether an optional submodule imports (its dependencies are present)."""
+    if module not in _optional:
+        try:
+            importlib.import_module(f".{module}", __name__)
+            _optional[module] = True
+        except ImportError:
+            _optional[module] = False
+    return _optional[module]
+
+
+def __getattr__(name: str) -> object:
+    if name in _EXPORTS:
+        value = getattr(importlib.import_module(f".{_EXPORTS[name]}", __name__), name)
+    elif name in _AUDIO_EXPORTS or name in _VIDEO_EXPORTS:
+        module = _AUDIO_EXPORTS.get(name) or _VIDEO_EXPORTS[name]
+        if not _available(module):
+            raise AttributeError(
+                f"rxplus.{name} needs the optional dependencies of rxplus.{module}"
+                f" (pip install 'rxplus[{'audio' if module == 'audio' else 'video'}]')"
+            )
+        value = getattr(importlib.import_module(f".{module}", __name__), name)
+    elif name == "_HAS_AUDIO":
+        return _available("audio")
+    elif name == "_HAS_VIDEO":
+        return _available("graphic")
+    elif name == "__all__":
+        names = list(_BASIC_ALL)
+        if _available("audio"):
+            names += _AUDIO_ALL
+        if _available("graphic"):
+            names += _VIDEO_ALL
+        return names
+    else:
+        raise AttributeError(f"module 'rxplus' has no attribute {name!r}")
+    globals()[name] = value  # cache: later lookups skip __getattr__
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(
+        set(globals()) | set(_EXPORTS) | set(_AUDIO_EXPORTS) | set(_VIDEO_EXPORTS)
     )
