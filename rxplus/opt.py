@@ -7,7 +7,8 @@ from collections.abc import Callable
 from attr import dataclass
 from opentelemetry.trace import Span, StatusCode
 from reactivex import Observable, Observer, create
-from reactivex.disposable import Disposable, SerialDisposable
+from reactivex.abc import DisposableBase
+from reactivex.disposable import Disposable
 
 from .mechanism import RxException
 
@@ -139,7 +140,10 @@ def retry_with_signal[T](
             # attempt's subscribe() is returning, and check-then-store must
             # be atomic or the stale subscription can replace the live one.
             generation_lock = threading.Lock()
-            sd = SerialDisposable()
+            # The live attempt's subscription. Stored and swapped under the
+            # lock, but always disposed outside it: a dispose may join the
+            # thread that is delivering an error, which may need the lock.
+            live: list[DisposableBase | None] = [None]
 
             def _delay(attempt: int, err: RxException) -> None:
                 try:
@@ -209,26 +213,30 @@ def retry_with_signal[T](
                     on_completed=observer.on_completed,
                     scheduler=scheduler,
                 )
+                previous: DisposableBase | None = None
                 with generation_lock:
-                    current = my_generation == generation
-                    if current:
-                        sd.disposable = subscription
-                if not current:
-                    # This attempt already failed and a retry took over while
-                    # it was subscribing. Assigning it to the SerialDisposable
-                    # would dispose the live retry subscription.
+                    # Stale: a retry took over while this attempt was
+                    # subscribing, or the subscriber disposed meanwhile.
+                    stale = disposed or my_generation != generation
+                    if not stale:
+                        previous, live[0] = live[0], subscription
+                if stale:
                     subscription.dispose()
+                elif previous is not None:
+                    previous.dispose()
 
             _subscribe_once()
 
             def _dispose() -> None:
                 nonlocal disposed
-                disposed = True
-                try:
-                    if sd.disposable is not None:
-                        sd.disposable.dispose()
-                except Exception:
-                    pass
+                with generation_lock:
+                    disposed = True
+                    current, live[0] = live[0], None
+                if current is not None:
+                    try:
+                        current.dispose()
+                    except Exception:
+                        pass
 
             return Disposable(_dispose)
 
