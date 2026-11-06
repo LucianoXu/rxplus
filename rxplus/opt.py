@@ -129,6 +129,10 @@ def retry_with_signal[T](
         ):
             attempts = 0
             disposed = False
+            # Incremented by every (re)subscription. A retry can start inside
+            # source.subscribe() of the previous attempt (synchronous error);
+            # the generation tells the outer call that it is no longer current.
+            generation = 0
             sd = SerialDisposable()
 
             def _delay(attempt: int, err: RxException) -> None:
@@ -143,8 +147,11 @@ def retry_with_signal[T](
                         pass
 
             def _subscribe_once() -> None:
+                nonlocal generation
                 if disposed:
                     return
+                generation += 1
+                my_generation = generation
 
                 def _on_next(v: T) -> None:
                     observer.on_next(v)
@@ -189,12 +196,19 @@ def retry_with_signal[T](
                     if not disposed:
                         _subscribe_once()
 
-                sd.disposable = source.subscribe(
+                subscription = source.subscribe(
                     on_next=_on_next,
                     on_error=_on_error,
                     on_completed=observer.on_completed,
                     scheduler=scheduler,
                 )
+                if my_generation == generation:
+                    sd.disposable = subscription
+                else:
+                    # This attempt already failed and a retry took over while
+                    # it was subscribing. Assigning it to the SerialDisposable
+                    # would dispose the live retry subscription.
+                    subscription.dispose()
 
             _subscribe_once()
 
