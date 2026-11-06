@@ -3,7 +3,7 @@ import time
 from typing import get_args
 
 import rxplus
-from rxplus import RxMicrophone, RxWSServer, tag
+from rxplus import RxMicrophone, RxWSServer, WSConnectionConfig, tag
 
 # TODO: problem encounted when changing the microphone device.
 # The following code observed:
@@ -28,10 +28,10 @@ def build_parser(subparsers: argparse._SubParsersAction):
 
 def task(parsed_args: argparse.Namespace):
     sender = RxWSServer(
-        {
-            "host": parsed_args.host,
-            "port": parsed_args.port,
-        },
+        WSConnectionConfig(
+            host=parsed_args.host,
+            port=parsed_args.port,
+        ),
         datatype="bytes",
     )
 

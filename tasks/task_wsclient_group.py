@@ -1,7 +1,7 @@
 import argparse
 import time
 
-from rxplus import RxWSClientGroup, TaggedData
+from rxplus import RxWSClientGroup, TaggedData, WSConnectionConfig
 
 
 def build_parser(subparsers: argparse._SubParsersAction):
@@ -14,10 +14,10 @@ def build_parser(subparsers: argparse._SubParsersAction):
 
 def task(parsed_args: argparse.Namespace):
     receiver = RxWSClientGroup(
-        {
-            "host": parsed_args.host,
-            "port": parsed_args.port,
-        },
+        WSConnectionConfig(
+            host=parsed_args.host,
+            port=parsed_args.port,
+        ),
         datatype="string",
     )
 

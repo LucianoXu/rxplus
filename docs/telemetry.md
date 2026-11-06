@@ -9,7 +9,7 @@ rxplus uses **provider injection** pattern for telemetry. Components like `RxWSS
 ## Quick Start
 
 ```python
-from rxplus import RxWSServer, RxWSClient, configure_telemetry
+from rxplus import RxWSClient, RxWSServer, WSConnectionConfig, configure_telemetry
 
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -25,14 +25,14 @@ tracer_provider, logger_provider = configure_telemetry(
 
 # Create server with telemetry
 server = RxWSServer(
-    {"host": "localhost", "port": 8888},
+    WSConnectionConfig("localhost", 8888),
     tracer_provider=tracer_provider,
     logger_provider=logger_provider,
 )
 
 # Create client with telemetry
 client = RxWSClient(
-    {"host": "localhost", "port": 8888},
+    WSConnectionConfig("localhost", 8888),
     tracer_provider=tracer_provider,
     logger_provider=logger_provider,
 )
@@ -77,7 +77,7 @@ All WebSocket components accept telemetry providers:
 
 ```python
 server = RxWSServer(
-    conn_cfg={"host": "::", "port": 8888},
+    WSConnectionConfig("::", 8888),
     tracer_provider=tracer_provider,
     logger_provider=logger_provider,
 )
@@ -92,7 +92,7 @@ When providers are set:
 
 ```python
 client = RxWSClient(
-    conn_cfg={"host": "localhost", "port": 8888},
+    WSConnectionConfig("localhost", 8888),
     tracer_provider=tracer_provider,
     logger_provider=logger_provider,
 )
@@ -107,7 +107,7 @@ When providers are set:
 
 ```python
 group = RxWSClientGroup(
-    conn_cfg={"host": "localhost", "port": 8888},
+    WSConnectionConfig("localhost", 8888),
     tracer_provider=tracer_provider,
     logger_provider=logger_provider,
 )
@@ -236,8 +236,8 @@ If you don't need telemetry, simply omit the provider parameters:
 
 ```python
 # No telemetry - components work normally without any overhead
-server = RxWSServer({"host": "localhost", "port": 8888})
-client = RxWSClient({"host": "localhost", "port": 8888})
+server = RxWSServer(WSConnectionConfig("localhost", 8888))
+client = RxWSClient(WSConnectionConfig("localhost", 8888))
 ```
 
 ---
@@ -264,7 +264,7 @@ A complete example with OTLP export to an OpenTelemetry Collector:
 
 ```python
 import time
-from rxplus import RxWSServer, TaggedData, configure_telemetry
+from rxplus import RxWSServer, TaggedData, WSConnectionConfig, configure_telemetry
 
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -279,7 +279,7 @@ tracer_provider, logger_provider = configure_telemetry(
 
 # Create server
 server = RxWSServer(
-    {"host": "::", "port": 8888},
+    WSConnectionConfig("::", 8888),
     tracer_provider=tracer_provider,
     logger_provider=logger_provider,
 )

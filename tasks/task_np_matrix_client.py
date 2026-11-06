@@ -3,7 +3,7 @@ import time
 
 import numpy as np
 
-from rxplus import RxWSClient
+from rxplus import RxWSClient, WSConnectionConfig
 
 
 def build_parser(subparsers: argparse._SubParsersAction):
@@ -33,11 +33,11 @@ def build_parser(subparsers: argparse._SubParsersAction):
 
 def task(parsed_args: argparse.Namespace):
     client = RxWSClient(
-        {
-            "host": parsed_args.host,
-            "port": parsed_args.port,
-            "path": parsed_args.path,
-        },
+        WSConnectionConfig(
+            host=parsed_args.host,
+            port=parsed_args.port,
+            path=parsed_args.path,
+        ),
         datatype="object",
     )
 

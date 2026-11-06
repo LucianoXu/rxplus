@@ -6,7 +6,7 @@ from reactivex import Subject
 from reactivex import operators as ops
 
 import rxplus
-from rxplus import RxWSServer, create_wavfile, tag
+from rxplus import RxWSServer, WSConnectionConfig, create_wavfile, tag
 
 
 def build_parser(subparsers: argparse._SubParsersAction):
@@ -29,10 +29,10 @@ def build_parser(subparsers: argparse._SubParsersAction):
 def task(parsed_args: argparse.Namespace):
 
     sender = RxWSServer(
-        {
-            "host": parsed_args.host,
-            "port": parsed_args.port,
-        },
+        WSConnectionConfig(
+            host=parsed_args.host,
+            port=parsed_args.port,
+        ),
         datatype="bytes",
     )
 

@@ -8,6 +8,7 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExport
 
 from rxplus import (
     RxWSClient,
+    WSConnectionConfig,
     configure_telemetry,
 )
 
@@ -47,11 +48,11 @@ def task(parsed_args: argparse.Namespace):
 
     # Create client with telemetry providers
     receiver = RxWSClient(
-        {
-            "host": parsed_args.host,
-            "port": parsed_args.port,
-            "path": parsed_args.path,
-        },
+        WSConnectionConfig(
+            host=parsed_args.host,
+            port=parsed_args.port,
+            path=parsed_args.path,
+        ),
         datatype="string",
         buffer_while_disconnected=True,
         tracer_provider=tracer_provider,

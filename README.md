@@ -66,21 +66,18 @@ conda install -c conda-forge portaudio
 ### WebSocket Server with Telemetry
 
 ```python
-from rxplus import RxWSServer, TaggedData, configure_telemetry
+from rxplus import RxWSServer, TaggedData, WSConnectionConfig, configure_telemetry
 
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
-from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 
-# Configure telemetry (optional)
+# Configure telemetry (optional); logs are batched by default
 tracer_provider, logger_provider = configure_telemetry(
-    log_processor=BatchLogRecordProcessor(
-        OTLPLogExporter(endpoint="http://localhost:4318/v1/logs")
-    ),
+    log_exporter=OTLPLogExporter(endpoint="http://localhost:4318/v1/logs"),
 )
 
 # Create server with telemetry
 server = RxWSServer(
-    {"host": "::", "port": 8888},
+    WSConnectionConfig(host="::", port=8888),
     tracer_provider=tracer_provider,
     logger_provider=logger_provider,
 )
@@ -95,9 +92,9 @@ server.on_next(TaggedData("/", "Hello, clients!"))
 ### WebSocket Client
 
 ```python
-from rxplus import RxWSClient
+from rxplus import RxWSClient, WSConnectionConfig
 
-client = RxWSClient({"host": "localhost", "port": 8888})
+client = RxWSClient(WSConnectionConfig(host="localhost", port=8888, path="/"))
 
 # Subscribe to receive data from server
 client.subscribe(on_next=lambda x: print(f"Received: {x}"))
