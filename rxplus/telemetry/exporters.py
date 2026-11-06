@@ -258,23 +258,31 @@ class FileLogRecordExporter(LogRecordExporter):
         if dir_name:
             os.makedirs(dir_name, exist_ok=True)
 
-        # Try fcntl-based advisory lock first (POSIX platforms)
+        # Try fcntl-based advisory lock first (POSIX platforms). Only the
+        # acquisition may fall back to the lock-file spin below: an exception
+        # raised by the caller's block must propagate, not be swallowed into a
+        # second yield (which waited lock_timeout on the leftover lock file
+        # and then raised TimeoutError instead of the real error).
         if os.name != "nt":
+            locked_file = None
             try:
                 import fcntl
 
-                f = open(lock_path, "a+")
+                locked_file = open(lock_path, "a+")
+                fcntl.flock(locked_file.fileno(), fcntl.LOCK_EX)
+            except Exception:
+                if locked_file is not None:
+                    locked_file.close()
+                locked_file = None
+            if locked_file is not None:
                 try:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
                     yield
                 finally:
                     try:
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                        fcntl.flock(locked_file.fileno(), fcntl.LOCK_UN)
                     finally:
-                        f.close()
+                        locked_file.close()
                 return
-            except Exception:
-                pass
 
         # Fallback: spin on exclusive create of lock file
         start = time.time()
