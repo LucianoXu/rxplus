@@ -17,7 +17,7 @@ repos:
 
       - id: pytest
         name: pytest
-        entry: pytest --cov=rxplus --cov-report=term-missing --ignore=tests/test_mechanism.py
+        entry: pytest --cov=rxplus --cov-report=term-missing
         language: system
         pass_filenames: false
         always_run: true
