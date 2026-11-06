@@ -25,33 +25,20 @@ rxplus/gateway/
 
 ## Components
 
-### Overflow Policies (`overflow.py`)
+### Bounded buffer (`overflow.py`)
 
-Thread-safe buffer overflow strategies implementing a common `OverflowPolicy[T]` interface.
+`BoundedBuffer[T](limit, strategy="drop_old")` is one thread-safe FIFO of at most `limit` items (0.2 replaces
+the four 0.1 classes `DropOld`, `DropNew`, `BufferK`, `Disconnect`). When full, `push` applies the strategy:
 
-#### Classes
+| Strategy | When full |
+|----------|-----------|
+| `"drop_old"` | drops the oldest item, which `push` returns |
+| `"drop_new"` | refuses the new item, which `push` returns |
+| `"buffer_k"` | raises `OverflowError` |
+| `"disconnect"` | raises `DisconnectError` (the caller closes the connection) |
 
-| Class | Description | Behavior |
-|-------|-------------|----------|
-| `DropOld` | Ring buffer that drops oldest items | FIFO queue, evicts oldest when full |
-| `DropNew` | Buffer that rejects new items when full | Silently drops new items at capacity |
-| `BufferK` | Hard limit with disconnect | Raises `DisconnectError` when limit exceeded |
-| `Disconnect` | Zero tolerance | Raises `DisconnectError` on first push |
-
-#### Factory Function
-
-```python
-def create_overflow_policy(strategy: str, size: int) -> OverflowPolicy[T]:
-    """Create an overflow policy from strategy name.
-    
-    Args:
-        strategy: One of 'drop-old', 'drop-new', 'buffer-k', 'disconnect'
-        size: Buffer capacity
-        
-    Returns:
-        Configured overflow policy instance
-    """
-```
+`pop()` and `peek()` raise `IndexError` on an empty buffer (0.1 returned `None`, which was ambiguous for a
+buffer holding `None`). `create_overflow_policy(strategy, buffer_limit=100)` builds one.
 
 ### Stream Management (`stream.py`)
 
@@ -100,28 +87,24 @@ class StreamTable:
 
 Structures for managing connection state and handshake payloads.
 
-#### ConnectionState Enum
+#### GatewayConnectionState Enum
+
+(0.1: `ConnectionState`.)
 
 ```python
-class ConnectionState(Enum):
-    PENDING = "pending"       # Awaiting HELLO
-    HANDSHAKING = "handshaking"  # HELLO sent, awaiting HELLO_ACK
-    CONNECTED = "connected"   # Handshake complete
-    DISCONNECTED = "disconnected"  # Connection terminated
+class GatewayConnectionState(Enum):
+    CONNECTING = auto()   # outbound: transport connecting
+    HANDSHAKING = auto()  # HELLO / HELLO_ACK exchange in progress
+    READY = auto()        # handshake complete: frames flow
+    CLOSED = auto()       # terminated
 ```
 
 #### Connection Dataclass
 
-```python
-@dataclass
-class Connection:
-    conn_id: bytes           # Raw connection identifier
-    state: ConnectionState   # Current state
-    remote_node_id: str | None  # Peer's node ID (set after handshake)
-    streams: StreamTable     # Per-connection stream table
-    overflow: OverflowPolicy[Any]  # Per-connection overflow policy
-    created_at: float        # Connection timestamp
-```
+`Connection(conn_id, direction, remote_addr, state, peer_node_id, streams, created_at)`. An **inbound**
+connection is one server socket (0.2): it is created when the peer's socket opens and closed, with an
+`on_disconnection` event, when it closes. In 0.1 inbound connections were keyed by request path, never
+closed, and two peers on one path were merged.
 
 #### HelloPayload Dataclass
 
@@ -267,19 +250,27 @@ sequenceDiagram
     participant A as Node A
     participant B as Node B
     
-    Note over A,B: Connection Establishment
+    Note over A,B: Connection Establishment (A dials B)
     A->>B: Connect (WebSocket)
+    A->>B: HELLO(node_id=A)
     B->>A: HELLO(node_id=B)
+    B->>A: HELLO_ACK(node_id=B)
     A->>B: HELLO_ACK(node_id=A)
-    
-    Note over A,B: Both nodes now CONNECTED
+
+    Note over A,B: Both connections READY
     A->>B: Application Frames
     B->>A: Application Frames
 ```
 
+The inbound side sends its HELLO in reply to the peer's HELLO, not when the socket opens: the dialling
+node subscribes to its new client's messages only after the client started, so an early HELLO could be
+missed. After a reconnect the outbound side starts a fresh handshake; its handshake state is reset only
+when a socket that was up drops, never by a replayed `CONNECTED` state.
+
 ## Logging (OpenTelemetry)
 
-Uses structured logging via `rxplus.telemetry`:
+With a `logger_provider`, the node logs through `rxplus.telemetry`. Without one it logs nothing (0.2;
+0.1 installed a console exporter by default).
 
 | Log Event | Level | Attributes |
 |-----------|-------|------------|

@@ -177,6 +177,13 @@ Only lifecycle failures reach `on_error`: the server cannot bind its port, a cli
 
 `RxWSClientGroup` removes a child that ends with an error and emits `(path, error)` on `group.child_errors`; the group and its other children go on, and the next value for that path starts a new child. The group's own `on_completed` or `on_error` completes every child (children are shut down quietly, not errored), then ends the group's stream; values sent afterwards are ignored.
 
+### Per-connection API
+
+`server.received` emits `WSReceived(connection_id, path, value)` for every received value (the main stream
+carries `TaggedData(path, value)`). `server.send_to(connection_id, value)` sends to that one connection and
+returns `False` if it is unknown or closed. `server.close_connection(connection_id)` closes it. `GatewayNode`
+uses these to keep one connection per socket.
+
 ### Connection events
 
 `server.connections` emits `WSConnectionEvent(kind, connection_id, path)` with `kind` `"opened"` or `"closed"` for every client connection (on the server's loop thread). `connection_id` is unique for the server's lifetime. The stream completes when the server shuts down.

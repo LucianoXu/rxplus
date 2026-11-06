@@ -18,7 +18,7 @@ from .datatypes import (
     WSStr,
     wsdt_factory,
 )
-from .server import RxWSServer, WSChannels, WSConnectionEvent
+from .server import RxWSServer, WSChannels, WSConnectionEvent, WSReceived
 
 # Backward-compatible aliases for names that have been renamed (removed in
 # PR-C of the 0.2 batch).
@@ -45,6 +45,7 @@ __all__ = [
     # server
     "WSChannels",
     "WSConnectionEvent",
+    "WSReceived",
     "RxWSServer",
     # client
     "WSConnectionState",

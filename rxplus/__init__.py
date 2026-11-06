@@ -90,22 +90,13 @@ except ImportError:
 # Gateway exports (always available)
 # =============================================================================
 from .gateway import (  # noqa: F401
-    BufferK,
+    BoundedBuffer,
     Connection,
-    # Connection management
-    ConnectionState,
-    Disconnect,
     DisconnectError,
-    DropNew,
-    DropOld,
-    # Framing abstraction
     Framing,
-    # Gateway node
+    GatewayConnectionState,
     GatewayNode,
     HelloPayload,
-    # Overflow strategies
-    OverflowPolicy,
-    # Stream management
     OverflowStrategy,
     StreamInfo,
     StreamState,
@@ -156,18 +147,14 @@ __all__ = [
     "from_cli",
     "to_cli",
     # Gateway
-    "OverflowPolicy",
-    "DropOld",
-    "DropNew",
-    "BufferK",
-    "Disconnect",
     "DisconnectError",
     "create_overflow_policy",
     "OverflowStrategy",
     "StreamState",
     "StreamInfo",
     "StreamTable",
-    "ConnectionState",
+    "GatewayConnectionState",
+    "BoundedBuffer",
     "Connection",
     "HelloPayload",
     "Framing",

@@ -39,6 +39,19 @@ is in the last column.
 | a value that could not be packaged ended the server/client via `on_error` | logged at ERROR and dropped | — | #11 |
 | a terminal error (retries exhausted, bind failure) left the loop thread running | the thread ends | — | #12 |
 
+## Gateway (`rxplus.gateway`)
+
+| 0.1 | 0.2 | What to do | PR |
+|---|---|---|---|
+| inbound connections keyed by request path, never closed; two peers on one path merged | one connection per server socket; closed (state `CLOSED`, `on_disconnection`) when the socket closes | nothing, unless you relied on the merging | B |
+| the inbound side sent HELLO when a path was first seen | it sends HELLO in reply to the peer's HELLO, then HELLO_ACK | custom peers must send HELLO first (as `GatewayNode` always did) | B |
+| `GatewayNode()` without `logger_provider` logged to the console | logs nothing | pass a `logger_provider` to see logs | B |
+| `ConnectionState` (`rxplus.ConnectionState`, `rxplus.gateway.ConnectionState`) | `GatewayConnectionState` | rename | B |
+| `DropOld`, `DropNew`, `BufferK`, `Disconnect`, `OverflowPolicy` | `BoundedBuffer(limit, strategy)` | `DropOld(n)` → `BoundedBuffer(n, "drop_old")`, etc. | B |
+| `buffer.pop()` returned `None` when empty | raises `IndexError` | check `len(buffer)` or catch `IndexError` | B |
+| `OverflowStrategy` defined in `gateway.stream` | defined in `gateway.overflow` (still exported by `rxplus.gateway`) | import from `rxplus.gateway` | B |
+| — | `RxWSServer.received` (values with their `connection_id`), `send_to(connection_id, value)`, `close_connection(connection_id)` | optional | B |
+
 ## Notes
 
 - "Logged" means an OTel log record on the component's `logger_provider` (nothing without one).
