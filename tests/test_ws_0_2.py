@@ -1,0 +1,237 @@
+"""WS behaviour of the 0.2 batch: codecs on the wire, limits, error semantics."""
+
+import asyncio
+import socket
+import threading
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+
+import websockets
+
+from rxplus import TaggedData
+from rxplus.ws import (
+    JsonCodec,
+    RetryPolicy,
+    RxWSClient,
+    RxWSClientGroup,
+    RxWSServer,
+    WSConnectionConfig,
+    WSConnectionEvent,
+)
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _wait_for(cond: Callable[[], bool], timeout: float = 5.0) -> bool:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(0.01)
+    return cond()
+
+
+def _clients(server: RxWSServer, path: str) -> int:
+    return len(server._get_path_channels(path).queues)
+
+
+@dataclass
+class Reading:
+    sensor: str
+    value: float
+
+
+def test_json_codec_round_trip_between_server_and_client():
+    codec = JsonCodec()
+    codec.register(Reading)
+    port = _free_port()
+    server = RxWSServer(WSConnectionConfig("127.0.0.1", port), datatype=codec)
+    got: list[object] = []
+    server.subscribe(on_next=got.append)
+    client = RxWSClient(WSConnectionConfig("127.0.0.1", port, "/r"), datatype=codec)
+    echoed: list[object] = []
+    client.subscribe(on_next=echoed.append)
+    try:
+        assert _wait_for(lambda: client._connected and _clients(server, "/r") == 1)
+        client.on_next(Reading("t1", 21.5))
+        assert _wait_for(lambda: len(got) == 1)
+        assert isinstance(got[0], TaggedData) and got[0].data == Reading("t1", 21.5)
+        server.on_next(TaggedData("/r", Reading("t2", -1.0)))
+        assert _wait_for(lambda: echoed == [Reading("t2", -1.0)])
+    finally:
+        client.on_completed()
+        server.on_completed()
+
+
+def test_undecodable_and_unencodable_values_are_dropped():
+    codec = JsonCodec()
+    port = _free_port()
+    server = RxWSServer(WSConnectionConfig("127.0.0.1", port), datatype=codec)
+    got: list[object] = []
+    errors: list[Exception] = []
+    server.subscribe(on_next=got.append, on_error=errors.append)
+    client = RxWSClient(WSConnectionConfig("127.0.0.1", port, "/r"), datatype="string")
+    try:
+        assert _wait_for(lambda: client._connected)
+        client.on_next('{"$type":"os.system","fields":{}}')  # refused by the codec
+        client.on_next('{"ok": 1}')
+        assert _wait_for(lambda: len(got) == 1)
+        assert got[0].data == {"ok": 1}
+        server.on_next(TaggedData("/r", object()))  # cannot be encoded: dropped
+        server.on_next("not tagged")  # type: ignore[arg-type]  # dropped
+        assert errors == []
+    finally:
+        client.on_completed()
+        server.on_completed()
+
+
+def test_max_size_closes_oversized_messages():
+    port = _free_port()
+    server = RxWSServer(WSConnectionConfig("127.0.0.1", port), max_size=1024)
+    got: list[object] = []
+    server.subscribe(on_next=got.append)
+    time.sleep(0.2)
+    closed = threading.Event()
+
+    async def main() -> None:
+        async with websockets.connect(f"ws://127.0.0.1:{port}/big") as ws:
+            await ws.send("x" * 4096)
+            try:
+                await asyncio.wait_for(ws.recv(), 3)
+            except websockets.exceptions.ConnectionClosed as e:
+                if e.rcvd is not None and e.rcvd.code == 1009:
+                    closed.set()
+
+    asyncio.run(main())
+    server.on_completed()
+    assert closed.is_set() and got == []
+
+
+def _stalled_client(port: int, path: str, seconds: float) -> threading.Event:
+    """A raw client that connects and never reads."""
+    ready = threading.Event()
+
+    async def main() -> None:
+        async with websockets.connect(f"ws://127.0.0.1:{port}{path}", max_queue=1):
+            ready.set()
+            await asyncio.sleep(seconds)
+
+    threading.Thread(target=lambda: asyncio.run(main()), daemon=True).start()
+    assert ready.wait(5)
+    return ready
+
+
+def test_send_queue_is_bounded_for_a_client_that_does_not_read():
+    port = _free_port()
+    server = RxWSServer(WSConnectionConfig("127.0.0.1", port), send_queue=100)
+    time.sleep(0.2)
+    _stalled_client(port, "/slow", 4)
+    assert _wait_for(lambda: _clients(server, "/slow") == 1)
+    for _ in range(200_000):
+        server.on_next(TaggedData("/slow", "x" * 1024))
+    time.sleep(0.5)
+    (client,) = server._get_path_channels("/slow").get_queues_snapshot()
+    queue = client.queue  # type: ignore[attr-defined]
+    assert len(queue) <= 100 and queue.dropped > 0
+    server.on_completed()
+
+
+def test_disconnect_policy_closes_the_slow_client():
+    port = _free_port()
+    server = RxWSServer(
+        WSConnectionConfig("127.0.0.1", port), send_queue=10, overflow="disconnect"
+    )
+    events: list[WSConnectionEvent] = []
+    server.connections.subscribe(on_next=events.append)
+    time.sleep(0.2)
+    _stalled_client(port, "/slow", 4)
+    assert _wait_for(lambda: _clients(server, "/slow") == 1)
+    for _ in range(200_000):
+        server.on_next(TaggedData("/slow", "x" * 1024))
+        if _clients(server, "/slow") == 0:
+            break
+    assert _wait_for(lambda: _clients(server, "/slow") == 0)
+    server.on_completed()
+    assert [e.kind for e in events] == ["opened", "closed"]
+    assert events[0].connection_id == events[1].connection_id
+    assert events[0].path == "/slow"
+
+
+def test_a_raising_subscriber_does_not_end_the_server():
+    port = _free_port()
+    server = RxWSServer(WSConnectionConfig("127.0.0.1", port))
+    seen: list[object] = []
+
+    def flaky(value: object) -> None:
+        seen.append(value)
+        if len(seen) == 1:
+            raise RuntimeError("subscriber bug")
+
+    server.subscribe(on_next=flaky)
+    client = RxWSClient(WSConnectionConfig("127.0.0.1", port, "/a"))
+    try:
+        assert _wait_for(lambda: client._connected)
+        client.on_next("one")
+        client.on_next("two")
+        assert _wait_for(lambda: len(seen) == 2)
+    finally:
+        client.on_completed()
+        server.on_completed()
+
+
+def test_upstream_on_error_shuts_down_and_forwards_the_error():
+    port = _free_port()
+    server = RxWSServer(WSConnectionConfig("127.0.0.1", port))
+    client = RxWSClient(WSConnectionConfig("127.0.0.1", port, "/a"))
+    server_errors: list[Exception] = []
+    client_errors: list[Exception] = []
+    server.subscribe(on_error=server_errors.append)
+    client.subscribe(on_error=client_errors.append)
+    assert _wait_for(lambda: client._connected)
+    boom = ValueError("upstream failed")
+    client.on_error(boom)
+    server.on_error(boom)
+    assert client_errors == [boom] and server_errors == [boom]
+    assert client._thread is not None and server._thread is not None
+    assert _wait_for(lambda: not client._thread.is_alive())
+    assert _wait_for(lambda: not server._thread.is_alive())
+
+
+def test_group_survives_a_failing_child():
+    group = RxWSClientGroup(
+        WSConnectionConfig("127.0.0.1", _free_port()),  # nothing listens
+        retry_policy=RetryPolicy(max_retries=1, base_delay=0.05, jitter=0.0),
+    )
+    failures: list[tuple[str, Exception]] = []
+    group.child_errors.subscribe(on_next=failures.append)
+    group_errors: list[Exception] = []
+    group.subscribe(on_error=group_errors.append)
+    group.open_path("/a")
+    assert _wait_for(lambda: len(failures) == 1)
+    assert failures[0][0] == "/a" and "/a" not in group._clients
+    assert group_errors == []
+    group.open_path("/a")  # a fresh child for the same path
+    assert "/a" in group._clients
+    group.on_completed()
+
+
+def test_shutdown_with_a_stalled_client_leaves_no_pending_task():
+    port = _free_port()
+    server = RxWSServer(WSConnectionConfig("127.0.0.1", port), send_queue=10)
+    time.sleep(0.2)
+    _stalled_client(port, "/slow", 8)
+    assert _wait_for(lambda: _clients(server, "/slow") == 1)
+    for _ in range(50_000):
+        server.on_next(TaggedData("/slow", "x" * 1024))
+    time.sleep(0.3)
+    server.on_completed()
+    loop = server._loop
+    assert loop is not None and server._thread is not None
+    assert _wait_for(lambda: not server._thread.is_alive())
+    # Tasks still pending here would be destroyed with the closed loop.
+    assert [t for t in asyncio.all_tasks(loop) if not t.done()] == []

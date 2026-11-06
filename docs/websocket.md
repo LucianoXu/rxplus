@@ -6,7 +6,7 @@ Reactive WebSocket server and client with auto-reconnect and multi-path support.
 
 `rxplus` WebSocket components wrap the `websockets` library and expose a `Subject`-based API. Internally, each component runs its own asyncio event loop in a background thread, so you can use them from synchronous code without managing async context.
 
-Data framing is abstracted via `WSDatatype` adapters supporting strings, raw bytes, or pickled Python objects.
+Values are turned into frames by a codec: `"string"`, `"bytes"`, a `WSCodec` of your own, or `JsonCodec` for custom objects (the safe way, see [Codecs](#codecs-and-custom-objects)). Pickle (`"object"`) is available only with `allow_pickle=True`, for trusted links.
 
 ## API
 
@@ -52,7 +52,7 @@ server.on_completed()
 
 | Name | Default | Description |
 |------|---------|-------------|
-| `datatype` | `"string"` | `"string"`, `"bytes"`, `"object"`, or `Callable[[path], dtype]` |
+| `datatype` | `"string"` | `"string"`, `"bytes"`, `"object"` (needs `allow_pickle`), a `WSCodec`, or `Callable[[path], one of these]` |
 | `ping_interval` | `30.0` | Heartbeat interval (seconds) |
 | `ping_timeout` | `30.0` | Heartbeat timeout (seconds) |
 | `name` | `None` | Custom name for log source identification |
@@ -80,7 +80,7 @@ The client automatically retries connection until the server is available.
 
 | Name | Default | Description |
 |------|---------|-------------|
-| `datatype` | `"string"` | `"string"`, `"bytes"`, or `"object"` |
+| `datatype` | `"string"` | `"string"`, `"bytes"`, `"object"` (needs `allow_pickle`), or a `WSCodec` |
 | `retry_policy` | `RetryPolicy()` | Backoff between connection attempts: `max_retries` (`None` = forever), `base_delay` `0.5`, `max_delay` `30.0`, `backoff_factor` `2.0`, `jitter` `0.1` |
 | `ping_interval` | `30.0` | Heartbeat interval (seconds) |
 | `ping_timeout` | `30.0` | Heartbeat timeout (seconds) |
@@ -106,20 +106,73 @@ group.subscribe(lambda td: print(f"[{td.tag}] received"))
 
 | Name | Default | Description |
 |------|---------|-------------|
-| `datatype` | `"string"` | `"string"`, `"bytes"`, `"object"`, or `Callable[[path], dtype]` |
+| `datatype` | `"string"` | as `RxWSServer`; resolved per path |
 | `retry_policy` | `RetryPolicy()` | Passed to child clients |
 | `ping_interval` | `30.0` | Heartbeat interval (seconds) |
 | `ping_timeout` | `30.0` | Heartbeat timeout (seconds) |
 | `name` | `None` | Custom name for log source; child clients use `"{name}:{path}"` |
 | `buffer_while_disconnected` | `False` | If `True`, queue messages while disconnected. Passed to child clients. |
 
+All three components also take these keyword-only parameters (0.2):
+
+| Name | Default | Description |
+|------|---------|-------------|
+| `allow_pickle` | `False` | Allow `datatype="object"`. Unpickling runs the peer's code: trusted links only. |
+| `max_size` | `1 MiB` | Largest incoming message in bytes; a larger one closes the connection (1009). `None`: unlimited. |
+| `send_queue` | `1024` | Frames queued per connection (per client for the server) before `overflow` applies. `None`: unbounded. |
+| `overflow` | `"drop_old"` | Full queue: `"drop_old"` (discard the oldest), `"drop_new"` (discard the new frame), `"disconnect"` (close that connection; a client reconnects with an empty queue). Drops are logged. |
+
 ### Data Types
 
 | Type | Frame | Use Case |
 |------|-------|----------|
-| `"string"` | Text | JSON, commands |
+| `"string"` | Text | Text, commands |
 | `"bytes"` | Binary | Audio, video, raw data |
-| `"object"` | Binary (pickle) | Arbitrary Python objects |
+| `JsonCodec()` | Text | Custom objects (registered dataclasses or classes), JSON values |
+| any `WSCodec` | as it declares | Your own format |
+| `"object"` | Binary (pickle) | Arbitrary Python objects, **trusted links only** (`allow_pickle=True`) |
+
+### Codecs and custom objects
+
+A codec implements `WSCodec[T]`: a `frame` attribute (`"text"` or `"binary"`), `encode(value) -> str | bytes` and `decode(data) -> T` (raising `CodecError` on what it refuses). `JsonCodec` is the documented way to send your own objects:
+
+```python
+from dataclasses import dataclass
+from rxplus import RxWSClient, RxWSServer, WSConnectionConfig
+from rxplus.ws import JsonCodec
+
+codec = JsonCodec(max_size=1 << 20, max_depth=32)
+
+@codec.register  # name defaults to the class's __qualname__
+@dataclass
+class Reading:
+    sensor: str
+    value: float
+
+server = RxWSServer(WSConnectionConfig("127.0.0.1", 8765), datatype=codec)
+client = RxWSClient(WSConnectionConfig("127.0.0.1", 8765, "/r"), datatype=codec)
+client.on_next(Reading("t1", 21.5))  # arrives as TaggedData("/r", Reading("t1", 21.5))
+```
+
+A class that is not a dataclass is registered with explicit conversions: `codec.register_class(Money, name="money", to_dict=..., from_dict=...)`. On the wire a registered object is `{"$type": "<name>", "fields": {...}}` and `bytes` is `{"$bytes": "<base64>"}`; other JSON values pass through.
+
+Decoding checks the size before parsing and rejects duplicate keys, NaN and Infinity, and nesting deeper than `max_depth`. It constructs only types in the codec's registry, with exactly their fields, each validated against the field's annotation. Supported annotations: `None`, `bool`, `int`, `float`, `str`, `bytes`, registered classes, `list[X]`, `tuple[X, ...]`, `dict[str, X]`, and unions of these. It never imports, evaluates or calls anything named by the peer.
+
+### Errors
+
+A problem with one item never ends a component (0.2):
+
+- a value that is not `TaggedData` (server), that the codec cannot encode, or a frame that does not decode: logged at `ERROR`, dropped;
+- a subscriber that raises while handling a received value: logged, the connection goes on;
+- a connection that fails unexpectedly or overflows under `overflow="disconnect"`: that connection is closed, the others go on.
+
+Only lifecycle failures reach `on_error`: the server cannot bind its port, a client exhausts `max_retries` or has an invalid URI. An `on_error` received from upstream shuts the component down (like `on_completed`) and forwards the error to its subscribers.
+
+`RxWSClientGroup` removes a child that ends with an error and emits `(path, error)` on `group.child_errors`; the group and its other children go on, and the next value for that path starts a new child.
+
+### Connection events
+
+`server.connections` emits `WSConnectionEvent(kind, connection_id, path)` with `kind` `"opened"` or `"closed"` for every client connection (on the server's loop thread). `connection_id` is unique for the server's lifetime.
 
 ## Threading Model
 

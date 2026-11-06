@@ -1,8 +1,10 @@
 """WebSocket data types and connection configuration.
 
 Provides the typed connection config dataclass, the abstract WSDatatype base
-class, concrete implementations (WSStr, WSBytes, WSObject), and the
-wsdt_factory helper.
+class, concrete implementations (WSStr, WSBytes, WSObject), the
+wsdt_factory helper, and the resolution of a component's ``datatype``
+argument to a codec per path (built-in names or any
+:class:`~rxplus.ws.codec.WSCodec`).
 """
 
 import pickle
@@ -11,7 +13,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
+from .codec import CodecError, WSCodec
+
 WSDatatypeName = Literal["string", "bytes", "object"]
+
+#: What a component's ``datatype`` takes: a built-in name, a codec, or a
+#: function of the request path returning either.
+type DatatypeSpec = (
+    WSDatatypeName | WSCodec[object] | Callable[[str], WSDatatypeName | WSCodec[object]]
+)
 
 
 @dataclass(frozen=True)
@@ -24,6 +34,25 @@ class WSConnectionConfig:
 
 
 class WSDatatype(ABC):
+    """A built-in codec: ``"string"``, ``"bytes"`` or ``"object"`` (pickle)."""
+
+    frame: Literal["text", "binary"] = "binary"
+
+    def encode(self, value: object) -> str | bytes:
+        """:class:`WSCodec` interface: check, then package."""
+        try:
+            self.package_type_check(value)
+            return self.package(value)
+        except TypeError as e:
+            raise CodecError(str(e)) from e
+
+    def decode(self, data: str | bytes) -> object:
+        """:class:`WSCodec` interface."""
+        try:
+            return self.unpackage(data)
+        except TypeError as e:
+            raise CodecError(str(e)) from e
+
     @abstractmethod
     def package_type_check(self, value: str | bytes | object) -> None:
         """Check whether the value can be sent through this datatype.
@@ -40,6 +69,8 @@ class WSDatatype(ABC):
 
 
 class WSStr(WSDatatype):
+    frame: Literal["text", "binary"] = "text"
+
     def package_type_check(self, value: str | bytes | object) -> None:
         # Ensure text frames are actual strings to avoid implicit coercion
         # and unexpected payload formats at send time.
@@ -119,21 +150,46 @@ def wsdt_factory(datatype: Literal["string", "bytes", "object"]) -> WSDatatype:
         raise ValueError(f"Unsupported datatype '{datatype}'.")
 
 
-def _resolve_datatype_func(
-    datatype: Callable[[str], WSDatatypeName] | WSDatatypeName,
-) -> Callable[[str], WSDatatypeName]:
-    """Return the per-path datatype function for a fixed name or a callable."""
-    if isinstance(datatype, str):
-        if datatype not in ("string", "bytes", "object"):
-            raise ValueError(
-                f"Unsupported datatype '{datatype}'."
-                " Expected 'string', 'bytes', 'object', or a callable function."
+class PickleNotAllowedError(ValueError):
+    """``datatype="object"`` (pickle) was requested without ``allow_pickle``."""
+
+
+def codec_for(
+    choice: WSDatatypeName | WSCodec[object], *, allow_pickle: bool
+) -> WSCodec[object]:
+    """The codec for one resolved ``datatype`` choice.
+
+    ``"object"`` unpickles whatever the peer sends, which runs the peer's
+    code: it is refused unless ``allow_pickle=True`` (trusted links only).
+    """
+    if isinstance(choice, str):
+        if choice == "object" and not allow_pickle:
+            raise PickleNotAllowedError(
+                'datatype="object" unpickles peer data (code execution);'
+                " pass allow_pickle=True on trusted links only, or use"
+                " rxplus.ws.JsonCodec for custom objects"
             )
-        fixed: WSDatatypeName = datatype
+        return wsdt_factory(choice)
+    if isinstance(choice, WSCodec):
+        return choice
+    raise ValueError(f"Unsupported datatype {choice!r}")
+
+
+def resolve_codecs(
+    datatype: DatatypeSpec, *, allow_pickle: bool
+) -> Callable[[str], WSCodec[object]]:
+    """Per-path codec function for a component's ``datatype`` argument.
+
+    A fixed choice is validated at once, so ``datatype="object"`` without
+    ``allow_pickle`` fails at construction.
+    """
+    if isinstance(datatype, str) or isinstance(datatype, WSCodec):
+        fixed = codec_for(datatype, allow_pickle=allow_pickle)
         return lambda _path: fixed
     if callable(datatype):
-        return datatype
+        per_path = datatype
+        return lambda path: codec_for(per_path(path), allow_pickle=allow_pickle)
     raise ValueError(
-        f"Unsupported datatype '{datatype}'."
-        " Expected 'string', 'bytes', 'object', or a callable function."
+        f"Unsupported datatype {datatype!r}. Expected 'string', 'bytes',"
+        " 'object', a WSCodec, or a function of the path returning one."
     )

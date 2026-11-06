@@ -39,6 +39,7 @@ def task(parsed_args: argparse.Namespace):
             path=parsed_args.path,
         ),
         datatype="object",
+        allow_pickle=True,  # numpy arrays between trusted local tasks only
     )
 
     # Print inbound matrices

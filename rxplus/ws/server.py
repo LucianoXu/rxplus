@@ -2,29 +2,42 @@
 
 Provides WSChannels for managing per-path client connections and RxWSServer
 which runs a websockets server on a background thread.
+
+Error semantics (0.2): a problem with one item (not ``TaggedData``, cannot be
+encoded, cannot be decoded, a subscriber raising) is logged at ERROR and the
+item is dropped; a problem with one connection (its send queue overflowing
+under ``overflow="disconnect"``, an unexpected exception) closes that
+connection only. Only lifecycle failures (the port cannot be bound) reach
+``on_error``.
 """
 
 import asyncio
+import itertools
 import socket
 import threading
-from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import websockets
 from opentelemetry._logs import LoggerProvider
 from opentelemetry.trace import Tracer, TracerProvider
-from reactivex import Subject
+from reactivex import Observable, Subject
 from websockets import ClientConnection, Server, ServerConnection
 
 from ..mechanism import RxException
 from ..utils import TaggedData, get_short_error_info
 from ._otel_mixin import OTelLoggingMixin
+from ._sendqueue import QueueOverflow, SendOverflow, SendQueue
+from .codec import WSCodec
 from .datatypes import (
+    DatatypeSpec,
     WSConnectionConfig,
-    WSDatatype,
-    _resolve_datatype_func,
-    wsdt_factory,
+    WSDatatypeName,
+    codec_for,
+    resolve_codecs,
 )
+
+DEFAULT_MAX_SIZE = 1 << 20  # 1 MiB: largest incoming message by default
 
 
 def _ws_path(ws: ClientConnection | ServerConnection) -> str:
@@ -42,56 +55,91 @@ def _ws_path(ws: ClientConnection | ServerConnection) -> str:
     return ""
 
 
+@dataclass(frozen=True, slots=True)
+class WSConnectionEvent:
+    """A client connection of an :class:`RxWSServer` opened or closed.
+
+    ``connection_id`` is unique per server for its lifetime; ``path`` is the
+    request path the client connected on.
+    """
+
+    kind: Literal["opened", "closed"]
+    connection_id: int
+    path: str
+
+
 class WSChannels:
     """Manages the websocket channels of the same path.
 
     Thread-safe access to channels and queues via internal lock.
     """
 
-    def __init__(self, datatype: Literal["string", "bytes", "object"] = "string"):
-        self.adapter: WSDatatype = wsdt_factory(datatype)
+    def __init__(
+        self,
+        datatype: WSDatatypeName | WSCodec[object] = "string",
+        *,
+        allow_pickle: bool = False,
+    ):
+        self.adapter: WSCodec[object] = codec_for(datatype, allow_pickle=allow_pickle)
         self._lock = threading.Lock()
-        self.channels: set[ClientConnection] = set()
-        self.queues: set[asyncio.Queue[str | bytes]] = set()
+        self.channels: set[object] = set()
+        self.queues: set[object] = set()
 
-    def add_client(
-        self, websocket: ClientConnection, queue: asyncio.Queue[str | bytes]
-    ) -> None:
+    def add_client(self, websocket: object, queue: object) -> None:
         """Thread-safe registration of a client."""
         with self._lock:
             self.channels.add(websocket)
             self.queues.add(queue)
 
-    def remove_client(
-        self, websocket: ClientConnection, queue: asyncio.Queue[str | bytes]
-    ) -> None:
+    def remove_client(self, websocket: object, queue: object) -> None:
         """Thread-safe removal of a client."""
         with self._lock:
             self.channels.discard(websocket)
             self.queues.discard(queue)
 
-    def get_queues_snapshot(self) -> list[asyncio.Queue[str | bytes]]:
+    def get_queues_snapshot(self) -> list[object]:
         """Return a snapshot of queues for iteration."""
         with self._lock:
             return list(self.queues)
 
 
+class _Client:
+    """A connected client: its socket, send queue and identity."""
+
+    __slots__ = ("websocket", "queue", "connection_id", "desc")
+
+    def __init__(
+        self, websocket: ServerConnection, queue: SendQueue, cid: int, desc: str
+    ) -> None:
+        self.websocket = websocket
+        self.queue = queue
+        self.connection_id = cid
+        self.desc = desc
+
+
 class RxWSServer(Subject, OTelLoggingMixin):
     """WebSocket server for bi-directional communication between ReactiveX components.
 
-    The server can handle connections from multiple clients on different
-    paths. Here different paths means the original URI path.
+    The server handles clients on any request path. Received values are
+    emitted as ``TaggedData(path, value)``; ``on_next(TaggedData(path,
+    value))`` sends ``value`` to every client on ``path``.
 
-    It will wrap the data in a ``TaggedData`` object with the path, and
-    call ``on_next``.
+    Args:
+        config: Host and port to listen on (``path`` is ignored).
+        datatype: ``"string"``, ``"bytes"``, ``"object"`` (pickle, needs
+            ``allow_pickle``), a :class:`~rxplus.ws.codec.WSCodec` such as
+            :class:`~rxplus.ws.codec.JsonCodec`, or a function of the path
+            returning one of these.
+        allow_pickle: Allow ``"object"``. Unpickling runs the peer's code:
+            trusted links only.
+        max_size: Largest incoming message in bytes (None: unlimited).
+        send_queue: Frames queued per client before ``overflow`` applies
+            (None: unbounded).
+        overflow: ``"drop_old"``, ``"drop_new"`` or ``"disconnect"``.
 
-    When ``on_next`` is called, it will check whether the value is a
-    ``TaggedData``. If it is, it will send the data to the corresponding
-    path's channels. If not, it will send the data to the default
-    path's channels (i.e., the empty path).
-
-    Use datatype parameter to control the data type sent through the websocket.
-    The server will be closed upon receiving on_completed signal.
+    ``connections`` emits a :class:`WSConnectionEvent` when a client
+    connects or disconnects. The server shuts down on ``on_completed`` and
+    on ``on_error`` (which it then forwards to its subscribers).
 
     Telemetry is optional -- pass tracer_provider and/or logger_provider to enable
     OTel instrumentation. Without providers, the component operates silently.
@@ -100,15 +148,17 @@ class RxWSServer(Subject, OTelLoggingMixin):
     def __init__(
         self,
         config: WSConnectionConfig,
-        datatype: (
-            Callable[[str], Literal["string", "bytes", "object"]]
-            | Literal["string", "bytes", "object"]
-        ) = "string",
+        datatype: DatatypeSpec = "string",
         ping_interval: float | None = 30.0,
         ping_timeout: float | None = 30.0,
         name: str | None = None,
         tracer_provider: TracerProvider | None = None,
         logger_provider: LoggerProvider | None = None,
+        *,
+        allow_pickle: bool = False,
+        max_size: int | None = DEFAULT_MAX_SIZE,
+        send_queue: int | None = 1024,
+        overflow: SendOverflow = "drop_old",
     ):
         """Initialize the WebSocket server and start listening."""
         super().__init__()
@@ -130,10 +180,12 @@ class RxWSServer(Subject, OTelLoggingMixin):
             else None
         )
 
-        # the function to determine the datatype of the path
-        self.datatype_func: Callable[[str], Literal["string", "bytes", "object"]] = (
-            _resolve_datatype_func(datatype)
-        )
+        # Codec per path; a fixed "object" without allow_pickle fails here.
+        self._codec_for_path = resolve_codecs(datatype, allow_pickle=allow_pickle)
+        SendQueue(send_queue, overflow)  # validate the arguments now
+        self._send_queue = send_queue
+        self._overflow: SendOverflow = overflow
+        self._max_size = max_size
 
         self.ping_interval = ping_interval
         self.ping_timeout = ping_timeout
@@ -141,6 +193,9 @@ class RxWSServer(Subject, OTelLoggingMixin):
         # Thread-safe access to path_channels
         self._path_channels_lock = threading.Lock()
         self.path_channels: dict[str, WSChannels] = {}
+
+        self._connection_ids = itertools.count(1)
+        self._connections: Subject[WSConnectionEvent] = Subject()
 
         # Private asyncio loop in a background thread
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -152,217 +207,190 @@ class RxWSServer(Subject, OTelLoggingMixin):
 
         self._start_server_thread()
 
+    @property
+    def connections(self) -> Observable[WSConnectionEvent]:
+        """Client connections opening and closing (emitted on the loop thread)."""
+        return self._connections
+
     def _get_path_channels(self, path: str) -> WSChannels:
         """Get the WSChannels instance for the given path.
 
         If the path does not exist, create a new WSChannels instance.
-        Thread-safe via _path_channels_lock.
+        Thread-safe via _path_channels_lock. Raises if the path's datatype
+        is refused (``"object"`` without ``allow_pickle``).
         """
         with self._path_channels_lock:
             if path not in self.path_channels:
-                datatype = self.datatype_func(path)
-                self.path_channels[path] = WSChannels(datatype=datatype)
+                codec = self._codec_for_path(path)
+                self.path_channels[path] = WSChannels(codec)
             return self.path_channels[path]
 
+    def _drop(self, what: str, error: Exception | None = None) -> None:
+        detail = f": {get_short_error_info(error)}" if error is not None else ""
+        self._log(f"Dropped {what}{detail}", "ERROR")
+
     def on_next(self, value: TaggedData) -> None:
-        """Route outbound messages to the proper channel queues."""
-        # determine channel and data
-        if isinstance(value, TaggedData):
-            # get the channels for the given path
+        """Encode once and queue the frame for every client on the path.
+
+        A value that is not ``TaggedData`` or cannot be encoded is logged and
+        dropped (0.1: ``on_error`` ended the server).
+        """
+        if not isinstance(value, TaggedData):
+            self._drop(f"a {type(value).__name__}: RxWSServer expects TaggedData")
+            return
+        try:
             ws_channels = self._get_path_channels(value.tag)
-            data = value.data
-        else:
-            rx_exception = RxException(
-                ValueError(f"Expected TaggedData, but got {type(value)}"),
-                source=self._name,
-                note="RxWSServer.on_next",
-            )
-            super().on_error(rx_exception)
+            frame = ws_channels.adapter.encode(value.data)
+        except Exception as e:
+            self._drop(f"a value for path {value.tag!r}", e)
             return
 
-        # type check data
-        ws_channels.adapter.package_type_check(data)
-
-        # push the data
         if not self._loop_ready.wait(timeout=5.0):
-            rx_exception = RxException(
-                RuntimeError("Server event loop failed to start"),
-                source=self._name,
-                note="RxWSServer.on_next",
-            )
-            super().on_error(rx_exception)
+            self._drop("a value: the server event loop did not start")
             return
-
         loop = self._loop
-        if loop is None:
-            # Should not happen because _loop_ready is set when loop is created.
-            rx_exception = RxException(
-                RuntimeError("Server event loop not available"),
-                source=self._name,
-                note="RxWSServer.on_next",
-            )
-            super().on_error(rx_exception)
-            return
-
-        if loop.is_closed():
+        if loop is None or loop.is_closed():
             return  # the server has ended; there is no client to send to
-        for queue in ws_channels.get_queues_snapshot():
-            try:
-                loop.call_soon_threadsafe(queue.put_nowait, data)
-            except RuntimeError:
-                return  # the loop closed meanwhile
+        try:
+            loop.call_soon_threadsafe(self._enqueue, ws_channels, frame)
+        except RuntimeError:
+            return  # the loop closed meanwhile
+
+    def _enqueue(self, ws_channels: WSChannels, frame: str | bytes) -> None:
+        """Loop thread: queue a frame for every client of a path."""
+        for client in ws_channels.get_queues_snapshot():
+            assert isinstance(client, _Client)
+            before = client.queue.dropped
+            if not client.queue.put(frame):
+                self._log(
+                    f"Send queue of {client.desc} overflowed"
+                    f" ({client.queue.limit} frames); disconnecting",
+                    "WARN",
+                )
+            elif client.queue.dropped != before and client.queue.dropped % 1000 == 1:
+                self._log(
+                    f"Send queue of {client.desc} full; {client.queue.dropped}"
+                    f" frames dropped ({client.queue.overflow})",
+                    "WARN",
+                )
 
     def on_error(self, error: Exception) -> None:
-        """Forward errors to subscribers."""
-        super().on_error(error)
+        """Shut the server down, then forward the error to subscribers."""
+        self._shutdown_server(error)
 
     def on_completed(self) -> None:
         """Complete the server after closing all connections."""
-        self._shutdown_server()
+        self._shutdown_server(None)
 
-    async def handle_client(self, websocket: ClientConnection) -> None:
+    async def handle_client(self, websocket: ServerConnection) -> None:
         """Serve a connected WebSocket client until the link closes."""
-
         path = _ws_path(websocket)
         remote_desc = f"[{websocket.remote_address} on path {path}]"
-
-        self._log(f"Client established from {remote_desc}", "INFO")
-
         try:
             ws_channels = self._get_path_channels(path)
+        except Exception as e:
+            self._log(f"Refused {remote_desc}: {get_short_error_info(e)}", "ERROR")
+            await websocket.close(1011, "datatype refused")
+            return
 
-            queue: asyncio.Queue[str | bytes] = asyncio.Queue()
-
-            # Register client (thread-safe)
-            ws_channels.add_client(websocket, queue)
-
-            sender_task = asyncio.create_task(
-                self._server_sender(queue, websocket, ws_channels.adapter, remote_desc)
-            )
+        cid = next(self._connection_ids)
+        client = _Client(
+            websocket, SendQueue(self._send_queue, self._overflow), cid, remote_desc
+        )
+        ws_channels.add_client(websocket, client)
+        self._log(f"Client established from {remote_desc}", "INFO")
+        self._connections.on_next(WSConnectionEvent("opened", cid, path))
+        try:
+            sender_task = asyncio.create_task(self._server_sender(client))
             receiver_task = asyncio.create_task(
                 self._server_receiver(websocket, path, ws_channels.adapter, remote_desc)
             )
-
-            tasks = {sender_task, receiver_task}
             done, pending = await asyncio.wait(
-                tasks, return_when=asyncio.FIRST_COMPLETED
+                {sender_task, receiver_task}, return_when=asyncio.FIRST_COMPLETED
             )
-
             for task in pending:
                 task.cancel()
-
             await asyncio.gather(*pending, return_exceptions=True)
-
             for task in done:
-                # Propagate unexpected exceptions to the outer handler.
-                task.result()
-
+                task.result()  # surface unexpected exceptions below
         except asyncio.CancelledError:
             self._log(f"Client {remote_desc} connection cancelled.", "INFO")
             raise
-
         except Exception as e:
-            rx_exception = RxException(
-                e, source=self._name, note=f"Error while handling client {remote_desc}"
+            # One connection's failure closes that connection only.
+            self._log(
+                f"Closing {remote_desc} after an unexpected error:"
+                f" {get_short_error_info(e)}",
+                "ERROR",
             )
-            super().on_error(rx_exception)
-
         finally:
-            await websocket.close()
+            # Unregister first: no more frames for it. A peer that does not
+            # read cannot finish the closing handshake, so bound the close.
+            ws_channels.remove_client(websocket, client)
+            try:
+                await asyncio.wait_for(websocket.close(), timeout=2.0)
+            except TimeoutError:
+                websocket.transport.abort()
             self._log(f"Client {remote_desc} resources released.", "INFO")
+            self._connections.on_next(WSConnectionEvent("closed", cid, path))
 
-            # Unregister client (thread-safe)
-            ws_channels.remove_client(websocket, queue)
-
-    async def _server_sender(
-        self,
-        queue: asyncio.Queue[str | bytes],
-        websocket: ClientConnection,
-        adapter: WSDatatype,
-        remote_desc: str,
-    ) -> None:
-        try:
-            while True:
-                value = await queue.get()
-                try:
-                    frame = adapter.package(value)
-                except Exception as e:
-                    # One value that cannot be serialised (e.g. unpicklable
-                    # for WSObject) is dropped; it must not end the
-                    # connection or error the whole server.
-                    self._log(
-                        f"Dropped a value for {remote_desc} that could not be"
-                        f" packaged: {get_short_error_info(e)}",
-                        "ERROR",
-                    )
-                    continue
-                try:
-                    await websocket.send(frame)
-                except (ConnectionResetError, BrokenPipeError, OSError) as e:
-                    self._log(
-                        f"Failed to send to client {remote_desc},"
-                        f" connection broken: {get_short_error_info(e)}",
-                        "WARN",
-                    )
-                    return
-                except websockets.exceptions.ConnectionClosed as e:
-                    self._log(
-                        f"Failed to send to client {remote_desc},"
-                        f" connection closed: {get_short_error_info(e)}",
-                        "WARN",
-                    )
-                    return
-        except asyncio.CancelledError:
-            raise
+    async def _server_sender(self, client: _Client) -> None:
+        while True:
+            try:
+                frame = await client.queue.get()
+            except QueueOverflow:
+                return  # overflow="disconnect": end this connection
+            try:
+                await client.websocket.send(frame)
+            except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                self._log(
+                    f"Failed to send to client {client.desc},"
+                    f" connection broken: {get_short_error_info(e)}",
+                    "WARN",
+                )
+                return
+            except websockets.exceptions.ConnectionClosed as e:
+                self._log(
+                    f"Failed to send to client {client.desc},"
+                    f" connection closed: {get_short_error_info(e)}",
+                    "WARN",
+                )
+                return
 
     async def _server_receiver(
         self,
-        websocket: ClientConnection,
+        websocket: ServerConnection,
         path: str,
-        adapter: WSDatatype,
+        adapter: WSCodec[object],
         remote_desc: str,
     ) -> None:
-        try:
-            while True:
-                try:
-                    data = await websocket.recv()
-                except ConnectionResetError as e:
-                    self._log(
-                        f"Connection reset: {get_short_error_info(e)}",
-                        "WARN",
-                    )
-                    return
-                except OSError as e:
-                    self._log(
-                        f"Network error (OSError): {get_short_error_info(e)}",
-                        "WARN",
-                    )
-                    return
-                except websockets.exceptions.ConnectionClosedError as e:
-                    self._log(
-                        f"Client {remote_desc} disconnected"
-                        f" with error: {get_short_error_info(e)}.",
-                        "WARN",
-                    )
-                    return
-                except websockets.exceptions.ConnectionClosedOK:
-                    self._log(f"Client {remote_desc} disconnected gracefully.", "INFO")
-                    return
+        while True:
+            try:
+                data = await websocket.recv()
+            except websockets.exceptions.ConnectionClosedOK:
+                self._log(f"Client {remote_desc} disconnected gracefully.", "INFO")
+                return
+            except websockets.exceptions.ConnectionClosedError as e:
+                self._log(
+                    f"Client {remote_desc} disconnected"
+                    f" with error: {get_short_error_info(e)}.",
+                    "WARN",
+                )
+                return
+            except OSError as e:
+                self._log(f"Network error: {get_short_error_info(e)}", "WARN")
+                return
 
-                try:
-                    payload = adapter.unpackage(data)
-                except Exception as e:
-                    self._log(
-                        f"Failed to unpackage from {remote_desc}:"
-                        f" {get_short_error_info(e)}",
-                        "ERROR",
-                    )
-                    continue
-
-                wrapped_data = TaggedData(path, payload)
-                super().on_next(wrapped_data)
-        except asyncio.CancelledError:
-            raise
+            try:
+                payload = adapter.decode(data)
+            except Exception as e:
+                self._drop(f"a message from {remote_desc} that did not decode", e)
+                continue
+            try:
+                super().on_next(TaggedData(path, payload))
+            except Exception as e:
+                # A subscriber raised: its problem, not the connection's.
+                self._drop(f"a message from {remote_desc}: a subscriber raised", e)
 
     def _make_dual_stack_socket(self) -> socket.socket | None:
         """Create a dual-stack IPv6 socket if the host is an IPv6 wildcard.
@@ -390,18 +418,18 @@ class RxWSServer(Subject, OTelLoggingMixin):
             serve_kwargs: dict[str, Any] = dict(
                 ping_interval=self.ping_interval,
                 ping_timeout=self.ping_timeout,
-                max_size=None,
+                max_size=self._max_size,
                 process_request=self._process_request,
             )
             if dual_sock is not None:
                 serve_kwargs["sock"] = dual_sock
                 self.serve = await websockets.serve(
-                    self.handle_client,  # type: ignore[arg-type]
+                    self.handle_client,
                     **serve_kwargs,
                 )
             else:
                 self.serve = await websockets.serve(
-                    self.handle_client,  # type: ignore[arg-type]
+                    self.handle_client,
                     self.host,
                     self.port,
                     **serve_kwargs,
@@ -494,7 +522,8 @@ class RxWSServer(Subject, OTelLoggingMixin):
         self._thread = threading.Thread(target=self._run_server_loop, daemon=True)
         self._thread.start()
 
-    def _shutdown_server(self) -> None:
+    def _shutdown_server(self, error: Exception | None) -> None:
+        """Stop serving, then complete (or, with ``error``, error) the server."""
         self._log("Closing...", "INFO")
         try:
             loop_alive = (
@@ -517,6 +546,21 @@ class RxWSServer(Subject, OTelLoggingMixin):
                                 except TimeoutError:
                                     pass
                             self.serve = None
+                        # Peers that did not finish the closing handshake
+                        # (e.g. stalled readers) would leave their handler
+                        # tasks pending and destroyed with the loop: abort
+                        # their sockets, then cancel and await the handlers.
+                        for channels in list(self.path_channels.values()):
+                            for ws in list(channels.channels):
+                                transport = getattr(ws, "transport", None)
+                                if transport is not None:
+                                    transport.abort()
+                        current = asyncio.current_task()
+                        others = [t for t in asyncio.all_tasks() if t is not current]
+                        for task in others:
+                            task.cancel()
+                        if others:
+                            await asyncio.wait(others, timeout=1.0)
                     finally:
                         asyncio.get_running_loop().stop()
 
@@ -528,13 +572,18 @@ class RxWSServer(Subject, OTelLoggingMixin):
                 except RuntimeError:
                     pass  # the loop ended on its own meanwhile
 
-            if self._thread is not None:
+            if (
+                self._thread is not None
+                and self._thread is not threading.current_thread()
+            ):
                 self._thread.join(timeout=3.0)
 
             self._log("Closed.", "INFO")
-            super().on_completed()
+            self._connections.on_completed()
+            if error is None:
+                super().on_completed()
+            else:
+                super().on_error(error)
         except Exception as e:
-            rx_exception = RxException(
-                e, source=self._name, note="RxWSServer.on_completed"
-            )
+            rx_exception = RxException(e, source=self._name, note="RxWSServer shutdown")
             super().on_error(rx_exception)

@@ -46,6 +46,7 @@ def task(parsed_args: argparse.Namespace):
             port=parsed_args.port,
         ),
         datatype="object",
+        allow_pickle=True,  # numpy arrays between trusted local tasks only
     )
 
     # Log inbound messages from clients (if any)
