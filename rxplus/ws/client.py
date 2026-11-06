@@ -49,7 +49,8 @@ class RetryPolicy:
             resets the backoff, and the client reconnects at once when it
             drops. A connection that closes sooner counts as a failed attempt,
             so a server that accepts and immediately closes is retried with
-            backoff instead of in a tight loop.
+            backoff instead of in a tight loop; such drops also count toward
+            ``max_retries``.
     """
 
     max_retries: int | None = None  # None = infinite
@@ -378,12 +379,15 @@ class RxWSClient(Subject, OTelLoggingMixin):
                 )
 
                 try:
+                    # websockets.connect has its own open_timeout (default
+                    # 10 s); pass ours so None really means "no limit".
                     self.ws = await asyncio.wait_for(
                         websockets.connect(
                             url,
                             ping_interval=self.ping_interval,
                             ping_timeout=self.ping_timeout,
                             max_size=None,
+                            open_timeout=self._open_timeout,
                         ),
                         self._open_timeout,
                     )
