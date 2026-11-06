@@ -29,10 +29,16 @@ def _unpicklable() -> Callable[[], None]:
 
 def test_server_survives_unpicklable_value():
     port = _free_port()
-    server = RxWSServer(WSConnectionConfig("127.0.0.1", port), datatype="object")
+    server = RxWSServer(
+        WSConnectionConfig("127.0.0.1", port), datatype="object", allow_pickle=True
+    )
     errors: list[Exception] = []
     server.subscribe(on_error=errors.append)
-    client = RxWSClient(WSConnectionConfig("127.0.0.1", port, "/a"), datatype="object")
+    client = RxWSClient(
+        WSConnectionConfig("127.0.0.1", port, "/a"),
+        datatype="object",
+        allow_pickle=True,
+    )
     received: list[object] = []
     client.subscribe(on_next=received.append)
     try:
@@ -48,10 +54,16 @@ def test_server_survives_unpicklable_value():
 
 def test_client_survives_unpicklable_value():
     port = _free_port()
-    server = RxWSServer(WSConnectionConfig("127.0.0.1", port), datatype="object")
+    server = RxWSServer(
+        WSConnectionConfig("127.0.0.1", port), datatype="object", allow_pickle=True
+    )
     received: list[object] = []
     server.subscribe(on_next=received.append)
-    client = RxWSClient(WSConnectionConfig("127.0.0.1", port, "/a"), datatype="object")
+    client = RxWSClient(
+        WSConnectionConfig("127.0.0.1", port, "/a"),
+        datatype="object",
+        allow_pickle=True,
+    )
     errors: list[Exception] = []
     client.subscribe(on_error=errors.append)
     try:

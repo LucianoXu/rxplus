@@ -375,26 +375,47 @@ def test_client_emits_closed_on_completed():
 # =============================================================================
 # Datatype resolution
 # =============================================================================
+# Datatype resolution
+# =============================================================================
 
 
-def test_resolve_datatype_func_fixed_name():
-    from rxplus.ws.datatypes import _resolve_datatype_func
+def test_resolve_codecs_fixed_name():
+    from rxplus.ws.datatypes import resolve_codecs
 
-    f = _resolve_datatype_func("bytes")
-    assert f("/a") == "bytes"
-    assert f("/b") == "bytes"
-
-
-def test_resolve_datatype_func_callable():
-    from rxplus.ws.datatypes import _resolve_datatype_func
-
-    f = _resolve_datatype_func(lambda p: "object" if p == "/o" else "string")
-    assert f("/o") == "object"
-    assert f("/s") == "string"
+    f = resolve_codecs("bytes", allow_pickle=False)
+    assert isinstance(f("/a"), WSBytes)
+    assert f("/a") is f("/b")
 
 
-def test_resolve_datatype_func_invalid():
-    from rxplus.ws.datatypes import _resolve_datatype_func
+def test_resolve_codecs_callable_and_codec():
+    from rxplus.ws import JsonCodec
+    from rxplus.ws.datatypes import resolve_codecs
 
-    with pytest.raises(ValueError, match="Unsupported datatype"):
-        _resolve_datatype_func("json")
+    json_codec = JsonCodec()
+    f = resolve_codecs(
+        lambda p: json_codec if p == "/j" else "string", allow_pickle=False
+    )
+    assert f("/j") is json_codec
+    assert isinstance(f("/s"), WSStr)
+
+
+def test_resolve_codecs_invalid():
+    from rxplus.ws.datatypes import resolve_codecs
+
+    with pytest.raises(ValueError):
+        resolve_codecs("json", allow_pickle=False)  # type: ignore[arg-type]
+
+
+def test_object_datatype_needs_allow_pickle():
+    from rxplus.ws.datatypes import PickleNotAllowedError, resolve_codecs
+
+    with pytest.raises(PickleNotAllowedError):
+        resolve_codecs("object", allow_pickle=False)
+    per_path = resolve_codecs(lambda p: "object", allow_pickle=False)
+    with pytest.raises(PickleNotAllowedError):
+        per_path("/x")
+    assert isinstance(resolve_codecs("object", allow_pickle=True)("/x"), WSObject)
+    with pytest.raises(PickleNotAllowedError):
+        RxWSClient(WSConnectionConfig("127.0.0.1", 9), datatype="object")
+    with pytest.raises(PickleNotAllowedError):
+        RxWSServer(WSConnectionConfig("127.0.0.1", 0), datatype="object")

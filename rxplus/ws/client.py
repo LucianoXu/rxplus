@@ -9,7 +9,6 @@ import random
 import threading
 from dataclasses import dataclass
 from enum import Enum
-from typing import Literal
 
 import websockets
 from opentelemetry._logs import LoggerProvider
@@ -22,7 +21,11 @@ from websockets import ClientConnection
 from ..mechanism import RxException
 from ..utils import get_full_error_info, get_short_error_info
 from ._otel_mixin import OTelLoggingMixin
-from .datatypes import WSConnectionConfig, WSDatatype, wsdt_factory
+from ._sendqueue import QueueOverflow, SendOverflow, SendQueue
+from .codec import WSCodec
+from .datatypes import WSConnectionConfig, WSDatatypeName, codec_for
+
+DEFAULT_MAX_SIZE = 1 << 20  # 1 MiB: largest incoming message by default
 
 
 class WSConnectionState(Enum):
@@ -104,11 +107,32 @@ class RxWSClient(Subject, OTelLoggingMixin):
         Custom name for log source identification. If not provided, defaults
         to ``"RxWSClient:ws://{host}:{port}{path}"``.
     buffer_while_disconnected : bool
-        If True, queue messages while disconnected. If False (default),
-        messages are dropped when not connected.
+        If True, queue messages while disconnected (up to ``send_queue``).
+        If False (default), messages are dropped when not connected.
     open_timeout : float | None
         Maximum time in seconds for the TCP connect plus the WebSocket
         handshake of one attempt. ``None`` waits indefinitely.
+    allow_pickle : bool
+        Allow ``datatype="object"``. Unpickling runs the peer's code:
+        trusted links only; use :class:`~rxplus.ws.codec.JsonCodec` for
+        custom objects.
+    max_size : int | None
+        Largest incoming message in bytes (None: unlimited).
+    send_queue : int | None
+        Frames queued before ``overflow`` applies (None: unbounded).
+    overflow : "drop_old" | "drop_new" | "disconnect"
+        What a full send queue does while connected; ``"disconnect"`` drops
+        the connection (the client then reconnects with an empty queue).
+        While offline (``buffer_while_disconnected``) a full buffer always
+        drops its oldest frame: there is no connection to drop.
+    send_queue_bytes : int | None
+        Optional bound on the queued bytes; ``overflow`` applies when either
+        bound is reached.
+
+    Error semantics (0.2): a value that cannot be encoded or decoded, or a
+    subscriber that raises, is logged and the item dropped. ``on_error``
+    shuts the client down and forwards the error; only lifecycle failures
+    (retries exhausted, invalid URI) error the client by themselves.
 
     Raises
     ------
@@ -120,7 +144,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
     def __init__(
         self,
         config: WSConnectionConfig,
-        datatype: Literal["string", "bytes", "object"] = "string",
+        datatype: WSDatatypeName | WSCodec[object] = "string",
         retry_policy: RetryPolicy | None = None,
         ping_interval: float | None = 30.0,
         ping_timeout: float | None = 30.0,
@@ -129,6 +153,12 @@ class RxWSClient(Subject, OTelLoggingMixin):
         tracer_provider: TracerProvider | None = None,
         logger_provider: LoggerProvider | None = None,
         open_timeout: float | None = 10.0,
+        *,
+        allow_pickle: bool = False,
+        max_size: int | None = DEFAULT_MAX_SIZE,
+        send_queue: int | None = 1024,
+        overflow: SendOverflow = "drop_old",
+        send_queue_bytes: int | None = None,
     ):
         """Create a reconnecting WebSocket client.
 
@@ -170,15 +200,23 @@ class RxWSClient(Subject, OTelLoggingMixin):
         )
 
         self.datatype = datatype
-        self.adapter: WSDatatype = wsdt_factory(datatype)
+        # "object" without allow_pickle fails here.
+        self.adapter: WSCodec[object] = codec_for(datatype, allow_pickle=allow_pickle)
+        SendQueue(send_queue, overflow, send_queue_bytes)  # validate now
+        self._send_queue = send_queue
+        self._send_queue_bytes = send_queue_bytes
+        self._dropped = 0
+        self._dropped_lock = threading.Lock()
+        self._overflow: SendOverflow = overflow
+        self._max_size = max_size
 
         self.ping_interval = ping_interval
         self.ping_timeout = ping_timeout
         self._open_timeout = open_timeout
         self._buffer_while_disconnected = buffer_while_disconnected
 
-        # Cross-thread outbound queue; created lazily in _run_loop
-        self.queue: asyncio.Queue[str | bytes | object] | None = None
+        # Outbound frames; created in _run_loop, used on the loop thread only
+        self.queue: SendQueue | None = None
         self.ws: ClientConnection | None = None
 
         # Retry policy: use provided or create default
@@ -232,14 +270,19 @@ class RxWSClient(Subject, OTelLoggingMixin):
             # Drop message when not connected and buffering is disabled
             return
 
-        self.adapter.package_type_check(value)
-        if not self._loop_ready.wait(timeout=5.0):
-            rx_exception = RxException(
-                RuntimeError("Client event loop failed to start"),
-                source=self._name,
-                note="RxWSClient.on_next",
+        try:
+            frame = self.adapter.encode(value)
+        except Exception as e:
+            # 0.1 raised into the caller's on_next (type check) or ended the
+            # client (packaging); 0.2 drops the one value.
+            self._count_dropped()
+            self._log(
+                f"Dropped a value that could not be encoded: {get_short_error_info(e)}",
+                "ERROR",
             )
-            super().on_error(rx_exception)
+            return
+        if not self._loop_ready.wait(timeout=5.0):
+            self._log("Dropped a value: the client event loop did not start", "ERROR")
             return
 
         loop = self._loop
@@ -257,23 +300,62 @@ class RxWSClient(Subject, OTelLoggingMixin):
             return
 
         try:
-            loop.call_soon_threadsafe(self.queue.put_nowait, value)
+            loop.call_soon_threadsafe(self._enqueue, frame)
         except RuntimeError:
             # The loop closed between the check above and this call.
             return
 
+    @property
+    def dropped(self) -> int:
+        """Items dropped so far: values that could not be encoded, frames
+        that did not decode, subscribers raising, and frames discarded by the
+        send queue. A reporter (X4) reports them as ``dropped``."""
+        with self._dropped_lock:
+            return self._dropped
+
+    def _count_dropped(self, n: int = 1) -> None:
+        with self._dropped_lock:
+            self._dropped += n
+
+    def _enqueue(self, frame: str | bytes) -> None:
+        """Loop thread: queue one frame, applying the overflow policy."""
+        queue = self.queue
+        assert queue is not None
+        if queue.overflowed:
+            self._count_dropped()  # disconnecting: the frame is lost
+            return
+        # Offline there is no connection to drop: the buffer drops oldest.
+        offline = self.ws is None or not self._connected
+        before = queue.dropped
+        if not queue.put(frame, "drop_old" if offline else None):
+            self._count_dropped()
+            self._log(  # once per connection
+                f"Send queue overflowed ({queue.limit} frames); disconnecting", "WARN"
+            )
+            if self.ws is not None:
+                asyncio.get_running_loop().create_task(self.ws.close())
+        elif queue.dropped != before:
+            self._count_dropped(queue.dropped - before)
+            if before == 0 or queue.dropped // 1000 != before // 1000:
+                self._log(
+                    f"Send queue full; {queue.dropped} frames dropped so far"
+                    f" ({'drop_old' if offline else queue.overflow})",
+                    "WARN",
+                )
+
     def on_error(self, error: Exception) -> None:
-        """Report connection errors."""
-        rx_exception = RxException(error, source=self._name, note="Error")
-        super().on_error(rx_exception)
+        """Shut the client down, then forward the error to subscribers."""
+        self._shutdown_requested = True
+        self._set_connection_state(WSConnectionState.CLOSED)
+        self._shutdown_client(error)
 
     def on_completed(self) -> None:
         """Close the connection before completing."""
         self._shutdown_requested = True
         self._set_connection_state(WSConnectionState.CLOSED)
-        self._shutdown_client()
+        self._shutdown_client(None)
 
-    def _shutdown_client(self) -> None:
+    def _shutdown_client(self, error: Exception | None) -> None:
         """Shutdown the client, stop the event loop, and join the thread."""
         self._log("Closing...", "INFO")
         try:
@@ -313,13 +395,19 @@ class RxWSClient(Subject, OTelLoggingMixin):
                 except RuntimeError:
                     pass  # the loop ended on its own meanwhile
 
-            if self._thread is not None:
+            if (
+                self._thread is not None
+                and self._thread is not threading.current_thread()
+            ):
                 self._thread.join(timeout=3.0)
 
             self._log("Closed.", "INFO")
             # Complete the connection state subject
             self._connection_state_subject.on_completed()
-            super().on_completed()
+            if error is None:
+                super().on_completed()
+            else:
+                super().on_error(error)
         except Exception as e:
             rx_exception = RxException(
                 e, source=self._name, note="RxWSClient.on_completed"
@@ -386,7 +474,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
                             url,
                             ping_interval=self.ping_interval,
                             ping_timeout=self.ping_timeout,
-                            max_size=None,
+                            max_size=self._max_size,
                             open_timeout=self._open_timeout,
                         ),
                         self._open_timeout,
@@ -441,6 +529,13 @@ class RxWSClient(Subject, OTelLoggingMixin):
                 assert self.ws is not None
                 connected_at = asyncio.get_running_loop().time()
                 self._log(f"Server {remote_desc} Connected.", "INFO")
+                assert self.queue is not None
+                if self.queue.overflowed:
+                    # The previous connection overflowed under "disconnect"
+                    # but its sender ended another way (e.g. ConnectionClosed
+                    # while blocked in send): start this one clean, and count
+                    # what the overflow discarded.
+                    self._count_dropped(self.queue.reset())
                 self._connected = True
                 self._set_connection_state(WSConnectionState.CONNECTED)
 
@@ -522,18 +617,13 @@ class RxWSClient(Subject, OTelLoggingMixin):
                 "Queue must be initialized before _client_sender"
             )
             while True:
-                value = await self.queue.get()
                 try:
-                    frame = self.adapter.package(value)
-                except Exception as e:
-                    # One value that cannot be serialised (e.g. unpicklable
-                    # for WSObject) is dropped; it must not end the client.
-                    self._log(
-                        f"Dropped a value for {remote_desc} that could not be"
-                        f" packaged: {get_short_error_info(e)}",
-                        "ERROR",
-                    )
-                    continue
+                    frame = await self.queue.get()  # encoded in on_next
+                except QueueOverflow:
+                    # overflow="disconnect": drop this connection; the next
+                    # one starts with an empty queue.
+                    self._count_dropped(self.queue.reset())
+                    return
                 try:
                     await websocket.send(frame)
                 except (ConnectionResetError, BrokenPipeError, OSError) as e:
@@ -581,16 +671,25 @@ class RxWSClient(Subject, OTelLoggingMixin):
                     return
 
                 try:
-                    payload = self.adapter.unpackage(data)
+                    payload = self.adapter.decode(data)
                 except Exception as e:
+                    self._count_dropped()
                     self._log(
-                        f"Failed to unpackage from {remote_desc}:"
-                        f" {get_short_error_info(e)}",
+                        f"Dropped a message from {remote_desc} that did not"
+                        f" decode: {get_short_error_info(e)}",
                         "ERROR",
                     )
                     continue
-
-                super().on_next(payload)
+                try:
+                    super().on_next(payload)
+                except Exception as e:
+                    # A subscriber raised: its problem, not the connection's.
+                    self._count_dropped()
+                    self._log(
+                        f"Dropped a message from {remote_desc}: a subscriber"
+                        f" raised {get_short_error_info(e)}",
+                        "ERROR",
+                    )
         except asyncio.CancelledError:
             raise
 
@@ -598,7 +697,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
         loop = asyncio.new_event_loop()
         self._loop = loop
         # Create queue after event loop is set up
-        self.queue = asyncio.Queue()
+        self.queue = SendQueue(self._send_queue, self._overflow, self._send_queue_bytes)
         self._loop_ready.set()
         asyncio.set_event_loop(loop)
         loop.create_task(self.connect_client())
