@@ -1,7 +1,9 @@
 """Graphic helpers built on top of ReactiveX."""
 
 import asyncio
+import threading
 import time
+from collections.abc import Callable
 from io import BytesIO
 from typing import Any
 
@@ -11,10 +13,15 @@ import reactivex as rx
 from PIL import Image
 from reactivex import Observable
 from reactivex.disposable import CompositeDisposable, Disposable
-from reactivex.scheduler import ThreadPoolScheduler
+from reactivex.scheduler import NewThreadScheduler
 from reactivex.scheduler.eventloop import AsyncIOScheduler
 
 from .mechanism import RxException
+
+
+def _non_daemon_thread(target: Callable[[], None]) -> threading.Thread:
+    """Thread factory for NewThreadScheduler that keeps the process alive."""
+    return threading.Thread(target=target, daemon=False)
 
 
 def create_screen_capture(
@@ -39,14 +46,13 @@ def create_screen_capture(
 
     interval = 1.0 / fps
 
-    sleep_time = interval  # sleep time between frames, intially set to the interval
-
-    # control the time between frames
-    previous_time = 0.5 * interval
-
     def subscribe(
         observer: rx.abc.ObserverBase, scheduler_: rx.abc.SchedulerBase | None = None
     ) -> rx.abc.DisposableBase:
+        # Pacing state is per subscription; shared state made concurrent
+        # subscriptions slow each other down.
+        sleep_time = interval  # sleep time between frames, initially the interval
+        previous_time = 0.5 * interval  # time of the previous frame
 
         try:
             loop = asyncio.get_running_loop()
@@ -61,7 +67,10 @@ def create_screen_capture(
             or (
                 AsyncIOScheduler(loop)  # type: ignore[arg-type]
                 if running
-                else ThreadPoolScheduler(1)
+                # One short-lived thread per subscription (a fresh
+                # ThreadPoolScheduler(1) was never shut down). Non-daemon,
+                # as that worker was, so capture keeps the process alive.
+                else NewThreadScheduler(thread_factory=_non_daemon_thread)
             )
         )
 
