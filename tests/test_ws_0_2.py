@@ -356,3 +356,56 @@ def test_send_queue_byte_bound():
     assert len(queue) == 2 and queue.dropped == 1
     assert queue.put(b"x" * 50)  # larger than the bound alone: kept, others go
     assert len(queue) == 1
+
+
+def test_reconnection_after_a_disconnect_overflow_starts_clean():
+    # Review of #24 (item 9): the sender ended on ConnectionClosed while
+    # blocked in send(), the overflow flag survived and dropped the next
+    # connection right after it opened.
+    from rxplus.ws._sendqueue import SendQueue
+
+    port = _free_port()
+    connections: list[int] = []
+    received: list[tuple[int, bytes]] = []
+    ready = threading.Event()
+
+    async def handler(ws) -> None:
+        n = len(connections) + 1
+        connections.append(n)
+        if n == 1:
+            await asyncio.sleep(1000)  # stalls: never reads
+        async for message in ws:
+            received.append((n, message))
+
+    async def main() -> None:
+        async with websockets.serve(
+            handler, "127.0.0.1", port, max_queue=1, max_size=None
+        ):
+            ready.set()
+            await asyncio.Future()
+
+    threading.Thread(target=lambda: asyncio.run(main()), daemon=True).start()
+    assert ready.wait(5)
+    client = RxWSClient(
+        WSConnectionConfig("127.0.0.1", port, "/c"),
+        datatype="bytes",
+        send_queue=4,
+        overflow="disconnect",
+        retry_policy=RetryPolicy(base_delay=0.2, max_delay=0.2, jitter=0.0),
+        ping_interval=None,
+    )
+    try:
+        assert _wait_for(lambda: client._connected)
+        for _ in range(300):
+            client.on_next(b"x" * 262144)
+        assert _wait_for(lambda: len(connections) >= 2, timeout=5.0)
+        assert _wait_for(lambda: client._connected)
+        time.sleep(0.6)  # a stale overflow flag dropped it within ~0.2 s
+        for k in range(3):
+            client.on_next(b"after%d" % k)
+        assert _wait_for(lambda: len([r for r in received if r[0] >= 2]) >= 3)
+        assert len(connections) == 2
+        assert client.dropped > 0
+    finally:
+        client.on_completed()
+    assert isinstance(SendQueue(1, "drop_old").reset(), int)

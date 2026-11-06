@@ -92,6 +92,7 @@ class RxWSClientGroup(Subject, OTelLoggingMixin):
             else None
         )
         self._dropped = 0
+        self._dropped_lock = threading.Lock()
 
         self._tracer_provider = tracer_provider
         self._logger_provider = logger_provider
@@ -144,7 +145,12 @@ class RxWSClientGroup(Subject, OTelLoggingMixin):
     def dropped(self) -> int:
         """Values the group itself dropped (not ``TaggedData``, or a path
         whose datatype is refused); each child counts its own."""
-        return self._dropped
+        with self._dropped_lock:
+            return self._dropped
+
+    def _count_dropped(self) -> None:
+        with self._dropped_lock:
+            self._dropped += 1
 
     def on_next(self, tagged: TaggedData) -> None:
         """Send ``tagged.data`` on the path ``tagged.tag``.
@@ -155,7 +161,7 @@ class RxWSClientGroup(Subject, OTelLoggingMixin):
         values are ignored.
         """
         if not isinstance(tagged, TaggedData):
-            self._dropped += 1
+            self._count_dropped()
             self._log(
                 f"Dropped a {type(tagged).__name__}: RxWSClientGroup expects"
                 " TaggedData",
@@ -165,7 +171,7 @@ class RxWSClientGroup(Subject, OTelLoggingMixin):
         try:
             client = self._ensure_client(tagged.tag)
         except Exception as e:
-            self._dropped += 1
+            self._count_dropped()
             self._log(
                 f"Dropped a value for path {tagged.tag!r}: {type(e).__name__}: {e}",
                 "ERROR",

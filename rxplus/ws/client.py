@@ -529,6 +529,13 @@ class RxWSClient(Subject, OTelLoggingMixin):
                 assert self.ws is not None
                 connected_at = asyncio.get_running_loop().time()
                 self._log(f"Server {remote_desc} Connected.", "INFO")
+                assert self.queue is not None
+                if self.queue.overflowed:
+                    # The previous connection overflowed under "disconnect"
+                    # but its sender ended another way (e.g. ConnectionClosed
+                    # while blocked in send): start this one clean, and count
+                    # what the overflow discarded.
+                    self._count_dropped(self.queue.reset())
                 self._connected = True
                 self._set_connection_state(WSConnectionState.CONNECTED)
 
@@ -615,7 +622,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
                 except QueueOverflow:
                     # overflow="disconnect": drop this connection; the next
                     # one starts with an empty queue.
-                    self.queue.reset()
+                    self._count_dropped(self.queue.reset())
                     return
                 try:
                     await websocket.send(frame)

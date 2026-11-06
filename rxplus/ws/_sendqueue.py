@@ -97,8 +97,11 @@ class SendQueue:
             self._ready.clear()
             await self._ready.wait()
 
-    def reset(self) -> None:
-        """Forget the overflow state and the queued frames (on reconnect)."""
+    def reset(self) -> int:
+        """Forget the overflow state and the queued frames; return how many
+        frames were discarded."""
+        discarded = len(self._frames)
         self._frames.clear()
         self._bytes = 0
         self._overflowed = False
+        return discarded
