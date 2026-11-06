@@ -280,7 +280,19 @@ class RxWSServer(Subject, OTelLoggingMixin):
             while True:
                 value = await queue.get()
                 try:
-                    await websocket.send(adapter.package(value))
+                    frame = adapter.package(value)
+                except Exception as e:
+                    # One value that cannot be serialised (e.g. unpicklable
+                    # for WSObject) is dropped; it must not end the
+                    # connection or error the whole server.
+                    self._log(
+                        f"Dropped a value for {remote_desc} that could not be"
+                        f" packaged: {get_short_error_info(e)}",
+                        "ERROR",
+                    )
+                    continue
+                try:
+                    await websocket.send(frame)
                 except (ConnectionResetError, BrokenPipeError, OSError) as e:
                     self._log(
                         f"Failed to send to client {remote_desc},"
