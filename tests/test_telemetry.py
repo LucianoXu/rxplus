@@ -257,3 +257,35 @@ class TestIntegration:
         assert "[INFO]" in output
         assert "IntegrationTest" in output
         assert "Integration test message" in output
+
+
+def test_ws_log_records_name_their_source():
+    """WS components' records carry log.source, so exporters show the name."""
+    import time
+
+    from opentelemetry.sdk._logs.export import (
+        InMemoryLogRecordExporter,
+        SimpleLogRecordProcessor,
+    )
+
+    from rxplus.telemetry import configure_telemetry, format_log_record
+    from rxplus.ws import RetryPolicy, RxWSClient, WSConnectionConfig
+
+    exporter = InMemoryLogRecordExporter()
+    _, logger_provider = configure_telemetry()
+    logger_provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
+    client = RxWSClient(
+        WSConnectionConfig("127.0.0.1", 9, "/"),
+        retry_policy=RetryPolicy(base_delay=0.05),
+        name="MyClient",
+        logger_provider=logger_provider,
+    )
+    time.sleep(0.2)
+    client.on_completed()
+    records = [r.log_record for r in exporter.get_finished_logs()]
+    assert records
+    for record in records:
+        assert record.attributes is not None
+        assert record.attributes["log.source"] == "MyClient"
+        assert record.attributes["component"] == "MyClient"
+    assert "MyClient" in format_log_record(records[0])
