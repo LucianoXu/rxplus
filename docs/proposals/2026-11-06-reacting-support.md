@@ -1,7 +1,7 @@
 # rxplus 0.2.0: `reacting/1` support and the breaking redesign batch
 
 **Date:** 2026-11-06
-**Status:** Draft (for the owner's review)
+**Status:** Approved by the owner (D16, 2026-11-06); amended with D17 (codec layer)
 **Breaking:** Yes (0.2.0, decision D3)
 
 ## Goal
@@ -179,7 +179,9 @@ Each measured link or element has one accumulator guarded by its own lock:
 
 The window index of an event is `int((now − T) / w)`, taken when it is counted, so items land in the
 window in which they were delivered. An event whose window was already closed by a concurrent
-flush is added to the current window (the only approximation; at most one event per race).
+flush is added to the current window. Coordinator ruling (R3): the instant the source records an
+item is its delivery instant, so this is conformant, with no grace period; `docs/reacting.md` states
+the bound (at most the events of threads that read the clock before a boundary and record after it).
 
 At each window end the reporter emits, in this order: flow for each link with
 `items + dropped + coalesced > 0` (`bytes` only when `items > 0`, rule `flow-bytes`); latency for
@@ -268,13 +270,14 @@ class MemorySink:                                # tests
   extensions, no `Origin` header. If the resolved address is not loopback (`127.0.0.0/8`, `::1`),
   `token` is required and sent as `Authorization: Bearer <token>`; without one the sink refuses to
   connect (logged once) instead of sending unauthenticated. Incoming data frames are read and
-  discarded (spec: a source ignores all frames); Ping is answered with Pong and Close with Close as
-  RFC 6455 requires (request R2 to the coordinator). Each successful handshake starts a new session;
+  discarded and control frames handled as RFC 6455 requires (Ping → Pong, Close → Close), as the
+  spec now says (Reacting c7f1232: "A source ignores every data frame it receives and handles
+  control frames as RFC 6455 requires"). Each successful handshake starts a new session;
   a lost connection ends it and the writer reopens after `backoff`.
 - **Memory**: in-process, for tests; `hold()` simulates a slow sink to exercise Loss.
 
 A reporter has exactly one sink (sessions, `seq` and windows are per connection). To record and
-watch at once, connect to the hub, which records (Reacting DESIGN §5). See open question Q1.
+watch at once, connect to the hub, which records (Reacting DESIGN §5). There is no `TeeSink` (D16).
 
 ### 1.9 Thread-safety model
 
@@ -362,7 +365,7 @@ Kinds are prefixed `rxplus.`; ports have kind `port`.
 
 Links between components are the user's to declare (a component cannot see what it is subscribed
 to). Cross-process links (global references between a client and the server it talks to) are left
-for later (Q4).
+until after 0.2.0 (D16).
 
 ### 2.4 Example
 
@@ -428,8 +431,11 @@ Three pull requests, each titled `refactor!(…)` with a "Breaking" section, plu
 need no owner review (the `reacting=` parameters, lazy `__init__`, the WS hot path). Every row
 cites the audit.
 
-**PR-A `refactor!(ws)`: resource bounds and error semantics**
-- F6: `datatype="object"` needs `allow_pickle=True`; default `max_size=1 MiB` (parameter).
+**PR-A `refactor!(ws)`: codecs, resource bounds and error semantics**
+- D17, the codec layer (3.1 below): `datatype` also takes a `WSCodec[T]`; `JsonCodec` is the
+  documented way to send custom objects.
+- F6: `datatype="object"` needs `allow_pickle=True` (default off, D16) and is documented for trusted
+  links only; default `max_size=1 MiB` (parameter) for every datatype.
 - F7: `send_queue: int = 1024` per connection with `overflow: OverflowStrategy = "drop_old"`
   (`"drop_new"`, `"disconnect"`); `buffer_while_disconnected` bounded by the same limit.
 - F11: per-item failures (non-`TaggedData`, wrong payload type, a subscriber raising) are logged and
@@ -440,6 +446,59 @@ cites the audit.
   `on_completed`/`on_error`.
 - F20 lands in an additive PR before PR-A (batched hand-off, one wake-up per non-empty
   transition, package once per message per path), with before/after numbers.
+
+### 3.1 Codec layer (D17, part of PR-A)
+
+```python
+from typing import Literal, Protocol
+
+JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
+
+
+class CodecError(ValueError): ...
+
+
+class WSCodec[T](Protocol):
+    frame: Literal["text", "binary"]
+    def encode(self, value: T) -> bytes | str: ...
+    def decode(self, data: bytes | str) -> T: ...      # raises CodecError
+
+
+class JsonCodec:
+    """Text frames of JSON; custom objects only from its own registry."""
+
+    frame: Literal["text"]
+
+    def __init__(self, *, max_size: int = 1 << 20, max_depth: int = 32) -> None: ...
+    def register[D](self, cls: type[D], *, name: str | None = None) -> type[D]: ...
+        # a dataclass; usable as a decorator; name defaults to cls.__qualname__
+    def register_class[C](
+        self,
+        cls: type[C],
+        *,
+        name: str,
+        to_dict: Callable[[C], dict[str, JsonValue]],
+        from_dict: Callable[[dict[str, JsonValue]], C],
+    ) -> None: ...
+    def encode(self, value: object) -> str: ...
+    def decode(self, data: bytes | str) -> object: ...
+```
+
+- Wire format: plain JSON values pass through; a registered object is
+  `{"$type": "<name>", "fields": {...}}`; `bytes` is `{"$bytes": "<base64>"}`. Encoding a plain
+  `dict` that has a `"$type"` or `"$bytes"` key, or an unregistered object, raises `CodecError`.
+- Decoding checks `len(data) ≤ max_size` before parsing, rejects duplicate keys, NaN and Infinity,
+  and nesting deeper than `max_depth`; it constructs only types in the registry, with exactly their
+  fields (missing or extra fields are errors), each validated against the field's annotation.
+  Supported annotations: `None`, `bool`, `int`, `float`, `str`, `bytes`, registered types,
+  `list[X]`, `tuple[X, ...]`, `dict[str, X]`, `X | None`, unions of those; anything else is refused
+  at `register` time. It never imports, evaluates or calls anything named by the peer;
+  `from_dict` runs only for a name the user registered.
+- Errors: a frame that fails to decode is logged and dropped (counted as `dropped` with a
+  reporter), like every per-item failure in PR-A; the connection stays open.
+- `datatype` accepts `"string" | "bytes" | "object" | WSCodec[T]`, or a per-path callable returning
+  one of these. `docs/websocket.md` presents `JsonCodec` as the way to send custom objects and
+  `"object"` (pickle) as an opt-in for trusted links.
 
 **PR-B `refactor!(gateway)`: connections per socket**
 - F8: `RxWSServer.connections: Observable[WSConnectionEvent]` (additive, PR-A); `GatewayNode` keys
@@ -465,7 +524,8 @@ cites the audit.
 
 | 0.1.x | 0.2.0 | PR |
 |---|---|---|
-| `RxWSServer(cfg, datatype="object")` | `RxWSServer(cfg, datatype="object", allow_pickle=True)` | A |
+| `RxWSServer(cfg, datatype="object")` | `datatype=JsonCodec()` with registered types; or `datatype="object", allow_pickle=True` on trusted links | A |
+| a value that cannot be packaged ended the component via `on_error` (0.1.x) | logged at ERROR and dropped (already in 0.1.x `main` since #11) | #11 |
 | frames of any size | `max_size=1 MiB`; pass `max_size=None` for the old behaviour | A |
 | unbounded per-client queue | `send_queue=1024`, `overflow="drop_old"`; `send_queue=None` restores | A |
 | non-`TaggedData` to `RxWSServer.on_next` → `on_error` | logged and dropped | A |
@@ -517,8 +577,13 @@ recording with `check.py fold --direct` and compare with what the test knows it 
 truth"). Finally each corpus case in `conformance/valid/` that a source could produce is replayed
 through the `Reporter` API and must yield a recording that folds to the same state.
 
-The checker lives in the Reacting repository (branch `conformance` until merged). See Q3 for how
-rxplus CI obtains it.
+The checker comes from the Reacting repository, which is private, so rxplus vendors it (D16):
+`tests/conformance/check.py` and the corpus (`valid/`, `invalid/`) copied from a pinned Reacting
+commit recorded in `tests/conformance/PIN` (commit hash plus the SHA-256 of every vendored file).
+A test fails if a vendored file's hash disagrees with `PIN`; `tests/conformance/update.sh <commit>`
+re-vendors. A further test runs the vendored checker over the vendored corpus and compares its
+output with each case's `.expect.json`, so a copy that is internally inconsistent fails in rxplus
+CI too.
 
 ### 4.3 Overhead benchmarks (`benchmarks/`)
 
@@ -535,17 +600,13 @@ measure, per item, a `Subject → map → subscriber` pipeline in four configura
 Baseline today (audit): `Subject → subscriber` 0.32 µs, `→ do_action(noop) →` 0.39 µs per item; WS
 46 k msg/s. Numbers before/after go into each PR.
 
-## 5. Open questions for the owner
+## 5. Decisions on the open questions (D16)
 
-1. **One sink per reporter.** Sessions, `seq` and windows are per connection, so a reporter with
-   two sinks would run two sessions. Is "record through the hub" enough, or should 0.2.0 offer a
-   `TeeSink` (two independent sessions, twice the window work)?
-2. **`datatype="object"`**: keep it behind `allow_pickle=True` (proposed) or remove it in 0.2.0?
-3. **Checker in rxplus CI**: vendor `check.py` into `tests/conformance/` pinned to a Reacting
-   commit (a test fails if the pin and the copy disagree), or fetch it from the Reacting repository
-   in CI (needs the repository to be reachable; see P1)?
-4. **Cross-process links**: a `RxWSClient` could link to the server's connection element by global
-   reference if both report to one hub. Defer to after 0.2.0?
+1. One sink per reporter; no `TeeSink`. Record through the hub to watch and record at once.
+2. Pickle stays only behind `allow_pickle=True`, default off; the codec layer (D17, 3.1) is the
+   documented way to send custom objects.
+3. rxplus CI vendors `check.py` and the corpus pinned to a Reacting commit (4.2).
+4. Cross-process links are deferred until after 0.2.0.
 
 ## Files
 
@@ -553,6 +614,6 @@ Baseline today (audit): `Subject → subscriber` 0.32 µs, `→ do_action(noop) 
 |---|---|
 | `docs/proposals/2026-11-06-reacting-support.md` | this proposal |
 | `benchmarks/bench_ws.py` | the audit's WS/gateway/Rx baseline benchmark |
-| later (X3) `rxplus/reacting/*`, `tests/reacting/*`, `docs/reacting.md` | the core and sinks |
+| later (X3) `rxplus/reacting/*`, `tests/reacting/*`, `tests/conformance/*`, `docs/reacting.md`, lazy `rxplus/__init__.py` | the core and sinks |
 | later (X4) components, `rxplus/reacting/rx.py`, `benchmarks/bench_reacting.py` | opt-in, probes |
-| later (X5) PR-A, PR-B, PR-C, `docs/migration-0.2.md` | the breaking batch |
+| later (X5) PR-A (incl. `rxplus/ws/codec.py`), PR-B, PR-C, `docs/migration-0.2.md` | the breaking batch |
