@@ -45,6 +45,11 @@ class RetryPolicy:
         max_delay: Maximum delay between retries in seconds.
         backoff_factor: Multiplier for exponential backoff.
         jitter: Randomization factor (0.0-1.0) to prevent thundering herd.
+        stable_after: A connection that stays open at least this many seconds
+            resets the backoff, and the client reconnects at once when it
+            drops. A connection that closes sooner counts as a failed attempt,
+            so a server that accepts and immediately closes is retried with
+            backoff instead of in a tight loop.
     """
 
     max_retries: int | None = None  # None = infinite
@@ -52,6 +57,7 @@ class RetryPolicy:
     max_delay: float = 30.0
     backoff_factor: float = 2.0
     jitter: float = 0.1  # randomization factor (0.0-1.0)
+    stable_after: float = 1.0
 
     def get_delay(self, attempt: int) -> float:
         """Calculate delay for given attempt number (0-indexed).
@@ -99,6 +105,9 @@ class RxWSClient(Subject, OTelLoggingMixin):
     buffer_while_disconnected : bool
         If True, queue messages while disconnected. If False (default),
         messages are dropped when not connected.
+    open_timeout : float | None
+        Maximum time in seconds for the TCP connect plus the WebSocket
+        handshake of one attempt. ``None`` waits indefinitely.
 
     Raises
     ------
@@ -118,6 +127,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
         buffer_while_disconnected: bool = False,
         tracer_provider: TracerProvider | None = None,
         logger_provider: LoggerProvider | None = None,
+        open_timeout: float | None = 10.0,
     ):
         """Create a reconnecting WebSocket client.
 
@@ -133,6 +143,8 @@ class RxWSClient(Subject, OTelLoggingMixin):
                 If False (default), messages are dropped when not connected.
             tracer_provider: Optional OTel TracerProvider for span instrumentation.
             logger_provider: Optional OTel LoggerProvider for log emission.
+            open_timeout: Maximum time in seconds for one connection attempt
+                (TCP connect plus handshake). ``None`` waits indefinitely.
         """
         super().__init__()
         self.host = config.host
@@ -161,6 +173,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
 
         self.ping_interval = ping_interval
         self.ping_timeout = ping_timeout
+        self._open_timeout = open_timeout
         self._buffer_while_disconnected = buffer_while_disconnected
 
         # Cross-thread outbound queue; created lazily in _run_loop
@@ -372,10 +385,8 @@ class RxWSClient(Subject, OTelLoggingMixin):
                             ping_timeout=self.ping_timeout,
                             max_size=None,
                         ),
-                        self._retry_policy.base_delay,
+                        self._open_timeout,
                     )
-                    # Connection successful - reset attempt counter
-                    attempt = 0
 
                 except TimeoutError:
                     attempt += 1
@@ -424,6 +435,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
                     return
 
                 assert self.ws is not None
+                connected_at = asyncio.get_running_loop().time()
                 self._log(f"Server {remote_desc} Connected.", "INFO")
                 self._connected = True
                 self._set_connection_state(WSConnectionState.CONNECTED)
@@ -451,8 +463,22 @@ class RxWSClient(Subject, OTelLoggingMixin):
                 self._connected = False
                 self._set_connection_state(WSConnectionState.DISCONNECTED)
 
-                # Increment attempt for reconnection
-                attempt += 1
+                # A connection that stayed up resets the backoff and is
+                # re-established at once; one that closed quickly counts as a
+                # failed attempt and waits, so accept-then-close servers are
+                # not hammered in a tight loop.
+                uptime = asyncio.get_running_loop().time() - connected_at
+                if uptime >= self._retry_policy.stable_after:
+                    attempt = 1
+                else:
+                    attempt += 1
+                    delay = self._retry_policy.get_delay(attempt - 1)
+                    self._log(
+                        f"Connection closed after {uptime:.2f}s,"
+                        f" retry {attempt} in {delay:.2f}s",
+                        "WARN",
+                    )
+                    await asyncio.sleep(delay)
 
         except asyncio.CancelledError:
             self._log("WebSocket client connection cancelled.", "INFO")
