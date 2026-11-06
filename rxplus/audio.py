@@ -5,6 +5,7 @@ import math
 import queue
 import threading
 import time
+from collections.abc import Callable
 from typing import Any, Literal
 
 import numpy as np
@@ -18,6 +19,12 @@ from reactivex.scheduler import NewThreadScheduler
 from reactivex.scheduler.eventloop import AsyncIOScheduler
 
 from .mechanism import RxException
+
+
+def _non_daemon_thread(target: Callable[[], None]) -> threading.Thread:
+    """Thread factory for NewThreadScheduler that keeps the process alive."""
+    return threading.Thread(target=target, daemon=False)
+
 
 PCMFormat = Literal["UInt8", "Int16", "Int24", "Int32", "Float32"]
 
@@ -417,7 +424,9 @@ def create_wavfile(
                 # One short-lived thread per subscription. A new
                 # ThreadPoolScheduler(1) per subscription was never shut
                 # down and left an idle worker thread behind every time.
-                else NewThreadScheduler()
+                # Non-daemon, as that worker was: a script whose last line
+                # subscribes still emits every chunk before exiting.
+                else NewThreadScheduler(thread_factory=_non_daemon_thread)
             )
         )
 

@@ -354,3 +354,21 @@ def test_screen_capture_does_not_leak_threads(mock_mss):
         d.dispose()
     time.sleep(0.3)
     assert threading.active_count() - before <= 1
+
+
+def test_screen_capture_thread_is_not_daemon(mock_mss):
+    """Like the old pool worker, the capture thread keeps the process alive."""
+    import threading
+    import time
+
+    from rxplus.graphic import create_screen_capture
+
+    daemon_flags: list[bool] = []
+    d = create_screen_capture(fps=50.0).subscribe(
+        lambda _frame: daemon_flags.append(threading.current_thread().daemon)
+    )
+    deadline = time.monotonic() + 2.0
+    while not daemon_flags and time.monotonic() < deadline:
+        time.sleep(0.01)
+    d.dispose()
+    assert daemon_flags and daemon_flags[0] is False

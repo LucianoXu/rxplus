@@ -1,7 +1,9 @@
 """Graphic helpers built on top of ReactiveX."""
 
 import asyncio
+import threading
 import time
+from collections.abc import Callable
 from io import BytesIO
 from typing import Any
 
@@ -15,6 +17,11 @@ from reactivex.scheduler import NewThreadScheduler
 from reactivex.scheduler.eventloop import AsyncIOScheduler
 
 from .mechanism import RxException
+
+
+def _non_daemon_thread(target: Callable[[], None]) -> threading.Thread:
+    """Thread factory for NewThreadScheduler that keeps the process alive."""
+    return threading.Thread(target=target, daemon=False)
 
 
 def create_screen_capture(
@@ -61,8 +68,9 @@ def create_screen_capture(
                 AsyncIOScheduler(loop)  # type: ignore[arg-type]
                 if running
                 # One short-lived thread per subscription (a fresh
-                # ThreadPoolScheduler(1) was never shut down).
-                else NewThreadScheduler()
+                # ThreadPoolScheduler(1) was never shut down). Non-daemon,
+                # as that worker was, so capture keeps the process alive.
+                else NewThreadScheduler(thread_factory=_non_daemon_thread)
             )
         )
 
