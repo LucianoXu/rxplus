@@ -11,12 +11,13 @@ from opentelemetry.trace import TracerProvider
 from reactivex import Observable, Subject
 
 from ..utils import TaggedData
+from ._otel_mixin import OTelLoggingMixin
 from ._sendqueue import SendOverflow
 from .client import DEFAULT_MAX_SIZE, RetryPolicy, RxWSClient
 from .datatypes import DatatypeSpec, WSConnectionConfig, resolve_codecs
 
 
-class RxWSClientGroup(Subject):
+class RxWSClientGroup(Subject, OTelLoggingMixin):
     """A multiplexing subject that manages a dynamic set of RxWSClient instances.
 
     One client per WebSocket path, behind a single ReactiveX interface.
@@ -81,10 +82,17 @@ class RxWSClientGroup(Subject):
         max_size: int | None = DEFAULT_MAX_SIZE,
         send_queue: int | None = 1024,
         overflow: SendOverflow = "drop_old",
+        send_queue_bytes: int | None = None,
     ):
         super().__init__()
+        self._name = name or f"RxWSClientGroup:{config.host}:{config.port}"
+        self._logger = (
+            logger_provider.get_logger(f"rxplus.{self._name}")
+            if logger_provider
+            else None
+        )
+        self._dropped = 0
 
-        self._name = name
         self._tracer_provider = tracer_provider
         self._logger_provider = logger_provider
         self._buffer_while_disconnected = buffer_while_disconnected
@@ -103,7 +111,8 @@ class RxWSClientGroup(Subject):
 
             return RxWSClient(
                 config=child_config,
-                datatype=codec_for_path(path),  # already checked for pickle
+                datatype=codec_for_path(path),  # checked for pickle here
+                allow_pickle=allow_pickle,
                 retry_policy=retry_policy,
                 ping_interval=ping_interval,
                 ping_timeout=ping_timeout,
@@ -115,6 +124,7 @@ class RxWSClientGroup(Subject):
                 max_size=max_size,
                 send_queue=send_queue,
                 overflow=overflow,
+                send_queue_bytes=send_queue_bytes,
             )
 
         self._client_factory = make_client
@@ -130,8 +140,37 @@ class RxWSClientGroup(Subject):
         return self._child_errors
 
     # ============ Observer interface ============ #
+    @property
+    def dropped(self) -> int:
+        """Values the group itself dropped (not ``TaggedData``, or a path
+        whose datatype is refused); each child counts its own."""
+        return self._dropped
+
     def on_next(self, tagged: TaggedData) -> None:
-        client = self._ensure_client(tagged.tag)
+        """Send ``tagged.data`` on the path ``tagged.tag``.
+
+        A value that is not ``TaggedData``, or a path whose datatype is
+        refused (a per-path function returning ``"object"`` without
+        ``allow_pickle``), is logged and dropped. After the group ended,
+        values are ignored.
+        """
+        if not isinstance(tagged, TaggedData):
+            self._dropped += 1
+            self._log(
+                f"Dropped a {type(tagged).__name__}: RxWSClientGroup expects"
+                " TaggedData",
+                "ERROR",
+            )
+            return
+        try:
+            client = self._ensure_client(tagged.tag)
+        except Exception as e:
+            self._dropped += 1
+            self._log(
+                f"Dropped a value for path {tagged.tag!r}: {type(e).__name__}: {e}",
+                "ERROR",
+            )
+            return
         if client is not None:
             client.on_next(tagged.data)
 

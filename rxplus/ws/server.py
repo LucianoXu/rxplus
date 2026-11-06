@@ -134,7 +134,10 @@ class RxWSServer(Subject, OTelLoggingMixin):
             trusted links only.
         max_size: Largest incoming message in bytes (None: unlimited).
         send_queue: Frames queued per client before ``overflow`` applies
-            (None: unbounded).
+            (None: unbounded). It counts frames, not bytes: the worst case
+            per client is ``send_queue`` times your largest frame.
+        send_queue_bytes: Optional bound on the queued bytes per client;
+            ``overflow`` applies when either bound is reached.
         overflow: ``"drop_old"``, ``"drop_new"`` or ``"disconnect"``.
 
     ``connections`` emits a :class:`WSConnectionEvent` when a client
@@ -159,6 +162,7 @@ class RxWSServer(Subject, OTelLoggingMixin):
         max_size: int | None = DEFAULT_MAX_SIZE,
         send_queue: int | None = 1024,
         overflow: SendOverflow = "drop_old",
+        send_queue_bytes: int | None = None,
     ):
         """Initialize the WebSocket server and start listening."""
         super().__init__()
@@ -182,8 +186,11 @@ class RxWSServer(Subject, OTelLoggingMixin):
 
         # Codec per path; a fixed "object" without allow_pickle fails here.
         self._codec_for_path = resolve_codecs(datatype, allow_pickle=allow_pickle)
-        SendQueue(send_queue, overflow)  # validate the arguments now
+        SendQueue(send_queue, overflow, send_queue_bytes)  # validate now
         self._send_queue = send_queue
+        self._send_queue_bytes = send_queue_bytes
+        self._dropped = 0
+        self._dropped_lock = threading.Lock()
         self._overflow: SendOverflow = overflow
         self._max_size = max_size
 
@@ -222,12 +229,39 @@ class RxWSServer(Subject, OTelLoggingMixin):
         with self._path_channels_lock:
             if path not in self.path_channels:
                 codec = self._codec_for_path(path)
-                self.path_channels[path] = WSChannels(codec)
+                # The codec was checked against allow_pickle in resolve_codecs.
+                self.path_channels[path] = WSChannels(codec, allow_pickle=True)
             return self.path_channels[path]
 
+    @property
+    def dropped(self) -> int:
+        """Items dropped so far: per-item failures (not ``TaggedData``,
+        cannot be encoded or decoded, a subscriber raising) plus frames
+        discarded by send-queue overflow. A reporter (X4) reports the same
+        counts as ``dropped`` on the component's links."""
+        with self._dropped_lock:
+            return self._dropped
+
+    def _count_dropped(self, n: int = 1) -> None:
+        with self._dropped_lock:
+            self._dropped += n
+
     def _drop(self, what: str, error: Exception | None = None) -> None:
+        self._count_dropped()
         detail = f": {get_short_error_info(error)}" if error is not None else ""
         self._log(f"Dropped {what}{detail}", "ERROR")
+
+    def _emit_event(self, event: WSConnectionEvent) -> None:
+        """Emit a connection event; a subscriber that raises is logged and
+        never affects the connection."""
+        try:
+            self._connections.on_next(event)
+        except Exception as e:
+            self._log(
+                f"A connections subscriber raised on {event.kind}"
+                f" {event.connection_id}: {get_short_error_info(e)}",
+                "ERROR",
+            )
 
     def on_next(self, value: TaggedData) -> None:
         """Encode once and queue the frame for every client on the path.
@@ -260,19 +294,26 @@ class RxWSServer(Subject, OTelLoggingMixin):
         """Loop thread: queue a frame for every client of a path."""
         for client in ws_channels.get_queues_snapshot():
             assert isinstance(client, _Client)
-            before = client.queue.dropped
-            if not client.queue.put(frame):
-                self._log(
+            queue = client.queue
+            if queue.overflowed:
+                self._count_dropped()  # disconnecting: the frame is lost
+                continue
+            before = queue.dropped
+            if not queue.put(frame):
+                self._count_dropped()
+                self._log(  # once per connection
                     f"Send queue of {client.desc} overflowed"
-                    f" ({client.queue.limit} frames); disconnecting",
+                    f" ({queue.limit} frames); disconnecting",
                     "WARN",
                 )
-            elif client.queue.dropped != before and client.queue.dropped % 1000 == 1:
-                self._log(
-                    f"Send queue of {client.desc} full; {client.queue.dropped}"
-                    f" frames dropped ({client.queue.overflow})",
-                    "WARN",
-                )
+            elif queue.dropped != before:
+                self._count_dropped(queue.dropped - before)
+                if before == 0 or queue.dropped // 1000 != before // 1000:
+                    self._log(
+                        f"Send queue of {client.desc} full; {queue.dropped}"
+                        f" frames dropped so far ({queue.overflow})",
+                        "WARN",
+                    )
 
     def on_error(self, error: Exception) -> None:
         """Shut the server down, then forward the error to subscribers."""
@@ -295,12 +336,15 @@ class RxWSServer(Subject, OTelLoggingMixin):
 
         cid = next(self._connection_ids)
         client = _Client(
-            websocket, SendQueue(self._send_queue, self._overflow), cid, remote_desc
+            websocket,
+            SendQueue(self._send_queue, self._overflow, self._send_queue_bytes),
+            cid,
+            remote_desc,
         )
         ws_channels.add_client(websocket, client)
-        self._log(f"Client established from {remote_desc}", "INFO")
-        self._connections.on_next(WSConnectionEvent("opened", cid, path))
         try:
+            self._log(f"Client established from {remote_desc}", "INFO")
+            self._emit_event(WSConnectionEvent("opened", cid, path))
             sender_task = asyncio.create_task(self._server_sender(client))
             receiver_task = asyncio.create_task(
                 self._server_receiver(websocket, path, ws_channels.adapter, remote_desc)
@@ -332,7 +376,7 @@ class RxWSServer(Subject, OTelLoggingMixin):
             except TimeoutError:
                 websocket.transport.abort()
             self._log(f"Client {remote_desc} resources released.", "INFO")
-            self._connections.on_next(WSConnectionEvent("closed", cid, path))
+            self._emit_event(WSConnectionEvent("closed", cid, path))
 
     async def _server_sender(self, client: _Client) -> None:
         while True:
@@ -389,7 +433,8 @@ class RxWSServer(Subject, OTelLoggingMixin):
             try:
                 super().on_next(TaggedData(path, payload))
             except Exception as e:
-                # A subscriber raised: its problem, not the connection's.
+                # A subscriber raised: its problem, not the connection's;
+                # the item is counted as dropped.
                 self._drop(f"a message from {remote_desc}: a subscriber raised", e)
 
     def _make_dual_stack_socket(self) -> socket.socket | None:

@@ -20,13 +20,24 @@ class SendQueue:
     ``limit=None`` means unbounded (the 0.1 behaviour).
     """
 
-    def __init__(self, limit: int | None, overflow: SendOverflow) -> None:
+    def __init__(
+        self,
+        limit: int | None,
+        overflow: SendOverflow,
+        limit_bytes: int | None = None,
+    ) -> None:
         if limit is not None and limit < 1:
             raise ValueError(f"send_queue must be at least 1 or None: {limit!r}")
+        if limit_bytes is not None and limit_bytes < 1:
+            raise ValueError(
+                f"send_queue_bytes must be at least 1 or None: {limit_bytes!r}"
+            )
         if overflow not in ("drop_old", "drop_new", "disconnect"):
             raise ValueError(f"unknown overflow policy: {overflow!r}")
         self.limit = limit
+        self.limit_bytes = limit_bytes
         self.overflow: SendOverflow = overflow
+        self._bytes = 0
         self.dropped = 0  # frames discarded by the overflow policy
         self._frames: deque[str | bytes] = deque()
         self._ready = asyncio.Event()
@@ -35,20 +46,41 @@ class SendQueue:
     def __len__(self) -> int:
         return len(self._frames)
 
-    def put(self, frame: str | bytes) -> bool:
-        """Queue a frame; False when the policy says to disconnect."""
+    @property
+    def overflowed(self) -> bool:
+        """The ``disconnect`` policy fired (until :meth:`reset`)."""
+        return self._overflowed
+
+    def _full(self, size: int) -> bool:
         if self.limit is not None and len(self._frames) >= self.limit:
-            if self.overflow == "drop_old":
-                self._frames.popleft()
-                self.dropped += 1
-            elif self.overflow == "drop_new":
+            return True
+        return (
+            self.limit_bytes is not None
+            and bool(self._frames)
+            and self._bytes + size > self.limit_bytes
+        )
+
+    def put(self, frame: str | bytes, overflow: SendOverflow | None = None) -> bool:
+        """Queue a frame; False when the policy says to disconnect.
+
+        ``overflow`` overrides the queue's policy for this frame (a client
+        buffering while offline uses ``"drop_old"``).
+        """
+        policy = overflow or self.overflow
+        size = len(frame)
+        while self._full(size):
+            if policy == "drop_new":
                 self.dropped += 1
                 return True
-            else:
+            if policy == "disconnect":
                 self._overflowed = True
                 self._ready.set()
                 return False
+            old = self._frames.popleft()  # drop_old
+            self._bytes -= len(old)
+            self.dropped += 1
         self._frames.append(frame)
+        self._bytes += size
         self._ready.set()
         return True
 
@@ -59,11 +91,14 @@ class SendQueue:
             if self._overflowed:
                 raise QueueOverflow(f"send queue exceeded {self.limit} frames")
             if self._frames:
-                return self._frames.popleft()
+                frame = self._frames.popleft()
+                self._bytes -= len(frame)
+                return frame
             self._ready.clear()
             await self._ready.wait()
 
     def reset(self) -> None:
         """Forget the overflow state and the queued frames (on reconnect)."""
         self._frames.clear()
+        self._bytes = 0
         self._overflowed = False

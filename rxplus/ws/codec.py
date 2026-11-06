@@ -68,7 +68,10 @@ def _scalar(tp: type) -> _Check:
     def check(value: object, codec: "JsonCodec", depth: int) -> object:
         # bool is an int subclass; int is accepted where float is expected.
         if tp is float and isinstance(value, int) and not isinstance(value, bool):
-            return float(value)
+            try:
+                return float(value)
+            except OverflowError as e:  # an int too large for a float
+                raise CodecError("integer out of range for a float field") from e
         if tp is int and isinstance(value, bool):
             raise _fail("int", value)
         if not isinstance(value, tp):
@@ -114,7 +117,11 @@ class JsonCodec:
     def register[D](self, cls: type[D], *, name: str | None = None) -> type[D]:
         """Register a dataclass; usable as a decorator. ``name`` defaults to
         the class's ``__qualname__``. Every field annotation must be
-        supported (see :meth:`_check_for`), else ``TypeError``."""
+        supported (see :meth:`_check_for`), else ``TypeError``.
+
+        Decoding a frame calls the class's ``__init__`` (and
+        ``__post_init__``) with the peer's validated field values: keep them
+        free of side effects you would not run on untrusted input."""
         if not dataclasses.is_dataclass(cls):
             raise TypeError(f"{cls!r} is not a dataclass; use register_class")
         hints = typing.get_type_hints(cls)
@@ -145,7 +152,8 @@ class JsonCodec:
     ) -> None:
         """Register a plain class with explicit conversions. Its fields are
         not validated by annotation; ``from_dict`` receives decoded JSON
-        values (registered objects inside are already constructed)."""
+        values (registered objects inside are already constructed) and
+        runs on the peer's input: it must validate them itself."""
         self._add(
             _Registered(
                 name,
@@ -213,6 +221,15 @@ class JsonCodec:
                 return {k: item(v, codec, depth + 1) for k, v in value.items()}
 
             return dict_
+        if tp in (list, dict, tuple, set, frozenset, object) or origin in (
+            set,
+            frozenset,
+        ):
+            # A bare container (or object) would accept unvalidated content.
+            raise TypeError(
+                f"JsonCodec needs a parametrised annotation, not {tp!r}"
+                " (e.g. list[int], dict[str, float])"
+            )
         if isinstance(tp, type):
             cls = tp
 
@@ -279,6 +296,7 @@ class JsonCodec:
                 raw,
                 object_pairs_hook=_no_duplicates,
                 parse_constant=_no_constant,
+                parse_float=_finite_float,
             )
         except (ValueError, RecursionError) as e:
             raise CodecError(f"not valid JSON: {type(e).__name__}") from e
@@ -350,6 +368,13 @@ def _no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 def _no_constant(name: str) -> object:
     raise CodecError(f"{name} is not JSON")
+
+
+def _finite_float(text: str) -> float:
+    value = float(text)
+    if value != value or value in (float("inf"), float("-inf")):
+        raise CodecError(f"{text[:20]} is not a finite number")  # e.g. 1e999
+    return value
 
 
 __all__ = ["CodecError", "JsonCodec", "JsonValue", "WSCodec"]

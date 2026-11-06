@@ -235,3 +235,124 @@ def test_shutdown_with_a_stalled_client_leaves_no_pending_task():
     assert _wait_for(lambda: not server._thread.is_alive())
     # Tasks still pending here would be destroyed with the closed loop.
     assert [t for t in asyncio.all_tasks(loop) if not t.done()] == []
+
+
+# --- review of #24 -----------------------------------------------------------
+
+
+def test_a_raising_connections_subscriber_does_not_kill_the_connection():
+    port = _free_port()
+    server = RxWSServer(WSConnectionConfig("127.0.0.1", port))
+
+    def boom(_event: WSConnectionEvent) -> None:
+        raise RuntimeError("subscriber bug")
+
+    server.connections.subscribe(on_next=boom)
+    got: list[object] = []
+    server.subscribe(on_next=got.append)
+    client = RxWSClient(WSConnectionConfig("127.0.0.1", port, "/a"))
+    try:
+        assert _wait_for(lambda: client._connected)
+        client.on_next("hello")
+        client.on_next("again")
+        assert _wait_for(lambda: [g.data for g in got] == ["hello", "again"])
+    finally:
+        client.on_completed()
+        server.on_completed()
+
+
+def test_pickle_codecs_are_refused_however_supplied():
+    import pytest
+
+    from rxplus.ws import PickleNotAllowedError, WSObject, wsdt_factory
+
+    cfg = WSConnectionConfig("127.0.0.1", _free_port())
+    with pytest.raises(PickleNotAllowedError):
+        RxWSServer(cfg, datatype=WSObject())
+    with pytest.raises(PickleNotAllowedError):
+        RxWSClient(cfg, datatype=wsdt_factory("object"))
+    group = RxWSClientGroup(cfg, datatype=lambda p: wsdt_factory("object"))
+    group.on_next(TaggedData("/x", 1))  # refused path: logged, not raised
+    assert group.dropped == 1
+    group.on_completed()
+
+
+def test_group_drops_values_that_are_not_tagged():
+    group = RxWSClientGroup(WSConnectionConfig("127.0.0.1", _free_port()))
+    group.on_next("not tagged")  # type: ignore[arg-type]
+    assert group.dropped == 1 and group._clients == {}
+    group.on_completed()
+    group.on_next(TaggedData("/after", 1))  # ignored after the end
+    assert group._clients == {}
+
+
+def test_server_counts_dropped_items():
+    port = _free_port()
+    server = RxWSServer(WSConnectionConfig("127.0.0.1", port))
+    server.on_next("not tagged")  # type: ignore[arg-type]
+    server.on_next(TaggedData("/a", 123))  # "string" codec: not a str
+    assert server.dropped == 2
+    server.on_completed()
+
+
+def test_disconnect_overflow_logs_once_per_connection():
+    port = _free_port()
+    server = RxWSServer(
+        WSConnectionConfig("127.0.0.1", port), send_queue=16, overflow="disconnect"
+    )
+    warnings: list[str] = []
+    real_log = server._log
+    server._log = lambda body, level="INFO": (  # type: ignore[method-assign]
+        warnings.append(body) if level == "WARN" else None,
+        real_log(body, level),
+    )
+    time.sleep(0.2)
+    _stalled_client(port, "/slow", 6)
+    assert _wait_for(lambda: _clients(server, "/slow") == 1)
+    for _ in range(3000):
+        server.on_next(TaggedData("/slow", "x" * 65536))
+    assert _wait_for(lambda: _clients(server, "/slow") == 0)
+    server.on_completed()
+    assert sum("overflowed" in w for w in warnings) == 1
+    assert server.dropped > 0
+
+
+def test_offline_buffer_drops_oldest_even_with_disconnect_policy():
+    port = _free_port()
+    client = RxWSClient(
+        WSConnectionConfig("127.0.0.1", port, "/b"),
+        buffer_while_disconnected=True,
+        send_queue=4,
+        overflow="disconnect",
+        retry_policy=RetryPolicy(base_delay=0.2, max_delay=0.2, jitter=0.0),
+    )
+    time.sleep(0.3)
+    for i in range(10):
+        client.on_next(f"m{i}")  # offline: the buffer keeps the newest four
+    time.sleep(0.2)
+    server = RxWSServer(WSConnectionConfig("127.0.0.1", port))
+    received: list[object] = []
+    events: list[str] = []
+    server.subscribe(on_next=lambda td: received.append(td.data))
+    server.connections.subscribe(on_next=lambda e: events.append(e.kind))
+    try:
+        assert _wait_for(lambda: len(received) == 4, timeout=5.0)
+        client.on_next("after")
+        assert _wait_for(lambda: len(received) == 5)
+        assert received == ["m6", "m7", "m8", "m9", "after"]
+        assert events == ["opened"]  # the reconnection was not dropped
+        assert client.dropped == 6
+    finally:
+        client.on_completed()
+        server.on_completed()
+
+
+def test_send_queue_byte_bound():
+    from rxplus.ws._sendqueue import SendQueue
+
+    queue = SendQueue(None, "drop_old", limit_bytes=10)
+    for frame in (b"aaaa", b"bbbb", b"cccc"):  # 12 bytes > 10
+        queue.put(frame)
+    assert len(queue) == 2 and queue.dropped == 1
+    assert queue.put(b"x" * 50)  # larger than the bound alone: kept, others go
+    assert len(queue) == 1

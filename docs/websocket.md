@@ -117,10 +117,11 @@ All three components also take these keyword-only parameters (0.2):
 
 | Name | Default | Description |
 |------|---------|-------------|
-| `allow_pickle` | `False` | Allow `datatype="object"`. Unpickling runs the peer's code: trusted links only. |
+| `allow_pickle` | `False` | Allow `datatype="object"` or a `WSObject()` codec, however supplied (fixed, per path, or from `wsdt_factory("object")`). Unpickling runs the peer's code: trusted links only. |
 | `max_size` | `1 MiB` | Largest incoming message in bytes; a larger one closes the connection (1009). `None`: unlimited. |
-| `send_queue` | `1024` | Frames queued per connection (per client for the server) before `overflow` applies. `None`: unbounded. |
-| `overflow` | `"drop_old"` | Full queue: `"drop_old"` (discard the oldest), `"drop_new"` (discard the new frame), `"disconnect"` (close that connection; a client reconnects with an empty queue). Drops are logged. |
+| `send_queue` | `1024` | Frames queued per connection (per client for the server) before `overflow` applies. `None`: unbounded. It counts frames, not bytes: the worst case is `send_queue` times your largest frame per connection. |
+| `send_queue_bytes` | `None` | Optional bound on the queued bytes per connection; `overflow` applies when either bound is reached. |
+| `overflow` | `"drop_old"` | Full queue: `"drop_old"` (discard the oldest), `"drop_new"` (discard the new frame), `"disconnect"` (close that connection; a client reconnects with an empty queue). While a client is offline (`buffer_while_disconnected=True`) its full buffer always drops the oldest frame, whatever `overflow` says: there is no connection to drop. Drops are logged (the first, then every thousandth) and counted. |
 
 ### Data Types
 
@@ -156,7 +157,9 @@ client.on_next(Reading("t1", 21.5))  # arrives as TaggedData("/r", Reading("t1",
 
 A class that is not a dataclass is registered with explicit conversions: `codec.register_class(Money, name="money", to_dict=..., from_dict=...)`. On the wire a registered object is `{"$type": "<name>", "fields": {...}}` and `bytes` is `{"$bytes": "<base64>"}`; other JSON values pass through.
 
-Decoding checks the size before parsing and rejects duplicate keys, NaN and Infinity, and nesting deeper than `max_depth`. It constructs only types in the codec's registry, with exactly their fields, each validated against the field's annotation. Supported annotations: `None`, `bool`, `int`, `float`, `str`, `bytes`, registered classes, `list[X]`, `tuple[X, ...]`, `dict[str, X]`, and unions of these. It never imports, evaluates or calls anything named by the peer.
+Decoding checks the size before parsing and rejects duplicate keys, NaN and Infinity (also `1e999`), and nesting deeper than `max_depth`. It constructs only types in the codec's registry, with exactly their fields, each validated against the field's annotation. Supported annotations: `None`, `bool`, `int`, `float`, `str`, `bytes`, registered classes, `list[X]`, `tuple[X, ...]`, `dict[str, X]`, and unions of these. A bare `list`, `dict`, `tuple` or `object` is refused at `register` (it would admit unvalidated content). It never imports, evaluates or calls anything named by the peer.
+
+What *does* run on the peer's input is your own code for the registered types: a dataclass's `__init__` and `__post_init__`, and the `from_dict` of `register_class`. Keep them free of side effects you would not run on untrusted data, and validate in `from_dict`. A codec you write yourself is trusted as written.
 
 ### Errors
 
@@ -166,13 +169,17 @@ A problem with one item never ends a component (0.2):
 - a subscriber that raises while handling a received value: logged, the connection goes on;
 - a connection that fails unexpectedly or overflows under `overflow="disconnect"`: that connection is closed, the others go on.
 
-Only lifecycle failures reach `on_error`: the server cannot bind its port, a client exhausts `max_retries` or has an invalid URI. An `on_error` received from upstream shuts the component down (like `on_completed`) and forwards the error to its subscribers.
+Every dropped item is counted: `server.dropped`, `client.dropped` and `group.dropped` (values the group refused itself) give the totals. When components report to a Reacting observer (X4), the same counts are sent as `dropped` on their links.
 
-`RxWSClientGroup` removes a child that ends with an error and emits `(path, error)` on `group.child_errors`; the group and its other children go on, and the next value for that path starts a new child.
+Only lifecycle failures reach `on_error`: the server cannot bind its port, a client exhausts `max_retries` or has an invalid URI. An `on_error` received from upstream shuts the component down (like `on_completed`) and forwards the error to its subscribers. A subscriber of `server.connections` that raises is logged and does not affect the connection.
+
+`RxWSClientGroup.on_next` logs and drops a value that is not `TaggedData`, or one for a path whose datatype is refused. A fixed `datatype="object"` without `allow_pickle` is refused at construction; a per-path function can only be checked when the path is first used.
+
+`RxWSClientGroup` removes a child that ends with an error and emits `(path, error)` on `group.child_errors`; the group and its other children go on, and the next value for that path starts a new child. The group's own `on_completed` or `on_error` completes every child (children are shut down quietly, not errored), then ends the group's stream; values sent afterwards are ignored.
 
 ### Connection events
 
-`server.connections` emits `WSConnectionEvent(kind, connection_id, path)` with `kind` `"opened"` or `"closed"` for every client connection (on the server's loop thread). `connection_id` is unique for the server's lifetime.
+`server.connections` emits `WSConnectionEvent(kind, connection_id, path)` with `kind` `"opened"` or `"closed"` for every client connection (on the server's loop thread). `connection_id` is unique for the server's lifetime. The stream completes when the server shuts down.
 
 ## Threading Model
 

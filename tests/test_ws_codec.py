@@ -148,3 +148,31 @@ def test_decode_never_calls_unregistered_code():
         with pytest.raises(CodecError):
             codec.decode(json.dumps({"$type": name, "fields": {"x": "1"}}))
     assert calls == []
+
+
+# --- review of #24 -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        "1e999",
+        "-1e999",
+        '{"$type":"Point","fields":{"x":1e999,"y":0}}',
+        '{"$type":"Point","fields":{"x":%s,"y":0}}' % ("9" * 400),  # int -> float
+        "9" * 5000,  # longer than Python's int-string limit
+    ],
+)
+def test_non_finite_and_out_of_range_numbers_are_codec_errors(frame):
+    with pytest.raises(CodecError):
+        _codec().decode(frame)
+
+
+@pytest.mark.parametrize("annotation", [list, dict, tuple, object, set[int]])
+def test_bare_containers_are_refused_at_register(annotation):
+    @dataclass
+    class Loose:
+        v: annotation  # type: ignore[valid-type]
+
+    with pytest.raises(TypeError):
+        JsonCodec().register(Loose)

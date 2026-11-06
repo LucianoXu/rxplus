@@ -21,6 +21,17 @@ is in the last column.
 | upstream `on_error` into `RxWSServer`/`RxWSClient` forwarded the error (client: wrapped in `RxException`) and left the thread running | shuts the component down and forwards the error **unwrapped** | if you matched `RxException` from a client's `on_error`, match the original error | A |
 | one child of `RxWSClientGroup` failing (or completing) ended the group's stream | the child is removed, `(path, error)` is emitted on `group.child_errors`; the group ends only on its own `on_completed`/`on_error` | subscribe to `child_errors` if you need to know | A |
 | — | `RxWSServer.connections`: `WSConnectionEvent("opened" \| "closed", connection_id, path)` | optional | A |
+| a `WSObject()` instance (or `wsdt_factory("object")`) as `datatype` | refused unless `allow_pickle=True`, like `"object"` | pass `allow_pickle=True` (trusted links only) | A |
+| `WSChannels("object")` | raises `PickleNotAllowedError`; `WSChannels(..., allow_pickle=True)` | pass `allow_pickle=True` | A |
+| `WSChannels.queues` held `asyncio.Queue`s | holds the server's per-client records (each with a bounded send queue) | do not use it to send; use `on_next` / `send_to` | A |
+| `RxWSClient.queue` was an `asyncio.Queue` of values | a `SendQueue` of encoded frames (loop thread only) | do not touch it; use `on_next` | A |
+| `RxWSClient.adapter` was a `WSDatatype` | a `WSCodec` (`encode`/`decode`) | use `encode`/`decode` | A |
+| a subscriber of `RxWSClient` raising ended the client | logged, counted in `dropped`; the connection goes on | — | A |
+| `RxWSClientGroup.on_error`/`on_completed` errored or completed each child | completes each child (shut down quietly), then ends the group | — | A |
+| `RxWSClientGroup.on_next` after the group ended reached its children | ignored | — | A |
+| `RxWSClientGroup.on_next` raised on a non-`TaggedData` value | logged and dropped (`group.dropped`) | — | A |
+| — | `dropped` counters on server, client and group; `send_queue_bytes` | optional | A |
+| — | `server.connections` completes when the server shuts down | — | A |
 | `RxWSServer(...).datatype_func` attribute | removed (codecs are resolved per path internally) | use the `datatype` you passed | A |
 | `WSChannels.adapter` was a `WSDatatype` | a `WSCodec` (`WSDatatype` subclasses implement it: `encode`/`decode`, `frame`) | use `encode`/`decode` | A |
 | `RxWSClient` handshake bounded by `RetryPolicy.base_delay` | `open_timeout` (default 10 s) | pass `open_timeout=` if you relied on a short handshake timeout | #10 |

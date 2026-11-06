@@ -121,8 +121,13 @@ class RxWSClient(Subject, OTelLoggingMixin):
     send_queue : int | None
         Frames queued before ``overflow`` applies (None: unbounded).
     overflow : "drop_old" | "drop_new" | "disconnect"
-        What a full send queue does; ``"disconnect"`` drops the connection
-        (the client then reconnects with an empty queue).
+        What a full send queue does while connected; ``"disconnect"`` drops
+        the connection (the client then reconnects with an empty queue).
+        While offline (``buffer_while_disconnected``) a full buffer always
+        drops its oldest frame: there is no connection to drop.
+    send_queue_bytes : int | None
+        Optional bound on the queued bytes; ``overflow`` applies when either
+        bound is reached.
 
     Error semantics (0.2): a value that cannot be encoded or decoded, or a
     subscriber that raises, is logged and the item dropped. ``on_error``
@@ -153,6 +158,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
         max_size: int | None = DEFAULT_MAX_SIZE,
         send_queue: int | None = 1024,
         overflow: SendOverflow = "drop_old",
+        send_queue_bytes: int | None = None,
     ):
         """Create a reconnecting WebSocket client.
 
@@ -196,8 +202,11 @@ class RxWSClient(Subject, OTelLoggingMixin):
         self.datatype = datatype
         # "object" without allow_pickle fails here.
         self.adapter: WSCodec[object] = codec_for(datatype, allow_pickle=allow_pickle)
-        SendQueue(send_queue, overflow)  # validate the arguments now
+        SendQueue(send_queue, overflow, send_queue_bytes)  # validate now
         self._send_queue = send_queue
+        self._send_queue_bytes = send_queue_bytes
+        self._dropped = 0
+        self._dropped_lock = threading.Lock()
         self._overflow: SendOverflow = overflow
         self._max_size = max_size
 
@@ -266,6 +275,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
         except Exception as e:
             # 0.1 raised into the caller's on_next (type check) or ended the
             # client (packaging); 0.2 drops the one value.
+            self._count_dropped()
             self._log(
                 f"Dropped a value that could not be encoded: {get_short_error_info(e)}",
                 "ERROR",
@@ -295,22 +305,43 @@ class RxWSClient(Subject, OTelLoggingMixin):
             # The loop closed between the check above and this call.
             return
 
+    @property
+    def dropped(self) -> int:
+        """Items dropped so far: values that could not be encoded, frames
+        that did not decode, subscribers raising, and frames discarded by the
+        send queue. A reporter (X4) reports them as ``dropped``."""
+        with self._dropped_lock:
+            return self._dropped
+
+    def _count_dropped(self, n: int = 1) -> None:
+        with self._dropped_lock:
+            self._dropped += n
+
     def _enqueue(self, frame: str | bytes) -> None:
         """Loop thread: queue one frame, applying the overflow policy."""
         queue = self.queue
         assert queue is not None
+        if queue.overflowed:
+            self._count_dropped()  # disconnecting: the frame is lost
+            return
+        # Offline there is no connection to drop: the buffer drops oldest.
+        offline = self.ws is None or not self._connected
         before = queue.dropped
-        if not queue.put(frame):
-            self._log(
+        if not queue.put(frame, "drop_old" if offline else None):
+            self._count_dropped()
+            self._log(  # once per connection
                 f"Send queue overflowed ({queue.limit} frames); disconnecting", "WARN"
             )
             if self.ws is not None:
                 asyncio.get_running_loop().create_task(self.ws.close())
-        elif queue.dropped != before and queue.dropped % 1000 == 1:
-            self._log(
-                f"Send queue full; {queue.dropped} frames dropped ({queue.overflow})",
-                "WARN",
-            )
+        elif queue.dropped != before:
+            self._count_dropped(queue.dropped - before)
+            if before == 0 or queue.dropped // 1000 != before // 1000:
+                self._log(
+                    f"Send queue full; {queue.dropped} frames dropped so far"
+                    f" ({'drop_old' if offline else queue.overflow})",
+                    "WARN",
+                )
 
     def on_error(self, error: Exception) -> None:
         """Shut the client down, then forward the error to subscribers."""
@@ -635,6 +666,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
                 try:
                     payload = self.adapter.decode(data)
                 except Exception as e:
+                    self._count_dropped()
                     self._log(
                         f"Dropped a message from {remote_desc} that did not"
                         f" decode: {get_short_error_info(e)}",
@@ -645,6 +677,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
                     super().on_next(payload)
                 except Exception as e:
                     # A subscriber raised: its problem, not the connection's.
+                    self._count_dropped()
                     self._log(
                         f"Dropped a message from {remote_desc}: a subscriber"
                         f" raised {get_short_error_info(e)}",
@@ -657,7 +690,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
         loop = asyncio.new_event_loop()
         self._loop = loop
         # Create queue after event loop is set up
-        self.queue = SendQueue(self._send_queue, self._overflow)
+        self.queue = SendQueue(self._send_queue, self._overflow, self._send_queue_bytes)
         self._loop_ready.set()
         asyncio.set_event_loop(loop)
         loop.create_task(self.connect_client())

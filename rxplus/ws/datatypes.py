@@ -170,8 +170,14 @@ def codec_for(
                 " rxplus.ws.JsonCodec for custom objects"
             )
         return wsdt_factory(choice)
+    if isinstance(choice, WSObject) and not allow_pickle:
+        # A WSObject instance is a WSCodec too: refuse it the same way.
+        raise PickleNotAllowedError(
+            "a pickle codec (WSObject) unpickles peer data (code execution);"
+            " pass allow_pickle=True on trusted links only"
+        )
     if isinstance(choice, WSCodec):
-        return choice
+        return choice  # a codec you supply is trusted as written
     raise ValueError(f"Unsupported datatype {choice!r}")
 
 
