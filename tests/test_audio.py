@@ -19,6 +19,7 @@ from rxplus.audio import (
     RxMicrophone,
     RxSpeaker,
     SaveWavFile,
+    StreamingResampler,
     create_wavfile,
     get_pyaudio_format,
     get_sf_format,
@@ -306,6 +307,10 @@ class TestRxSpeaker:
         test_data = b"\x00\x01\x02\x03"
         speaker.on_next(test_data)
 
+        # on_next only enqueues; the playback thread writes asynchronously.
+        deadline = time.monotonic() + 2.0
+        while not mock_stream.write.called and time.monotonic() < deadline:
+            time.sleep(0.005)
         mock_stream.write.assert_called_once_with(test_data)
 
     def test_format_configuration(self, mock_pyaudio):
@@ -526,3 +531,42 @@ class TestConvertChannels:
 
         assert mono.shape == (1, 1)
         assert mono[0, 0] == (1.0 + 2.0 + 3.0 + 4.0) / 4
+
+
+def test_create_wavfile_has_no_empty_trailing_chunk(tmp_path):
+    """A length that is a multiple of frames_per_chunk ends without an empty chunk."""
+    wav_path = tmp_path / "exact.wav"
+    sf.write(wav_path, np.zeros((2048, 1), dtype=np.float32), samplerate=48000)
+    chunks: list[np.ndarray] = []
+    done = threading.Event()
+    create_wavfile(str(wav_path), frames_per_chunk=1024).subscribe(
+        on_next=chunks.append, on_completed=done.set
+    )
+    assert done.wait(2.0)
+    assert [len(c) for c in chunks] == [1024, 1024]
+
+
+def test_streaming_resampler_saturates_int16():
+    """Filter overshoot near full scale must clip, not wrap around."""
+    square = np.where(np.arange(4800) % 96 < 48, 32767, -32768).astype(np.int16)
+    out = StreamingResampler(48_000, 16_000).process(square)
+    ref = StreamingResampler(48_000, 16_000).process(square.astype(np.float64))
+    assert out.dtype == np.int16
+    assert np.max(np.abs(ref)) > 32767  # the filter does overshoot here
+    expected = np.clip(ref, -32768, 32767).astype(np.int16)
+    assert np.array_equal(out, expected)
+
+
+def test_speaker_on_completed_with_full_queue(mock_pyaudio):
+    """on_completed must not raise queue.Full and must release PyAudio."""
+    mock_pa, mock_stream = mock_pyaudio
+    release = threading.Event()
+    mock_stream.write.side_effect = lambda _data: release.wait(10)
+    speaker = RxSpeaker(playback_queue_maxsize=2)
+    for _ in range(10):
+        speaker.on_next(b"\x00" * 8)
+        time.sleep(0.01)
+    assert speaker._queue.full()
+    threading.Timer(0.2, release.set).start()
+    speaker.on_completed()
+    mock_pa.terminate.assert_called_once()
