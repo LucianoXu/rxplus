@@ -19,7 +19,12 @@ from websockets import ClientConnection, Server, ServerConnection
 from ..mechanism import RxException
 from ..utils import TaggedData, get_short_error_info
 from ._otel_mixin import OTelLoggingMixin
-from .datatypes import WSConnectionConfig, WSDatatype, wsdt_factory
+from .datatypes import (
+    WSConnectionConfig,
+    WSDatatype,
+    _resolve_datatype_func,
+    wsdt_factory,
+)
 
 
 def _ws_path(ws: ClientConnection | ServerConnection) -> str:
@@ -126,17 +131,9 @@ class RxWSServer(Subject, OTelLoggingMixin):
         )
 
         # the function to determine the datatype of the path
-        self.datatype_func: Callable[[str], Literal["string", "bytes", "object"]]
-        if datatype in ["string", "bytes", "object"]:
-            self.datatype_func = lambda path: datatype  # type: ignore[assignment,return-value]
-        elif callable(datatype):
-            self.datatype_func = datatype
-        else:
-            raise ValueError(
-                f"Unsupported datatype '{datatype}'."
-                " Expected 'string', 'bytes', 'object',"
-                " or a callable function."
-            )
+        self.datatype_func: Callable[[str], Literal["string", "bytes", "object"]] = (
+            _resolve_datatype_func(datatype)
+        )
 
         self.ping_interval = ping_interval
         self.ping_timeout = ping_timeout

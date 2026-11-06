@@ -15,12 +15,13 @@ compatibility with code paths where telemetry is not configured.
 
 from __future__ import annotations
 
-from typing import Callable, TypeVar
+from collections.abc import Callable
+from typing import TypeVar
 
 from opentelemetry import context, trace
 from opentelemetry.trace import StatusCode, Tracer
 from reactivex import Observable, create
-from reactivex.abc import ObserverBase, SchedulerBase
+from reactivex.abc import DisposableBase, ObserverBase, SchedulerBase
 from reactivex.disposable import CompositeDisposable, Disposable
 
 T = TypeVar("T")
@@ -67,9 +68,7 @@ def traced_operator(
             item_count = 0
             span_ended = False
 
-            def _end_span(
-                status: StatusCode, description: str | None = None
-            ) -> None:
+            def _end_span(status: StatusCode, description: str | None = None) -> None:
                 nonlocal span_ended
                 # Guard against double-end: on_completed/on_error AND disposal
                 # may both try to end the span in race conditions.
@@ -154,7 +153,7 @@ def traced_batch_operator(
         def _subscribe(
             observer: ObserverBase[T],
             scheduler: SchedulerBase | None = None,
-        ) -> Disposable:
+        ) -> DisposableBase:
             emission_index = 0
 
             def on_next(value: T) -> None:
