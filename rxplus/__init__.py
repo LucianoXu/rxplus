@@ -273,6 +273,16 @@ def _available(module: str) -> bool:
         return _optional[module]
 
 
+def _reset_import_lock() -> None:
+    """A forked child gets a fresh lock (a parent thread may have held it)."""
+    global _import_lock
+    _import_lock = threading.RLock()
+
+
+if hasattr(__import__("os"), "register_at_fork"):
+    __import__("os").register_at_fork(after_in_child=_reset_import_lock)
+
+
 if not TYPE_CHECKING:  # type checkers see the imports above; typos stay errors
 
     def __getattr__(name: str) -> object:

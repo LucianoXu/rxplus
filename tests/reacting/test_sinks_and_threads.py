@@ -62,7 +62,9 @@ def test_concurrent_counting_is_exact(tmp_path):
     for t in threads:
         t.join()
     time.sleep(0.12)  # let the last window end
-    r.close()
+    # Exact counts need every line written: give close() a generous budget
+    # (with the default 1 s it may rightly give up on a loaded machine).
+    r.close(timeout=10.0)
     flows = [s for s in sink.signals() if s["type"] == "flow"]
     assert sum(f["items"] for f in flows) == 8 * 5000 * 2
     _check(sink.lines, tmp_path, window=0.05)

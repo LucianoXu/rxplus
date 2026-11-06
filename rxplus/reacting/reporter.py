@@ -479,14 +479,22 @@ class Reporter:
         if end - k > _MAX_LAG or (end - k) * len(self._busy_ids) > _MAX_PENDING:
             # The clock thread fell behind by more windows than it may keep
             # counts for: treat the backlog of windows as Loss (finding N3).
-            self._lose_windows(end)
+            self._lose_windows(end, skipped=end - k)
             return
         # From here on, a late hot-path event for a window < end counts in
         # window `end` (accumulators read st.closed under their lock).
         st.closed = end
         self._drain_busy()
         session = st.session
+        first = k
         while k < end and st.session == session:
+            if k > first:
+                # Re-check while catching up (finding B): a catch-up that
+                # started under the limits may fall further behind.
+                lag = st.window_of(st.now()) - k
+                if lag > _MAX_LAG or lag * len(self._busy_ids) > _MAX_PENDING:
+                    self._lose_windows(end, skipped=end - k)
+                    return
             if not self._watched:
                 nxt = [
                     w
@@ -504,12 +512,11 @@ class Reporter:
             self._close_one(k)
             k += 1
 
-    def _lose_windows(self, end: int) -> None:
+    def _lose_windows(self, end: int, skipped: int) -> None:
         """Skip windows below ``end`` as Loss: discard their counts, leave a
         ``seq`` gap of at least the number of windows dropped, resend a
         snapshot. Keeps accumulator memory bounded when the clock lags."""
         st = self._st
-        skipped = end - st.closed
         st.closed = end  # late events now count in window `end`
         self._drain_busy()
         lost = 0
@@ -753,6 +760,12 @@ def _disable_after_fork() -> None:
     creates its own reporter.
     """
     for reporter in list(_REPORTERS):
+        # A parent thread may have held these locks at fork time: the child
+        # gets fresh ones (finding A), so no call in the child can block.
+        reporter._lock = threading.Lock()
+        reporter._cond = threading.Condition(reporter._lock)
+        reporter._qlock = threading.Lock()
+        reporter._qcond = threading.Condition(reporter._qlock)
         reporter._st.live = False
         reporter._closing = True
         reporter._closed = True

@@ -645,3 +645,79 @@ def test_close_folds_windows_left_behind_by_a_late_record():
     res = acc.close(2, None)
     assert res.totals is not None and res.totals.items == 3
     assert acc.pending() == 0
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+def test_forked_children_never_block_on_the_parents_locks():
+    # Re-review A: a parent thread may hold the reporter's lock at fork time.
+    import signal
+    import warnings
+
+    r = Reporter("fl", MemorySink(), window=0.002)
+    elements = [r.element(f"E{i}") for i in range(100)]
+    links = [r.link(elements[i], elements[i + 1]) for i in range(99)]
+    stop = threading.Event()
+
+    def load() -> None:
+        while not stop.is_set():
+            for link in links:
+                link.deliver()
+            with elements[0].span("s"):
+                pass
+            r.element("tmp").remove()
+
+    threads = [threading.Thread(target=load, daemon=True) for _ in range(3)]
+    for t in threads:
+        t.start()
+    time.sleep(0.2)
+    hung = 0
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)  # fork with threads
+        for _ in range(300):
+            pid = os.fork()
+            if pid == 0:
+                signal.alarm(2)
+                e = r.element("child")
+                link = r.link(elements[0], e)
+                link.deliver()
+                e.span("c").end()
+                r.remove(e)
+                os._exit(0)
+            _, status = os.waitpid(pid, 0)
+            hung += os.WIFSIGNALED(status)
+    stop.set()
+    for t in threads:
+        t.join()
+    r.close()
+    assert hung == 0
+
+
+def test_catch_up_that_falls_further_behind_becomes_loss(tmp_path):
+    # Re-review B: the lag was checked only when a catch-up started.
+    clock = ManualClock()
+    sink = MemorySink()
+    r = Reporter("lag", sink, window=0.1, clock=clock, timer=False)
+    links = [r.link(r.element(f"A{i}"), r.element(f"B{i}")) for i in range(50)]
+    r.poll()
+    for _ in range(30):  # under the 64-window limit when the catch-up starts
+        for link in links:
+            link.deliver()
+        clock.advance(0.1)
+
+    # Every clock read during the catch-up moves time on by 3 windows.
+    st = r._st
+    orig = st.monotonic
+
+    def fast() -> float:
+        value = orig()
+        clock.advance(0.3)
+        return value
+
+    st.monotonic = fast
+    r._step()
+    st.monotonic = orig
+    assert max(link._acc.pending() for link in links) <= 31
+    r.poll()
+    sigs = sink.signals()
+    assert any(s["type"] == "snapshot" and s["seq"] > 0 for s in sigs)  # a Loss
+    conform(sink, tmp_path)
