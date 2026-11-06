@@ -90,6 +90,7 @@ def test_file_sink(tmp_path):
     path = tmp_path / "session.jsonl"
     with Reporter("test", JsonlFileSink(path)) as r:
         link = r.link(r.element("A"), r.element("B"))
+        assert _wait_for(lambda: r.live)  # nothing is counted before the session
         link.deliver(5)
         time.sleep(0.15)
     text = path.read_text(encoding="utf-8")

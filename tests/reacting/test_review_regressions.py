@@ -1,0 +1,465 @@
+"""Regression tests for the independent reviews of #22 (protocol, concurrency).
+
+Each test reproduces one reviewer probe; the comment names the finding.
+"""
+
+import os
+import socket
+import subprocess
+import sys
+import textwrap
+import threading
+import time
+from collections import deque
+from pathlib import Path
+
+import pytest
+
+from rxplus.reacting import (
+    JsonlFileSink,
+    ManualClock,
+    MemorySink,
+    Reporter,
+    WebSocketSink,
+)
+from rxplus.reacting._websocket import NotLoopbackError, WSConnection
+from rxplus.reacting._window import Accumulator
+from tests.reacting.helpers import by_type, conform, make
+from tests.reacting.rawws import RawServer
+
+SURROGATE = os.fsdecode(b"cam\xff")  # a non-UTF-8 file name: a lone surrogate
+
+
+def _wait_for(cond, timeout: float = 5.0) -> bool:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(0.01)
+    return cond()
+
+
+# --------------------------------------------------------------- protocol
+
+
+class _TickingClock(ManualClock):
+    """Real clocks move between two reads: this one moves 1 ms per read."""
+
+    tick = False
+
+    def monotonic(self) -> float:
+        value = super().monotonic()
+        if self.tick:
+            self.advance(0.001)
+        return value
+
+
+def test_t_never_decreases_with_a_clock_that_moves_between_reads(tmp_path):
+    # Finding 1: two clock reads per operation let t go backwards.
+    sink, clock = MemorySink(), _TickingClock()
+    r = Reporter("test", sink, window=0.1, clock=clock, timer=False)
+    a, b = r.element("A"), r.element("B")
+    link = r.link(a, b)
+    link.deliver()
+    clock.advance(0.0995)  # 0.5 ms before the end of window 0
+    clock.tick = True
+    span = a.span("work")
+    link.deliver()
+    r.element("C")
+    span.end()
+    clock.tick = False
+    clock.advance(0.2)
+    r.poll()
+    ts = [s["t"] for s in sink.signals()]
+    assert ts == sorted(ts)
+    conform(sink, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda r: r.element(SURROGATE),
+        lambda r: r.element("A", kind=SURROGATE),
+        lambda r: r.link(r.element("A"), f"hub/{SURROGATE}"),
+        lambda r: r.element("A").span(SURROGATE),
+        lambda r: r.element("A").span("s").end(SURROGATE),
+        lambda r: Reporter(SURROGATE, MemorySink(), timer=False),
+        lambda r: Reporter("x", MemorySink(), label=SURROGATE, timer=False),
+    ],
+)
+def test_unencodable_strings_fail_at_the_call(call, tmp_path):
+    # Finding 2: a lone surrogate was accepted, then broke the session later.
+    r, sink, clock = make()
+    with pytest.raises(ValueError, match="UTF-8"):
+        call(r)
+    r.element("After")
+    r.poll()
+    assert r.live
+    conform(sink, tmp_path)
+
+
+def test_loss_of_the_opening_snapshot_begins_a_new_session(tmp_path):
+    # Finding 3 (spec fa173ab): the discarded signals include seq 0.
+    r, sink, clock = make(queue=3)
+    sink.disconnect()
+    r.poll()  # session 1 over
+    sink.connect()
+    r._try_open()  # connected: session 2 begins with its snapshot queued
+    r._step()
+    assert r._opening_queued
+    for i in range(6):  # overflow before the opening snapshot is written
+        r.element(f"E{i}")
+    r._step()
+    r.poll()
+    sigs = sink.signals()
+    snaps = [(s["seq"], len(s["elements"])) for s in by_type(sigs, "snapshot")]
+    assert all(seq == 0 for seq, _ in snaps), snaps  # never a recovery snapshot
+    assert snaps[-1][1] == 6
+    conform(sink, tmp_path)
+
+
+@pytest.mark.parametrize("queue", [5, 50])
+def test_spans_on_threads_with_reconnects_conform(queue, tmp_path):
+    sink = MemorySink()
+    r = Reporter("test", sink, queue=queue, window=0.05)
+    elements = [r.element(f"E{i}") for i in range(4)]
+    stop = threading.Event()
+
+    def worker(el) -> None:
+        while not stop.is_set():
+            with el.span("work"):
+                pass
+
+    threads = [threading.Thread(target=worker, args=(e,)) for e in elements]
+    for t in threads:
+        t.start()
+    for _ in range(10):
+        time.sleep(0.05)
+        sink.disconnect()
+        time.sleep(0.02)
+        sink.connect()
+    stop.set()
+    for t in threads:
+        t.join()
+    r.close()
+    assert len(by_type(sink.signals(), "snapshot")) >= 2
+    conform(sink, tmp_path, window=0.05)
+
+
+def test_loss_bound_counts_the_batch_in_flight(tmp_path):
+    # Finding 4: the queue bound overshot by the writer's batch.
+    queue = 100
+    sink = MemorySink()
+    r = Reporter("test", sink, queue=queue, window=10.0)
+    a = r.element("A")
+    assert _wait_for(lambda: r.live and len(sink.lines) >= 1)  # the snapshot
+    sink.hold()
+    for _ in range(400):
+        with a.span("w"):
+            pass
+    time.sleep(0.3)
+    assert len(r._q) + r._inflight <= queue
+    sink.release()
+    r.close()
+    sigs = sink.signals()
+    seqs = [s["seq"] for s in sigs]
+    gaps = [(b - a - 1) for a, b in zip(seqs, seqs[1:], strict=False) if b != a + 1]
+    # Several Loss events while stalled add up in one gap (a later one also
+    # discards an earlier recovery snapshot); the bound is on memory, above.
+    assert gaps
+    conform(sink, tmp_path, window=10.0)
+
+
+def test_backoff_after_an_observer_rejects_the_session():
+    # Finding 4: reopen without backoff after a successful open that closes.
+    server = RawServer("reject")
+    r = Reporter("dup", WebSocketSink(server.url))  # backoff (0.5, 30)
+    r.element("A")
+    time.sleep(2.0)
+    n = server.connections
+    r.close()
+    server.stop()
+    assert 1 <= n <= 3, n
+
+
+def test_connects_only_to_the_checked_address(monkeypatch):
+    # Finding 4 (spec a39b37b): the token rule applies to the address dialled.
+    real = socket.getaddrinfo
+    dialled: list[str] = []
+
+    def fake(host, port, *args, **kwargs):
+        loop = real("127.0.0.1", port, type=socket.SOCK_STREAM)
+        far = (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.1", port))
+        return [far, *loop] if host == "mixed.example" else [far]
+
+    real_connect = socket.socket.connect
+
+    def connect(self, addr):
+        dialled.append(addr[0])
+        return real_connect(self, addr)
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake)
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    server = RawServer("normal")
+    conn = WSConnection.connect(
+        f"ws://mixed.example:{server.port}/", token=None, timeout=2.0
+    )
+    conn.close()
+    assert dialled == ["127.0.0.1"]
+    dialled.clear()
+    with pytest.raises(NotLoopbackError):
+        WSConnection.connect(
+            f"ws://far.example:{server.port}/", token=None, timeout=2.0
+        )
+    assert dialled == []
+    server.stop()
+
+
+def test_half_open_peer_is_detected():
+    # Finding 4: a peer that answers nothing (no Pong) must be given up.
+    server = RawServer("silent")
+    sink = WebSocketSink(
+        server.url, send_timeout=0.2, ping_interval=0.3, ping_timeout=0.3
+    )
+    assert sink.open()
+    assert _wait_for(lambda: not sink.is_open(), timeout=3.0)
+    sink.close()
+    server.stop()
+
+
+def test_submodules_are_attributes_and_concurrent_first_import_works():
+    # Findings 4 and 13: `rxplus.ws` after `import rxplus`; threads racing.
+    code = textwrap.dedent(
+        """
+        import importlib, threading, rxplus
+        assert rxplus.ws.RxWSServer and rxplus.reacting.Reporter
+        names = ["RxWSServer", "tag", "OTelLogger", "GatewayNode", "Duplex",
+                 "from_cli", "retry_with_signal", "WSStr", "BufferK"] * 3
+        errors = []
+        barrier = threading.Barrier(len(names))
+        def go(n):
+            barrier.wait()
+            try:
+                getattr(importlib.import_module("rxplus"), n)
+            except Exception as e:
+                errors.append((n, e))
+        threads = [threading.Thread(target=go, args=(n,)) for n in names]
+        [t.start() for t in threads]; [t.join() for t in threads]
+        print(len(errors))
+        """
+    )
+    for _ in range(3):
+        out = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True
+        )
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == "0"
+
+
+def test_typos_in_rxplus_imports_stay_type_errors(tmp_path):
+    # Finding 13: module __getattr__ hid every name from mypy.
+    user = tmp_path / "user.py"
+    user.write_text("from rxplus import RxWSServr\nfrom rxplus import RxWSServer\n")
+    out = subprocess.run(
+        [sys.executable, "-m", "mypy", "--no-incremental", str(user)],
+        capture_output=True,
+        text=True,
+    )
+    assert out.returncode == 1 and 'no attribute "RxWSServr"' in out.stdout, out.stdout
+
+
+# ------------------------------------------------------------ concurrency
+
+
+def test_reconnect_storm_is_bounded():
+    # Finding 5: an observer that closes at once got thousands of reconnects,
+    # each leaking a socket and a reader thread.
+    server = RawServer("close")
+    threads_before = threading.active_count()
+    fds_before = len(os.listdir("/proc/self/fd"))
+    r = Reporter("storm", WebSocketSink(server.url, backoff=(0.2, 1.0)))
+    r.element("A")
+    time.sleep(2.0)
+    n = server.connections
+    threads = threading.active_count()
+    fds = len(os.listdir("/proc/self/fd"))
+    r.close()
+    server.stop()
+    assert 2 <= n <= 6, n
+    assert threads - threads_before <= 3  # clock, writer, at most one reader
+    assert fds - fds_before <= 3
+
+
+def test_close_returns_when_the_observer_stops_reading():
+    # Finding 6: close() hung in sendall.
+    server = RawServer("noread")
+    r = Reporter("hang", WebSocketSink(server.url, send_timeout=1.0), queue=100_000)
+    elements = [r.element(f"Element-with-a-longish-label-{i}") for i in range(300)]
+    links = [r.link(elements[i], elements[i + 1]) for i in range(299)]
+    end = time.time() + 2.0
+    while time.time() < end:
+        for link in links:
+            link.deliver()
+    start = time.perf_counter()
+    r.close(timeout=1.0)
+    assert time.perf_counter() - start < 4.0
+    server.stop()
+
+
+def test_stalled_sink_memory_is_bounded():
+    # Finding 7: window totals piled up while the sink was stalled.
+    sink = MemorySink()
+    queue = 2000
+    r = Reporter("stall", sink, window=0.01, queue=queue)
+    elements = [r.element(f"E{i}") for i in range(200)]
+    links = [r.link(elements[i], elements[i + 1]) for i in range(199)]
+    assert _wait_for(lambda: r.live)
+    sink.hold()
+    end = time.time() + 2.0  # 200 windows
+    while time.time() < end:
+        for link in links:
+            link.deliver()
+        time.sleep(0.001)
+    pending = max(len(a._windows) for a in list(r._accs.values()))
+    queued = len(r._q) + r._inflight
+    latencies = []
+    for _ in range(50):
+        t = time.perf_counter()
+        elements[0].span("job").end()
+        latencies.append(time.perf_counter() - t)
+    sink.release()
+    r.close()
+    assert pending <= 3, pending
+    assert queued <= queue, queued
+    assert max(latencies) < 0.05  # the caller never closes windows
+
+
+def test_catch_up_never_runs_on_the_callers_thread():
+    # Finding 7: many unclosed windows were closed inside the user's call.
+    clock, sink = ManualClock(), MemorySink()
+    r = Reporter("c", sink, window=0.1, queue=10**9, clock=clock, timer=False)
+    elements = [r.element(f"E{i}") for i in range(301)]
+    links = [r.link(elements[i], elements[i + 1]) for i in range(300)]
+    for _ in range(200):
+        for link in links:
+            link.deliver()
+        clock.advance(0.1)
+    queued = len(r._q)
+    start = time.perf_counter()
+    elements[0].span("job").end()
+    assert time.perf_counter() - start < 0.01
+    assert len(r._q) == queued  # nothing built on this thread
+
+
+def test_close_during_a_slow_connect_leaves_no_session():
+    # Finding 8: a connect finishing after close() started a zombie session.
+    server = RawServer("normal", hs_delay=2.0)
+    sink = WebSocketSink(server.url)
+    r = Reporter("z", sink)
+    r.element("A")
+    time.sleep(0.2)
+    r.close(timeout=1.0)
+    time.sleep(2.5)
+    assert not r.live and not sink.is_open()
+    assert not any(t.is_alive() for t in r._threads)
+    server.stop()
+
+
+def test_a_sampler_taking_a_user_lock_does_not_deadlock():
+    # Finding 9: the sampler ran under the reporter lock (ABBA).
+    lock = threading.Lock()
+    buf: list[int] = []
+
+    def depth() -> int:
+        with lock:
+            return len(buf)
+
+    r = Reporter("d", MemorySink(), window=0.01)
+    a, b = r.element("A"), r.element("B")
+    r.link(a, b, depth=depth)
+    assert _wait_for(lambda: r.live)
+    done = threading.Event()
+
+    def component() -> None:
+        for i in range(500):
+            with lock:  # takes the reporter lock while holding its own
+                buf.append(i)
+                a.span("conn").end()
+            time.sleep(0.0005)
+        done.set()
+
+    threading.Thread(target=component, daemon=True).start()
+    assert done.wait(10)
+    r.close()
+
+
+def test_validation_does_not_depend_on_the_session():
+    # Finding 10: an invalid span label raised only while an observer was on.
+    r, sink, clock = make()
+    sink.disconnect()
+    r.poll()
+    el = r.element("e")
+    with pytest.raises(ValueError):
+        el.span("")
+    sink.connect()
+    r.poll()
+    with pytest.raises(ValueError):
+        el.span("")
+
+
+def test_span_parents_do_not_leak_between_reporters(tmp_path):
+    # Finding 11: B took A's current span ID as its parent.
+    ra, sa, _ = make()
+    rb, sb, _ = make()
+    ea, eb = ra.element("a"), rb.element("b")
+    eb.span("unrelated")  # B's s1
+    with ea.span("a-work"):  # A's s1 is current
+        child = eb.span("b-child")
+    child.end()
+    rb.poll()
+    starts = by_type(sb.signals(), "span.start")
+    assert all("parent" not in s for s in starts)
+    conform(sb, tmp_path)
+
+
+def test_a_stale_session_call_does_not_wipe_the_current_session():
+    # Finding 12.
+    class Shared:
+        closed = 0
+
+    acc = Accumulator("l1", deque(), Shared())
+    acc.start_session(2)
+    acc.record(2, 0, items=5)
+    acc.record(1, 0, items=1)  # read session 1 just before session 2 began
+    assert acc.next_window() == 0
+    res = acc.close(0, None)
+    assert res.totals is not None and res.totals.items == 5
+
+
+def test_file_sink_is_flushed_at_exit(tmp_path):
+    # Finding 14: the writer is a daemon; nothing flushed it at exit.
+    path = tmp_path / "exit.jsonl"
+    code = textwrap.dedent(
+        f"""
+        from rxplus.reacting import JsonlFileSink, Reporter
+        r = Reporter("exit", JsonlFileSink({str(path)!r}))
+        r.element("A")
+        """
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    raw = path.read_bytes()
+    assert b'"type":"snapshot"' in raw
+    assert not raw.startswith(b"\xef\xbb\xbf") and b"\r" not in raw
+
+
+def test_file_sink_format(tmp_path):
+    path: Path = tmp_path / "format.jsonl"
+    with Reporter("test", JsonlFileSink(path), label="Ünïcode 😀") as r:
+        r.element("Ω")
+        assert _wait_for(lambda: r.live)
+    raw = path.read_bytes()
+    assert (
+        raw.endswith(b"\n") and b"\r" not in raw and not raw.startswith(b"\xef\xbb\xbf")
+    )
+    assert "😀".encode() in raw

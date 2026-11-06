@@ -1,24 +1,32 @@
-"""The reacting/1 source: :class:`Reporter` and its handles (standard library only).
+"""The reacting/1 source: :class:`Reporter` (standard library only).
 
-See ``docs/reacting.md`` for the model and ``docs/proposals/
-2026-11-06-reacting-support.md`` (D16) for the design. In short:
+Threads and their duties (see ``docs/reacting.md``):
 
-- The reporter always holds the graph state (elements, links, open spans).
-- Signals are built only while a session is open on the sink (``live``).
-- Windows are anchored at the session's start ``T``; per-window counters
-  live in one :class:`~rxplus.reacting._window.Accumulator` per element or
-  link. Any structural or span signal first closes the windows that have
-  ended, so signals are created in ``t`` order.
-- Encoded lines wait in a bounded deque; exceeding ``queue`` discards them
-  and queues a snapshot instead (spec, Loss). Nothing ever blocks the caller.
+- **Callers** (the observed graph's threads) validate, update the registry
+  and append a timestamped event under the reporter lock, or update one
+  accumulator in O(1). They never close windows, encode JSON, call user
+  code or wait for the sink.
+- **The clock thread** owns the window clock. In each step it applies the
+  callers' events in order to its mirror of the graph, closes every window
+  whose end ``T + (k+1)*w`` is at or before the event's ``t`` before
+  emitting the event, closes the windows that ended by now, then encodes
+  the signals and puts them in the bounded queue. It runs on time even when
+  the process is idle and even while the sink is stalled, so ``queue`` and
+  Loss bound memory.
+- **The writer thread** owns the sink: it opens it (always through the
+  sink's backoff when reopening), drains the queue in batches (a batch in
+  flight counts as unwritten) and reports a lost connection.
+
+With ``timer=False`` neither thread exists and :meth:`Reporter.poll` performs
+one step of each, for deterministic tests.
 """
 
+import atexit
 import threading
+import weakref
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
-from types import TracebackType
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from ._encode import (
     PROTOCOL,
@@ -29,48 +37,27 @@ from ._encode import (
     check_reference,
     encode,
 )
+from ._graph import ElementRec, Graph, LinkRec, SpanRec
 from ._window import Accumulator
 from .clock import Clock, SystemClock
 from .handles import _CURRENT, Element, Link, LinkKind, Span, _Live
 from .sinks import Sink
 
-_BATCH = 512  # lines handed to the sink per write
+_NOTIFY_EVENTS = 4096  # wake the clock thread early when this many are pending
+_MAX_IDLE = 0.05  # longest sleep of the clock thread, seconds
+
+type _Sampler = Callable[[], int]
 
 
-@dataclass(slots=True)
-class _ElementRec:
-    id: str
-    label: str
-    parent: str | None
-    kind: str | None
-
-    def signal(self) -> Signal:
-        d: Signal = {"id": self.id, "label": self.label}
-        if self.parent is not None:
-            d["parent"] = self.parent
-        if self.kind is not None:
-            d["kind"] = self.kind
-        return d
+class _Event(NamedTuple):
+    kind: Literal["element", "link", "remove", "span.start", "span.end"]
+    t: float
+    data: object
 
 
-@dataclass(slots=True)
-class _LinkRec:
-    id: str
-    src: str
-    dst: str
-    kind: LinkKind
-
-    def signal(self) -> Signal:
-        return {"id": self.id, "from": self.src, "to": self.dst, "kind": self.kind}
-
-
-@dataclass(slots=True)
-class _SpanRec:
+class _SpanEnd(NamedTuple):
     span: str
-    element: str
-    label: str
-    parent: str | None  # the parent as sent in the current session
-    t0: float
+    error: str | None  # None: status ok; "" : error without description
 
 
 class Reporter:
@@ -82,11 +69,10 @@ class Reporter:
         label: Display name of the source, sent in snapshots.
         window: The spec's ``window`` option, in seconds.
         queue: The spec's ``queue`` option: lines created but not yet
-            written before Loss.
+            written (including a batch being written) before Loss.
         clock: Time source; :class:`ManualClock` in tests.
-        timer: True: a background thread opens the sink, closes windows
-            on time and writes. False: nothing runs in the background;
-            :meth:`poll` does all three (deterministic tests).
+        timer: True: a clock thread and a writer thread run in the
+            background. False: :meth:`poll` does their work (tests).
     """
 
     def __init__(
@@ -107,38 +93,56 @@ class Reporter:
         if queue < 1:
             raise ValueError(f"queue must be at least 1: {queue!r}")
         self._sink = sink
-        self._w = float(window)
         self._queue_limit = queue
+        self._batch = max(1, min(64, queue // 4))
         self._clock: Clock = clock or SystemClock()
-        self._st = _Live(self._clock.monotonic, self._w)
+        self._st = _Live(self._clock.monotonic, self._clock.wall(), float(window))
 
+        # Callers' side, under _lock.
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
-        self._elements: dict[str, _ElementRec] = {}
-        self._links: dict[str, _LinkRec] = {}
+        self._registry = Graph()
         self._accs: dict[str, Accumulator] = {}
-        self._spans: dict[str, _SpanRec] = {}
+        self._busy: deque[str] = deque()
+        self._events: list[_Event] = []
         self._counter = {"e": 0, "l": 0, "s": 0}
-
-        self._session = 0
-        self._t_start = 0.0  # T
-        self._mono_start = 0.0  # monotonic time at T
-        self._seq = 0
-        self._last_t = 0.0
-        self._closed_upto = 0  # windows < this index are closed
-        self._lines: deque[str] = deque()
-        self._connected = False
+        self._want_session = False  # set by the writer: a connection is open
+        self._epoch = 0  # connections opened so far (writer)
         self._closing = False
         self._closed = False
 
-        self._thread: threading.Thread | None = None
+        # Clock thread only.
+        self._mirror = Graph()
+        self._session_open = False
+        self._session_epoch = -1
+        self._seq = 0
+        self._busy_ids: set[str] = set()
+        self._watched: set[str] = set()
+
+        # The bounded queue: (line, opens the session, epoch), under _qlock.
+        self._qlock = threading.Lock()
+        self._qcond = threading.Condition(self._qlock)
+        self._q: deque[tuple[str, bool, int]] = deque()
+        self._inflight = 0
+        self._opening_queued = False
+        self._clock_done = False
+
+        self._connected = False  # writer only
+        self._threads: list[threading.Thread] = []
         if timer:
-            self._thread = threading.Thread(
-                target=self._run, name=f"rxplus-reacting-{source}", daemon=True
-            )
-            self._thread.start()
+            for target, name in (
+                (self._clock_loop, "clock"),
+                (self._write_loop, "writer"),
+            ):
+                th = threading.Thread(
+                    target=target, name=f"rxplus-reacting-{name}-{source}", daemon=True
+                )
+                self._threads.append(th)
+            for th in self._threads:
+                th.start()
         else:
-            self._open_sink()
+            self.poll()
+        atexit.register(_close_at_exit, weakref.ref(self))
 
     # ------------------------------------------------------------------ public
 
@@ -152,40 +156,41 @@ class Reporter:
         return self._st.live
 
     def element(
-        self, label: str, *, kind: str | None = None, parent: "Element | None" = None
-    ) -> "Element":
+        self, label: str, *, kind: str | None = None, parent: Element | None = None
+    ) -> Element:
         """Add an element (optionally a child of ``parent``) and return its handle."""
         check_label(label)
         check_kind(kind)
         with self._lock:
             parent_id = None
             if parent is not None:
-                if parent.reporter is not self or parent.id not in self._elements:
+                if (
+                    parent.reporter is not self
+                    or parent.id not in self._registry.elements
+                ):
                     raise ValueError(
                         "parent is not an existing element of this reporter"
                     )
                 parent_id = parent.id
-            self._sync()
-            rec = _ElementRec(self._next_id("e"), label, parent_id, kind)
-            self._elements[rec.id] = rec
-            acc = self._accs[rec.id] = Accumulator()
-            acc.start_session(self._session, self._closed_upto)
-            self._emit_change("add", elements=[rec.signal()])
+            rec = ElementRec(self._next_id("e"), label, parent_id, kind)
+            self._registry.elements[rec.id] = rec
+            acc = self._new_acc(rec.id, None, None)
+            self._post("element", rec)
         return Element(self, rec.id, label, acc)
 
     def link(
         self,
-        src: "Element | str",
-        dst: "Element | str",
+        src: Element | str,
+        dst: Element | str,
         *,
         kind: LinkKind = "data",
         capacity: int | None = None,
-        depth: Callable[[], int] | None = None,
-    ) -> "Link":
+        depth: _Sampler | None = None,
+    ) -> Link:
         """Add a link; ``src``/``dst`` are elements or ``"<source>/<id>"``.
 
-        ``depth`` is a sampled backlog, read once per window end; it must be
-        cheap, must not block and must not call into this reporter.
+        ``depth`` is a sampled backlog, read once per window end on the
+        clock thread (outside every lock); it must not block for long.
         """
         if kind not in ("data", "call"):
             raise ValueError(f"link kind must be 'data' or 'call': {kind!r}")
@@ -193,284 +198,320 @@ class Reporter:
             raise ValueError(f"capacity must be non-negative: {capacity!r}")
         with self._lock:
             ends = [self._endpoint(e) for e in (src, dst)]
-            self._sync()
-            rec = _LinkRec(self._next_id("l"), ends[0], ends[1], kind)
-            self._links[rec.id] = rec
-            acc = self._accs[rec.id] = Accumulator(depth, capacity)
-            acc.start_session(self._session, self._closed_upto)
-            self._emit_change("add", links=[rec.signal()])
+            rec = LinkRec(self._next_id("l"), ends[0], ends[1], kind)
+            self._registry.links[rec.id] = rec
+            acc = self._new_acc(rec.id, depth, capacity)
+            self._post("link", rec)
         return Link(self, rec.id, kind, acc)
 
-    def remove(self, *handles: "Element | Link") -> None:
+    def remove(self, *handles: Element | Link) -> None:
         """Remove elements and links; removing an element removes its subtree,
         the links touching it and its open spans (spec, Elements)."""
         with self._lock:
             ids = [
                 h.id
                 for h in handles
-                if h.reporter is self
-                and (h.id in self._elements or h.id in self._links)
+                if h.reporter is self and self._registry.exists(h.id)
             ]
-            if not ids:
-                return
-            # Windows that ended before the removal still report the removed
-            # elements and links: close them before forgetting the counters.
-            self._sync()
-            for ident in ids:
-                self._drop_locked(ident)
-            self._emit_change("remove", ids=ids)
+            if ids:
+                self._registry.remove(ids)
+                self._post("remove", ids)
 
     def poll(self) -> None:
-        """Close every window that has ended; with ``timer=False`` also open
-        the sink if needed and write what is queued."""
-        if self._thread is None and not self._closed:
-            if self._connected and not self._sink_open():
-                with self._lock:
-                    self._end_session()
-            if not self._connected:
-                self._open_sink()
+        """``timer=False``: open the sink if needed, run one clock step and
+        write what is queued. ``timer=True``: wake the clock thread."""
+        if self._threads:
             with self._lock:
-                self._close_windows(self._clock.monotonic())
-                batch = list(self._lines)
-                self._lines.clear()
-                session = self._session
-            self._write(batch, session)
-        else:
-            with self._lock:
-                self._close_windows(self._clock.monotonic())
-
-    def close(self, timeout: float = 1.0) -> None:
-        """End the session: close ended windows, write what is queued (at
-        most ``timeout`` seconds), close the sink. Idempotent."""
+                self._cond.notify_all()
+            return
         if self._closed:
             return
-        if self._thread is not None:
+        if self._connected and _call(self._sink.is_open) is not True:
+            self._lost_connection()
+        if not self._connected and not self._closing:
+            self._try_open()
+        self._step()
+        while True:
+            batch, epoch = self._take_batch(wait=False, limit=None)
+            if not batch:
+                break
+            if not self._write(batch, epoch):
+                break
+        self._step()
+
+    def close(self, timeout: float = 1.0) -> None:
+        """Close the windows that have ended, write what is queued (at most
+        ``timeout`` seconds), close the sink. Idempotent."""
+        if self._closed:
+            return
+        if self._threads:
+            clock, writer = self._threads
             with self._lock:
-                self._close_windows(self._clock.monotonic())
                 self._closing = True
                 self._cond.notify_all()
-            self._thread.join(timeout)
+            clock.join(timeout)
+            with self._qcond:
+                self._qcond.notify_all()
+            writer.join(timeout)
+            if writer.is_alive():
+                _call(self._sink.close)  # unblocks a write stuck on the network
+                writer.join(0.5)
         else:
             self.poll()
+            self._closing = True
         with self._lock:
             self._closed = True
-            self._end_session()
-        try:
-            self._sink.close()
-        except Exception:
-            pass
+            self._st.live = False
+        _call(self._sink.close)
 
     def __enter__(self) -> "Reporter":
         return self
 
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None:
+    def __exit__(self, *exc: object) -> None:
         self.close()
 
-    # --------------------------------------------------------- graph internals
+    # ------------------------------------------------------------ callers' side
 
     def _next_id(self, prefix: Literal["e", "l", "s"]) -> str:
         self._counter[prefix] += 1
         return f"{prefix}{self._counter[prefix]}"
 
-    def _endpoint(self, end: "Element | str") -> str:
+    def _new_acc(
+        self, ident: str, sampler: _Sampler | None, capacity: int | None
+    ) -> Accumulator:
+        acc = Accumulator(ident, self._busy, self._st, sampler, capacity)
+        if self._st.live:
+            acc.start_session(self._st.session)
+        self._accs[ident] = acc
+        return acc
+
+    def _post(
+        self,
+        kind: Literal["element", "link", "remove", "span.start", "span.end"],
+        data: object,
+    ) -> None:
+        """Append an event stamped now (caller holds the lock, so events are
+        in ``t`` order)."""
+        self._events.append(_Event(kind, self._st.now(), data))
+        if len(self._events) >= _NOTIFY_EVENTS:
+            self._cond.notify_all()
+
+    def _endpoint(self, end: Element | str) -> str:
         if isinstance(end, str):
             return check_reference(end, self._source)
-        if end.reporter is not self or end.id not in self._elements:
+        if end.reporter is not self or end.id not in self._registry.elements:
             raise ValueError(
                 "link endpoint is not an existing element of this reporter"
             )
         return end.id
 
-    def _drop_locked(self, ident: str) -> None:
-        """Forget ``ident`` and everything its removal removes (no signal)."""
-        if ident in self._links:
-            del self._links[ident]
-            self._accs.pop(ident, None)
-            return
-        if ident not in self._elements:
-            return
-        gone = {ident}
-        for rec in self._elements.values():  # insertion order: parents first
-            if rec.parent in gone:
-                gone.add(rec.id)
-        for e in gone:
-            del self._elements[e]
-            self._accs.pop(e, None)
-        for lid in [
-            i for i, r in self._links.items() if r.src in gone or r.dst in gone
-        ]:
-            del self._links[lid]
-            self._accs.pop(lid, None)
-        for sid in [s for s, r in self._spans.items() if r.element in gone]:
-            del self._spans[sid]  # ended by the removal; no span.end (spec)
-
-    # ---------------------------------------------------------------- spans
-
-    def _start_span(self, element: str, label: str, parent: "Span | None") -> "Span":
-        check_label(label, "span label")
+    def _start_span(self, element: str, label: str, parent: Span | None) -> Span:
         if parent is None:
             parent = _CURRENT.get()
         with self._lock:
-            if element not in self._elements or not self._st.live:
+            if element not in self._registry.elements or not self._st.live:
                 return Span(self, None)
-            self._sync()
             sid = self._next_id("s")
-            parent_id = parent.id if parent is not None else None
-            if parent_id not in self._spans:
-                parent_id = None  # spec: a parent must be open; otherwise omitted
-            t = self._now()[1]
-            self._spans[sid] = _SpanRec(sid, element, label, parent_id, t)
-            attrs: Signal = {"span": sid, "id": element, "label": label}
-            if parent_id is not None:
-                attrs["parent"] = parent_id
-            self._emit("span.start", t, attrs)
+            parent_id = None
+            # Only a parent of this reporter that is still open (spec).
+            if (
+                parent is not None
+                and parent._reporter is self
+                and parent.id in self._registry.spans
+            ):
+                parent_id = parent.id
+            rec = SpanRec(sid, element, label, parent_id, 0.0)
+            self._registry.spans[sid] = rec
+            self._post("span.start", rec)
         return Span(self, sid)
 
     def _end_span(self, sid: str, error: BaseException | str | None) -> None:
+        # Content rule: never str(exception), which often carries data.
+        if isinstance(error, BaseException):
+            text: str | None = type(error).__name__
+        else:
+            text = None if error is None else error
         with self._lock:
-            if sid not in self._spans:
-                return
-            self._sync()
-            if self._spans.pop(sid, None) is None or not self._st.live:
-                return
-            t = self._now()[1]
-            attrs: Signal = {"span": sid, "status": "ok" if error is None else "error"}
-            if error is not None:
-                # Content rule: never str(exception), which often carries data.
-                text = (
-                    type(error).__name__ if isinstance(error, BaseException) else error
-                )
-                if text:
-                    attrs["error"] = text
-            self._emit("span.end", t, attrs)
+            if self._registry.spans.pop(sid, None) is not None:
+                self._post("span.end", _SpanEnd(sid, text))
 
-    # ------------------------------------------------------- sessions, signals
+    # ------------------------------------------------------------- clock thread
 
-    def _now(self) -> tuple[float, float]:
-        """(monotonic, t) now; t never below the session's last t."""
-        mono = self._clock.monotonic()
-        t = self._t_start + (mono - self._mono_start)
-        return mono, max(t, self._last_t)
+    def _clock_loop(self) -> None:
+        while True:
+            self._step()
+            with self._lock:
+                if self._closing:
+                    break
+                st = self._st
+                # Wake at the next boundary, and at least every _MAX_IDLE so
+                # structural signals never wait a whole (long) window.
+                wait = _MAX_IDLE
+                if self._session_open:
+                    nxt = st.T + (st.closed + 1) * st.w
+                    wait = min(max(nxt - st.now(), 0.0005), _MAX_IDLE)
+                self._cond.wait(wait)
+        self._step()
+        with self._qcond:
+            self._clock_done = True
+            self._qcond.notify_all()
 
-    def _emit(self, typ: str, t: float, attrs: Signal) -> None:
-        """Create one signal (caller holds the lock and the session is live)."""
-        signal: Signal = {"source": self._source, "seq": self._seq, "t": t, "type": typ}
-        signal.update(attrs)
-        self._seq += 1
-        self._last_t = t
-        self._lines.append(encode(signal))
-        if len(self._lines) > self._queue_limit:
-            # Loss: discard every queued line; the next one written is a
-            # snapshot, and the seq gap tells the observer how many were lost.
-            self._lines.clear()
-            self._emit_snapshot(t, recovery=True)
-        self._cond.notify()
+    def _step(self) -> None:
+        """Apply the callers' events, close ended windows, follow the sink."""
+        with self._lock:
+            events, self._events = self._events, []
+            want = self._want_session and not self._closed
+            epoch = self._epoch
+            now = self._st.now()  # every later event has t >= now
+        if self._session_open and (not want or epoch != self._session_epoch):
+            self._end_session()
+        for ev in events:
+            if self._session_open:
+                self._close_until(ev.t)
+            self._apply(ev)
+        if self._session_open:
+            self._close_until(now)
+        if not self._session_open and want:
+            self._begin_session(now, epoch)
 
-    def _sync(self) -> None:
-        """Close the windows that have ended (caller holds the lock).
-
-        Every operation that changes the graph or the open spans calls this
-        *before* changing them: closing windows may overflow the queue, and
-        the recovery snapshot must not already contain the change whose own
-        signal follows it.
-        """
-        self._close_windows(self._clock.monotonic())
-
-    def _emit_change(self, typ: str, **attrs: object) -> None:
-        if not self._st.live:
-            return
-        self._emit(typ, self._now()[1], dict(attrs))
-
-    def _emit_snapshot(self, t: float, recovery: bool) -> None:
-        spans = []
-        for rec in self._spans.values():  # insertion order: parents first
-            if not recovery and rec.parent not in self._spans:
-                rec.parent = None  # what this session's snapshot sends
-            d: Signal = {"span": rec.span, "id": rec.element, "label": rec.label}
-            if rec.parent is not None:
-                d["parent"] = rec.parent
-            d["t0"] = min(rec.t0, t)
-            spans.append(d)
+    def _begin_session(self, t: float, epoch: int) -> None:
+        """Snapshot with seq 0 at ``t``; windows anchored at ``T = t``."""
+        with self._lock:
+            st = self._st
+            st.session += 1
+            st.T = t
+            st.closed = 0
+            for acc in self._accs.values():
+                acc.start_session(st.session)
+            st.live = True
+        self._busy.clear()
+        self._busy_ids.clear()
+        self._watched = {
+            i for i in self._mirror.links if (a := self._accs.get(i)) and a.sampler
+        }
+        self._seq = 0
+        self._session_open = True
+        self._session_epoch = epoch
         attrs: Signal = {"protocol": PROTOCOL}
         if self._label is not None:
             attrs["label"] = self._label
-        attrs["elements"] = [r.signal() for r in self._elements.values()]
-        attrs["links"] = [r.signal() for r in self._links.values()]
-        if spans:
-            attrs["spans"] = spans
-        self._emit("snapshot", t, attrs)
-
-    def _start_session(self) -> None:
-        """A connection opened: snapshot with seq 0 (caller holds the lock)."""
-        self._session += 1
-        self._t_start = self._clock.wall()
-        self._mono_start = self._clock.monotonic()
-        self._seq = 0
-        self._last_t = self._t_start
-        self._closed_upto = 0
-        self._lines.clear()
-        for acc in self._accs.values():
-            acc.start_session(self._session)
-        st = self._st
-        st.session = self._session
-        st.mono0 = self._mono_start
-        st.live = True
-        self._emit_snapshot(self._t_start, recovery=False)
+        attrs.update(self._mirror.snapshot(t, new_session=True))
+        self._emit("snapshot", t, attrs, opening=True)
 
     def _end_session(self) -> None:
-        self._st.live = False
-        self._connected = False
-        self._lines.clear()
+        with self._lock:
+            self._st.live = False
+        self._session_open = False
+        with self._qcond:
+            self._q.clear()
+            self._opening_queued = False
 
-    # ------------------------------------------------------------------ windows
+    def _apply(self, ev: _Event) -> None:
+        """Update the mirror with one event and emit its signal."""
+        m = self._mirror
+        if ev.kind == "element":
+            rec = ev.data
+            assert isinstance(rec, ElementRec)
+            m.elements[rec.id] = rec
+            self._emit("add", ev.t, {"elements": [rec.signal()]})
+        elif ev.kind == "link":
+            lrec = ev.data
+            assert isinstance(lrec, LinkRec)
+            m.links[lrec.id] = lrec
+            acc = self._accs.get(lrec.id)
+            if acc is not None and acc.sampler is not None:
+                self._watched.add(lrec.id)  # sampled at every boundary
+            self._emit("add", ev.t, {"links": [lrec.signal()]})
+        elif ev.kind == "remove":
+            ids = ev.data
+            assert isinstance(ids, list)
+            removed = m.remove(ids)
+            with self._lock:
+                for ident in removed:
+                    self._accs.pop(ident, None)
+            for ident in removed:
+                self._busy_ids.discard(ident)
+                self._watched.discard(ident)
+            self._emit("remove", ev.t, {"ids": ids})
+        elif ev.kind == "span.start":
+            srec = ev.data
+            assert isinstance(srec, SpanRec)
+            parent = srec.parent if srec.parent in m.spans else None
+            m.spans[srec.span] = SpanRec(
+                srec.span, srec.element, srec.label, parent, ev.t
+            )
+            attrs: Signal = {"span": srec.span, "id": srec.element, "label": srec.label}
+            if parent is not None:
+                attrs["parent"] = parent
+            self._emit("span.start", ev.t, attrs)
+        else:
+            end = ev.data
+            assert isinstance(end, _SpanEnd)
+            if m.spans.pop(end.span, None) is None:
+                return  # ended by a removal: no span.end (spec)
+            attrs = {"span": end.span, "status": "ok" if end.error is None else "error"}
+            if end.error:
+                attrs["error"] = end.error
+            self._emit("span.end", ev.t, attrs)
 
-    def _close_windows(self, mono: float) -> None:
-        """Emit the signals of every window that ended by ``mono`` (locked)."""
-        if not self._st.live:
-            return
-        end = int((mono - self._mono_start) / self._w)  # windows < end have ended
-        k = self._closed_upto
+    def _close_until(self, t: float) -> None:
+        """Emit the signals of every window that ended at or before ``t``."""
+        st = self._st
+        end = st.window_of(t)  # windows < end have ended: T + end*w <= t
+        k = st.closed
         if end <= k:
             return
-        accs = list(self._accs.items())
-        session = self._session
-        while k < end:
-            busy = sorted(
-                {i for _, a in accs for i in a.pending_windows(session) if i >= k}
-            )
-            if not any(a.has_backlog(session) for _, a in accs):
-                # Nothing to report until the next window with events.
-                nxt = busy[0] if busy else end
-                if nxt >= end:
+        # From here on, a late hot-path event for a window < end counts in
+        # window `end` (accumulators read st.closed under their lock).
+        st.closed = end
+        self._drain_busy()
+        session = st.session
+        while k < end and st.session == session:
+            if not self._watched:
+                nxt = [
+                    w
+                    for w in (
+                        self._accs[i].next_window()
+                        for i in self._busy_ids
+                        if i in self._accs
+                    )
+                    if w is not None
+                ]
+                first = min(nxt, default=end)
+                if first >= end:
                     break
-                k = nxt
-            self._close_one(k, accs, session)
+                k = max(k, first)
+            self._close_one(k)
             k += 1
-        self._closed_upto = end
-        for _, acc in accs:
-            acc.mark_closed(session, end)
 
-    def _close_one(
-        self, k: int, accs: list[tuple[str, Accumulator]], session: int
-    ) -> None:
-        t0 = self._t_start + k * self._w
-        t = self._t_start + (k + 1) * self._w
-        for ident, acc in accs:
+    def _drain_busy(self) -> None:
+        busy = self._busy
+        while busy:
+            self._busy_ids.add(busy.popleft())
+
+    def _close_one(self, k: int) -> None:
+        st = self._st
+        t0 = st.T + k * st.w
+        t = st.T + (k + 1) * st.w
+        session = st.session
+        for ident in sorted(self._busy_ids | self._watched, key=_creation_order):
+            if st.session != session:
+                return  # a Loss began a new session: these windows are gone
+            acc = self._accs.get(ident)
+            if acc is None or not self._mirror.exists(ident):
+                continue
             sample = None
             if acc.sampler is not None:
-                try:
+                try:  # user code: on this thread, outside every lock
                     sample = int(acc.sampler())
                 except Exception:
-                    sample = 0
-            res = acc.close(session, k, sample)
+                    sample = None
+            res = acc.close(k, sample)
             tot = res.totals
             if tot is not None:
-                if ident in self._links and (tot.items or tot.dropped or tot.coalesced):
+                if ident in self._mirror.links and (
+                    tot.items or tot.dropped or tot.coalesced
+                ):
                     flow: Signal = {"link": ident, "t0": t0, "items": tot.items}
                     if tot.sized and tot.items > 0:
                         flow["bytes"] = tot.bytes
@@ -496,69 +537,143 @@ class Reporter:
                 if acc.capacity is not None:
                     depth["capacity"] = acc.capacity
                 self._emit("depth", t, depth)
+            if acc.watched():
+                self._watched.add(ident)
+            else:
+                self._watched.discard(ident)
+            if acc.next_window() is None:
+                self._busy_ids.discard(ident)
 
-    # ------------------------------------------------------------ the writer
+    def _emit(self, typ: str, t: float, attrs: Signal, opening: bool = False) -> None:
+        """Create one signal; Loss when the queue overflows (spec, Loss)."""
+        if not self._session_open:
+            return
+        signal: Signal = {"source": self._source, "seq": self._seq, "t": t, "type": typ}
+        signal.update(attrs)
+        self._seq += 1
+        line = encode(signal)
+        with self._qcond:
+            self._q.append((line, opening, self._session_epoch))
+            if opening:
+                self._opening_queued = True
+            if len(self._q) <= 1 or len(self._q) + self._inflight <= self._queue_limit:
+                self._qcond.notify()
+                return
+            restart = self._opening_queued
+            self._q.clear()
+            self._opening_queued = False
+        if restart:
+            # The discarded signals include the session's opening snapshot:
+            # begin a new session instead (spec, Loss).
+            self._begin_session(t, self._session_epoch)
+        else:
+            attrs = {"protocol": PROTOCOL}
+            if self._label is not None:
+                attrs["label"] = self._label
+            attrs.update(self._mirror.snapshot(t, new_session=False))
+            self._emit("snapshot", t, attrs)
 
-    def _open_sink(self) -> bool:
-        try:
-            ok = self._sink.open()
-        except Exception:
-            ok = False
-        if ok:
-            with self._lock:
+    # ------------------------------------------------------------------ writer
+
+    def _try_open(self) -> bool:
+        ok = _call(self._sink.open) is True
+        with self._lock:
+            if self._closing:
+                if ok:
+                    _call(self._sink.close)  # close() came during the connect
+                return False
+            if ok:
                 self._connected = True
-                self._start_session()
+                self._epoch += 1
+                self._want_session = True
+                self._cond.notify_all()
         return ok
 
-    def _sink_open(self) -> bool:
-        try:
-            return self._sink.is_open()
-        except Exception:
-            return False
+    def _take_batch(self, wait: bool, limit: int | None) -> tuple[list[str], int]:
+        with self._qcond:
+            if wait and not self._q and not self._clock_done:
+                self._qcond.wait(min(self._st.w, 0.25))
+            n = len(self._q) if limit is None else min(limit, len(self._q))
+            batch: list[str] = []
+            epoch = self._epoch
+            for _ in range(n):
+                line, opening, line_epoch = self._q.popleft()
+                if opening:
+                    self._opening_queued = False
+                if line_epoch == epoch:  # never a line of an earlier connection
+                    batch.append(line)
+            self._inflight = len(batch)
+        return batch, epoch
 
-    def _write(self, batch: list[str], session: int) -> None:
-        if not batch:
-            return
-        try:
-            self._sink.write(batch)
-        except Exception as e:
-            # SinkDisconnected, or anything else: the session is over.
-            del e
-            with self._lock:
-                if session == self._session:
-                    self._end_session()
+    def _write(self, batch: list[str], epoch: int) -> bool:
+        ok = _call(self._sink.is_open) is True
+        if ok:
+            try:
+                self._sink.write(batch)
+            except Exception:
+                ok = False
+        with self._qcond:
+            self._inflight = 0
+        if not ok:
+            self._lost_connection()
+        return ok
 
-    def _run(self) -> None:
-        """Writer thread: open the sink, close windows on time, write."""
+    def _lost_connection(self) -> None:
+        self._connected = False
+        with self._lock:
+            self._want_session = False
+            self._cond.notify_all()
+        with self._qcond:
+            self._q.clear()
+            self._opening_queued = False
+
+    def _write_loop(self) -> None:
+        first = True
         while True:
             with self._lock:
-                if self._closing and (not self._connected or not self._lines):
-                    return
+                closing = self._closing
             if not self._connected:
-                if self._open_sink():
-                    continue
-                delay = self._sink.retry_delay()
-                with self._lock:
-                    if delay is None:
-                        self._closing = True
-                        return
-                    self._cond.wait_for(lambda: self._closing, timeout=delay)
+                if closing:
+                    return
+                if not first:
+                    delay = _call(self._sink.retry_delay)
+                    if not isinstance(delay, (int, float)):
+                        return  # the sink never reopens
+                    with self._lock:
+                        self._cond.wait_for(lambda: self._closing, timeout=delay)
+                        if self._closing:
+                            return
+                first = False
+                self._try_open()
                 continue
-            if not self._sink_open():
-                with self._lock:
-                    self._end_session()
-                continue
-            with self._lock:
-                self._close_windows(self._clock.monotonic())
-                if not self._lines and not self._closing:
-                    nxt = self._mono_start + (self._closed_upto + 1) * self._w
-                    self._cond.wait(max(nxt - self._clock.monotonic(), 0.001))
-                    self._close_windows(self._clock.monotonic())
-                batch = [
-                    self._lines.popleft() for _ in range(min(_BATCH, len(self._lines)))
-                ]
-                session = self._session
-            self._write(batch, session)
+            if closing:
+                with self._qcond:
+                    done = self._clock_done and not self._q
+                if done:
+                    return
+            batch, epoch = self._take_batch(wait=True, limit=self._batch)
+            if batch:
+                self._write(batch, epoch)
+            elif _call(self._sink.is_open) is not True:
+                self._lost_connection()  # e.g. the observer went away while idle
+
+
+def _creation_order(ident: str) -> tuple[str, int]:
+    return ident[0], int(ident[1:])
+
+
+def _call(fn: Callable[[], object]) -> object:
+    """Call a sink method; a sink that raises is treated as failing."""
+    try:
+        return fn()
+    except Exception:
+        return None
+
+
+def _close_at_exit(ref: "weakref.ReferenceType[Reporter]") -> None:
+    reporter = ref()
+    if reporter is not None:
+        reporter.close(timeout=1.0)
 
 
 __all__ = ["LinkKind", "Reporter"]

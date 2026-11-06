@@ -14,7 +14,7 @@ def test_random_session_conforms(seed, tmp_path):
     rng = random.Random(seed)
     queue = rng.choice([40, 200, 10_000])  # small queues force Loss
     r, sink, clock = make(window=rng.choice([0.05, 0.1, 0.25]), queue=queue)
-    window = r._w
+    window = r._st.w
     elements: list[Element] = [r.element("root")]
     links: list[Link] = []
     spans: list[Span] = []
@@ -42,9 +42,9 @@ def test_random_session_conforms(seed, tmp_path):
         elif op < 0.17 and len(elements) > 3:
             victim = rng.choice(elements[1:])
             victim.remove()
-            alive = {e for e in r._elements}
+            alive = {e for e in r._registry.elements}
             elements = [e for e in elements if e.id in alive]
-            links = [lk for lk in links if lk.id in r._links]
+            links = [lk for lk in links if lk.id in r._registry.links]
         elif op < 0.45 and links:
             lk = rng.choice(links)
             if lk.kind == "call":
@@ -89,7 +89,7 @@ def test_random_session_conforms(seed, tmp_path):
 
 
 def r_ids(r, prefix: str) -> list[str]:
-    return [i for i in r._elements if i.startswith(prefix)]
+    return [i for i in r._registry.elements if i.startswith(prefix)]
 
 
 def test_window_boundaries_do_not_drift(tmp_path):
@@ -100,5 +100,5 @@ def test_window_boundaries_do_not_drift(tmp_path):
     clock.advance(0.1)
     r.poll()
     (flow,) = by_type(sink.signals(), "flow")
-    assert flow["t0"] == r._t_start + 1_000_000 * 0.1
+    assert flow["t0"] == r._st.T + 1_000_000 * 0.1
     conform(sink, tmp_path)

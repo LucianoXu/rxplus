@@ -34,7 +34,7 @@ def test_graph_built_before_session_is_in_the_snapshot(tmp_path):
     r.poll()  # write fails: session over
     a = r.element("A")
     r.link(a, r.element("B"))
-    assert not r.live and sink.lines == []
+    assert not r.live and len(sink.lines) == 1  # only the first, empty session
     before = len(sink.lines)
     sink.connect()
     r.poll()
@@ -281,8 +281,8 @@ def test_no_session_builds_nothing():
         link.leave(link.enter())
     span = r.element("C").span("x")
     assert span.id is None
-    assert len(r._lines) == 0 and len(sink.lines) == written
-    assert link._acc.pending_windows(r._session) == []
+    assert len(r._q) == 0 and len(sink.lines) == written
+    assert link._acc.next_window() is None
 
 
 def test_validation():

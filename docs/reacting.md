@@ -43,7 +43,7 @@ reporter.close()
 | `window` | The spec's `window` option, seconds. |
 | `queue` | The spec's `queue` option: lines created but not yet written before Loss. |
 | `clock` | `SystemClock()` by default; `ManualClock` for deterministic tests. |
-| `timer` | `True`: a daemon thread opens the sink, closes windows on time and writes. `False`: nothing runs in the background and `poll()` does all three (tests). |
+| `timer` | `True`: a clock thread and a writer thread run in the background. `False`: nothing runs in the background and `poll()` does their work (tests). |
 
 `reporter.element(label, *, kind=None, parent=None)`, `element.child(label, *, kind=None)`,
 `reporter.link(src, dst, *, kind="data", capacity=None, depth=None)` (`src`/`dst`: elements, or a global
@@ -59,8 +59,13 @@ Sinks:
 
 - `JsonlFileSink(path, *, overwrite=False)`: a recording, one session per file. Creates the file at
   construction (`FileExistsError` if it exists unless `overwrite`).
-- `WebSocketSink(url, *, token=None, open_timeout=5.0, backoff=(0.5, 30.0), ssl_context=None)`: dials the
-  observer (the hub, D9); reconnects with exponential backoff; each connection is a new session.
+- `WebSocketSink(url, *, token=None, open_timeout=5.0, backoff=(0.5, 30.0), stable_after=10.0,
+  send_timeout=10.0, ping_interval=20.0, ping_timeout=20.0, ssl_context=None)`: dials the observer (the
+  hub, D9); each connection is a new session. Every reopen waits a delay that doubles up to `backoff[1]` and
+  resets only after a connection that stayed up `stable_after` seconds, so an observer that accepts and
+  then rejects (a duplicate source name) is not hammered. Any write error closes the connection. A send
+  without progress for `send_timeout`, or a peer silent for `ping_interval + ping_timeout` (it is pinged
+  when quiet), closes it too.
 - `MemorySink()`: keeps the lines (`.lines`, `.signals()`); `disconnect()`/`connect()`, `hold()`/`release()`
   for tests.
 
@@ -68,8 +73,9 @@ Sinks:
 
 - **State and sessions.** The reporter always holds the graph state: elements, links, open spans. A
   session opens when the sink connects; it starts with a snapshot (`seq` 0, `t = T`) and ends when the
-  connection closes (a closed connection is noticed within one window even when nothing is written). No
-  signal is built outside a session. Open spans survive a reconnect: the next session's snapshot lists them
+  connection closes (a closed connection is noticed within a quarter second even when nothing is written).
+  Without a session the hot path does nothing after its one check, and `Element.span` returns an unreported
+  span. Open spans survive a reconnect: the next session's snapshot lists them
   (their `parent` only if that span is open too), and their `span.end` follows normally.
 - **IDs.** `e<n>`, `l<n>`, `s<n>` in creation order, never reused. Labels and kinds are what you pass; use
   labels that are the same in every run for the same construction point (spec, Elements).
@@ -85,10 +91,18 @@ Sinks:
 - **Backlog.** Counted by `enter`/`leave` and `begin`/`end`, starting from zero in each session (an item that
   entered before the session leaves without going below zero), or sampled with `link(depth=callable)`, read
   once per boundary (exact; nothing per item). A backlog above `capacity` is reported as `capacity`.
-- **Order.** Any structural or span change first closes the windows that have ended, so `t` never
-  decreases; closing happens before the state changes, so a Loss during it never sends a change twice.
-- **Loss.** When more than `queue` lines are waiting, all are discarded and a snapshot is queued; the `seq`
-  gap tells the observer how many were lost. The caller never waits for the sink.
+- **Order.** Each change is stamped with one clock read, under the reporter lock, so changes are in `t`
+  order. The clock thread applies them in that order to its mirror of the graph. Before emitting a change it
+  closes every window whose end `T + (k+1)·w` is at or before the change's `t`. So `t` never decreases, and
+  a snapshot shows the state at its place in the stream.
+- **Loss.** When more than `queue` lines are waiting (the batch being written counts), all queued lines are
+  discarded and a snapshot is queued; the `seq` gap tells the observer how many were lost. If the discarded
+  lines include the session's opening snapshot, a new session begins instead (spec fa173ab). Lines are
+  created on schedule even while the sink is stalled, so `queue` bounds memory. The caller never waits.
+
+- **Validation.** Labels, kinds, IDs and error strings are checked where you pass them, with or without a
+  session: non-empty where required, no `/` in IDs, and encodable as UTF-8. A lone surrogate from
+  `os.fsdecode` of a non-UTF-8 name raises `ValueError` at the call, never later.
 
 ## Dataflow
 
@@ -111,14 +125,30 @@ Lines are `reacting/1` signals, one JSON object per line, UTF-8, compact separat
 
 ## Threads and cost
 
-One lock per reporter (graph, session, queue, windows) and one per element/link (counters); lock order
-reporter → handle; no user code runs under them except the `depth=` samplers, which must be cheap, never
-block and never call the reporter. Threads: the writer (with `timer=True`) and, for `WebSocketSink`, a
-reader that discards data frames and answers Ping/Close (RFC 6455; spec c7f1232).
+| Thread | Does | Never does |
+|---|---|---|
+| callers (the observed graph) | validate; update the registry and append a timestamped event under the reporter lock (O(1)); count into one accumulator under its own lock (O(1)) | close windows, encode JSON, call user code, touch the sink |
+| clock (`rxplus-reacting-clock-<source>`) | apply events to the mirror; close windows on time, even when the process is idle and the sink stalled, at a cost of O(busy accumulators) per window; call `depth=` samplers outside every lock; encode; queue | wait for the sink |
+| writer (`rxplus-reacting-writer-<source>`) | open the sink (always through its backoff when reopening); write batches; report a lost connection | build signals |
 
-Measured (`benchmarks/bench_reacting_core.py`, i9-13900, CPython 3.13): without a session a hot-path call
-costs about 17 ns over an empty call (one attribute check); live, `deliver` about 0.30 µs, `enter`+`leave`
-about 1.0 µs.
+Both background threads are daemons. At interpreter exit, `close(timeout=1.0)` runs for every open reporter,
+which flushes a file sink. `close(timeout)` is honoured even when the observer stops reading: after the
+timeout the sink is closed under the blocked writer.
+
+Measured (`benchmarks/bench_reacting_core.py`, i9-13900, CPython 3.13). Each figure is the cost over an empty
+call:
+
+| Call | Cost |
+|---|---|
+| hot-path call without a session (one check) | about 15 ns |
+| `deliver`, live | about 0.35 µs |
+| `enter` + `leave`, live | about 0.9 µs |
+
+Memory with a stalled sink: 499 links, a 10 ms window and a held sink for 20 s (2000 windows):
+- queued plus in-flight lines peaked at 9994 against `queue` 10 000;
+- at most 3 open window totals per link;
+- max RSS grew 2.8 MB;
+- a span start plus end on the caller's thread took at most 24 µs.
 
 ## Log records
 
@@ -139,8 +169,9 @@ a file differs from its pin or the checker disagrees with a corpus expectation.
 - **Content.** Signals must not carry data content (spec, Content). The API takes no item values; labels,
   kinds and error texts are yours, so keep data out of them. A failed span sends only the exception's
   class name, never `str(exception)`.
-- **Transport.** `WebSocketSink` refuses to dial a non-loopback address without a `token`
-  (`Authorization: Bearer`); prefer `wss://` off loopback. It never sends `Origin`. Incoming messages are
+- **Transport.** Without a `token`, `WebSocketSink` dials only loopback addresses. It checks the very
+  address it connects to, so a name that also resolves elsewhere is never dialled there. Prefer `wss://` off
+  loopback. It never sends `Origin`. Incoming messages are
   discarded without being parsed; one larger than 1 MiB closes the connection (1009).
 - **Resources.** Memory is bounded by `queue` lines per reporter. Removed elements and links release their
   counters.

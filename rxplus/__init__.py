@@ -14,6 +14,7 @@ Install with:
 """
 
 import importlib
+import threading
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # what type checkers and IDEs see
@@ -238,49 +239,86 @@ _VIDEO_ALL = [
     "png_bytes_to_rgb_ndarray",
 ]
 
+_SUBMODULES = frozenset(
+    {
+        "audio",
+        "cli",
+        "duplex",
+        "gateway",
+        "graphic",
+        "mechanism",
+        "opt",
+        "reacting",
+        "telemetry",
+        "utils",
+        "ws",
+    }
+)
+
 _optional: dict[str, bool] = {}
+# Serialises first imports: concurrent first access from several threads
+# must not observe a half-initialised submodule.
+_import_lock = threading.RLock()
 
 
 def _available(module: str) -> bool:
     """Whether an optional submodule imports (its dependencies are present)."""
-    if module not in _optional:
-        try:
-            importlib.import_module(f".{module}", __name__)
-            _optional[module] = True
-        except ImportError:
-            _optional[module] = False
-    return _optional[module]
+    with _import_lock:
+        if module not in _optional:
+            try:
+                importlib.import_module(f".{module}", __name__)
+                _optional[module] = True
+            except ImportError:
+                _optional[module] = False
+        return _optional[module]
 
 
-def __getattr__(name: str) -> object:
-    if name in _EXPORTS:
-        value = getattr(importlib.import_module(f".{_EXPORTS[name]}", __name__), name)
-    elif name in _AUDIO_EXPORTS or name in _VIDEO_EXPORTS:
-        module = _AUDIO_EXPORTS.get(name) or _VIDEO_EXPORTS[name]
-        if not _available(module):
-            raise AttributeError(
-                f"rxplus.{name} needs the optional dependencies of rxplus.{module}"
-                f" (pip install 'rxplus[{'audio' if module == 'audio' else 'video'}]')"
-            )
-        value = getattr(importlib.import_module(f".{module}", __name__), name)
-    elif name == "_HAS_AUDIO":
-        return _available("audio")
-    elif name == "_HAS_VIDEO":
-        return _available("graphic")
-    elif name == "__all__":
-        names = list(_BASIC_ALL)
-        if _available("audio"):
-            names += _AUDIO_ALL
-        if _available("graphic"):
-            names += _VIDEO_ALL
-        return names
-    else:
-        raise AttributeError(f"module 'rxplus' has no attribute {name!r}")
-    globals()[name] = value  # cache: later lookups skip __getattr__
-    return value
+if not TYPE_CHECKING:  # type checkers see the imports above; typos stay errors
+
+    def __getattr__(name: str) -> object:
+        with _import_lock:
+            if name in globals():
+                return globals()[name]
+            if name in _EXPORTS:
+                module = importlib.import_module(f".{_EXPORTS[name]}", __name__)
+                value = getattr(module, name)
+            elif name in _AUDIO_EXPORTS or name in _VIDEO_EXPORTS:
+                module_name = _AUDIO_EXPORTS.get(name) or _VIDEO_EXPORTS[name]
+                if not _available(module_name):
+                    extra = "audio" if module_name == "audio" else "video"
+                    raise AttributeError(
+                        f"rxplus.{name} needs the optional dependencies of"
+                        f" rxplus.{module_name} (pip install 'rxplus[{extra}]')"
+                    )
+                module = importlib.import_module(f".{module_name}", __name__)
+                value = getattr(module, name)
+            elif name in _SUBMODULES:
+                # `import rxplus; rxplus.ws` worked when imports were eager.
+                if name in ("audio", "graphic") and not _available(name):
+                    raise AttributeError(f"rxplus.{name} needs optional dependencies")
+                value = importlib.import_module(f".{name}", __name__)
+            elif name == "_HAS_AUDIO":
+                return _available("audio")
+            elif name == "_HAS_VIDEO":
+                return _available("graphic")
+            elif name == "__all__":
+                names = list(_BASIC_ALL)
+                if _available("audio"):
+                    names += _AUDIO_ALL
+                if _available("graphic"):
+                    names += _VIDEO_ALL
+                return names
+            else:
+                raise AttributeError(f"module 'rxplus' has no attribute {name!r}")
+            globals()[name] = value  # cache: later lookups skip __getattr__
+            return value
 
 
 def __dir__() -> list[str]:
     return sorted(
-        set(globals()) | set(_EXPORTS) | set(_AUDIO_EXPORTS) | set(_VIDEO_EXPORTS)
+        set(globals())
+        | set(_EXPORTS)
+        | set(_AUDIO_EXPORTS)
+        | set(_VIDEO_EXPORTS)
+        | _SUBMODULES
     )

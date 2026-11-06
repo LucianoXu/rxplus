@@ -1,15 +1,27 @@
 """Per-window accumulators for flow, latency and depth (standard library only).
 
-One :class:`Accumulator` exists per element or link. The hot path updates
-it under its own lock; the reporter closes windows under the reporter lock
-and takes each accumulator's lock briefly (lock order: reporter, then
-accumulator). Windows are identified by their index ``k`` in the session:
-window ``k`` is ``[T + k*w, T + (k+1)*w)``.
+One :class:`Accumulator` exists per element or link. Hot-path calls update
+it under its own lock in O(1) and never wait for anything else; only the
+reporter's clock thread closes windows. Windows are identified by their
+index ``k`` in the session: window ``k`` is ``[T + k*w, T + (k+1)*w)``.
+
+An accumulator with events in an open window puts its ID once on the
+reporter's ``busy`` deque, so closing a window costs O(busy accumulators),
+not O(all accumulators).
 """
 
 import threading
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Protocol
+
+
+class _Closed(Protocol):
+    """What an accumulator reads from the reporter: windows below
+    ``closed`` are closed (set by the clock thread before it closes them)."""
+
+    closed: int
 
 
 @dataclass(slots=True)
@@ -39,10 +51,13 @@ class Accumulator:
     """Counters of one element or link, per window of the current session."""
 
     __slots__ = (
+        "ident",
+        "_busy",
+        "_flagged",
         "_lock",
         "_session",
         "_windows",
-        "_closed_upto",
+        "_shared",
         "_backlog",
         "_last_nonzero",
         "sampler",
@@ -50,12 +65,20 @@ class Accumulator:
     )
 
     def __init__(
-        self, sampler: Callable[[], int] | None = None, capacity: int | None = None
+        self,
+        ident: str,
+        busy: deque[str],
+        shared: _Closed,
+        sampler: Callable[[], int] | None = None,
+        capacity: int | None = None,
     ) -> None:
+        self.ident = ident
+        self._busy = busy
+        self._flagged = False
         self._lock = threading.Lock()
-        self._session = -1
+        self._session = -1  # no session: hot-path calls are ignored
         self._windows: dict[int, Totals] = {}
-        self._closed_upto = 0  # windows < this index are closed
+        self._shared = shared
         self._backlog = 0  # counted backlog now
         self._last_nonzero = False  # the depth at the previous boundary was non-zero
         self.sampler = sampler
@@ -63,20 +86,7 @@ class Accumulator:
 
     # ------------------------------------------------------------------ hot path
 
-    def _totals(self, session: int, k: int) -> Totals:
-        """Totals of window ``k``; caller holds the lock."""
-        if session != self._session:
-            self._reset(session)
-        if k < self._closed_upto:
-            # The window was closed by a concurrent flush after the caller
-            # read the clock: the event belongs to the current window.
-            k = self._closed_upto
-        totals = self._windows.get(k)
-        if totals is None:
-            totals = self._windows[k] = Totals()
-        return totals
-
-    def flow(
+    def record(
         self,
         session: int,
         k: int,
@@ -84,78 +94,69 @@ class Accumulator:
         size: int | None = None,
         dropped: int = 0,
         coalesced: int = 0,
+        delta: int = 0,
+        duration: float | None = None,
     ) -> None:
+        """One hot-path event in window ``k`` of ``session``: O(1)."""
         with self._lock:
-            t = self._totals(session, k)
+            if session != self._session:
+                return  # from a session that ended: ignore it
+            closed = self._shared.closed
+            if k < closed:
+                # The clock thread closed this window after the caller read
+                # the clock: the event counts in the current window (R3).
+                k = closed
+            t = self._windows.get(k)
+            if t is None:
+                t = self._windows[k] = Totals()
             t.items += items
             if size is not None:
                 t.bytes += size
                 t.sized = True
             t.dropped += dropped
             t.coalesced += coalesced
+            if delta:
+                if self._backlog + delta < 0:
+                    delta = -self._backlog  # clamp: entered before the session
+                self._backlog += delta
+                t.delta += delta
+            if duration is not None:
+                t.lat_count += 1
+                t.lat_sum += duration
+                if duration > t.lat_max:
+                    t.lat_max = duration
+            if not self._flagged:
+                self._flagged = True
+                self._busy.append(self.ident)  # deque.append is thread-safe
 
-    def change(self, session: int, k: int, delta: int) -> None:
-        """Counted backlog changes by ``delta`` (never below zero)."""
+    # ------------------------------------------------------- clock thread only
+
+    def start_session(self, session: int) -> None:
         with self._lock:
-            t = self._totals(session, k)
-            if self._backlog + delta < 0:
-                delta = -self._backlog  # clamp: entered before the session
-            self._backlog += delta
-            t.delta += delta
+            self._session = session
+            self._windows.clear()
+            self._backlog = 0
+            self._last_nonzero = False
+            self._flagged = False
 
-    def duration(self, session: int, k: int, seconds: float) -> None:
+    def next_window(self) -> int | None:
+        """The lowest window index with recorded events, if any."""
         with self._lock:
-            t = self._totals(session, k)
-            t.lat_count += 1
-            t.lat_sum += seconds
-            if seconds > t.lat_max:
-                t.lat_max = seconds
+            return min(self._windows) if self._windows else None
 
-    # -------------------------------------------------------------- reporter side
-
-    def _reset(self, session: int) -> None:
-        self._session = session
-        self._windows.clear()
-        self._closed_upto = 0
-        self._backlog = 0
-        self._last_nonzero = False
-
-    def start_session(self, session: int, first_window: int = 0) -> None:
+    def watched(self) -> bool:
+        """Whether a depth signal may be due at every boundary."""
         with self._lock:
-            self._reset(session)
-            self._closed_upto = first_window
-
-    def mark_closed(self, session: int, upto: int) -> None:
-        """Windows below ``upto`` are closed (some skipped: nothing to report)."""
-        with self._lock:
-            if session == self._session and upto > self._closed_upto:
-                self._closed_upto = upto
-
-    def pending_windows(self, session: int) -> list[int]:
-        """Indices of windows with recorded events (any, unsorted)."""
-        with self._lock:
-            if session != self._session:
-                return []
-            return list(self._windows)
-
-    def has_backlog(self, session: int) -> bool:
-        """Whether a depth signal may be due (non-zero now or at the last end)."""
-        with self._lock:
-            if session != self._session:
-                return False
             return self._last_nonzero or self._backlog != 0 or self.sampler is not None
 
-    def close(self, session: int, k: int, sample: int | None) -> WindowResult:
+    def close(self, k: int, sample: int | None) -> WindowResult:
         """Close window ``k``: its totals and the depth signal due at its end.
 
         ``sample`` is the sampled backlog at the boundary (for an
-        accumulator with a sampler), read by the caller outside this lock.
+        accumulator with a sampler), read by the caller outside any lock.
         """
         with self._lock:
-            if session != self._session:
-                self._reset(session)
             totals = self._windows.pop(k, None)
-            self._closed_upto = k + 1
             if sample is not None:
                 backlog = sample
             else:
@@ -173,4 +174,6 @@ class Accumulator:
             else:
                 depth = None
             self._last_nonzero = backlog != 0
+            if not self._windows:
+                self._flagged = False  # the next event puts it on busy again
             return WindowResult(totals, depth)

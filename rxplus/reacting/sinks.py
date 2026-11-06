@@ -12,6 +12,7 @@ import json
 import os
 import ssl
 import threading
+import time
 from collections.abc import Sequence
 from typing import Protocol
 
@@ -85,11 +86,19 @@ class JsonlFileSink:
 class WebSocketSink:
     """Dial an observer (the hub, D9) over WebSocket; one session per connection.
 
-    Transport rules (spec, Transport): no ``Origin`` header; off loopback a
-    ``token`` is required and sent as ``Authorization: Bearer <token>``
-    (without one the sink refuses to connect); data frames received are
-    ignored, control frames handled as RFC 6455 requires. A lost connection
-    ends the session; the sink reopens with exponential backoff.
+    Transport rules (spec, Transport): no ``Origin`` header; when the address
+    connected to is not loopback a ``token`` is required and sent as
+    ``Authorization: Bearer <token>`` (without one such addresses are never
+    dialled); data frames received are ignored, control frames handled as
+    RFC 6455 requires.
+
+    Robustness: any write error closes the connection (the session ends);
+    every reopen waits ``retry_delay()``, which doubles up to ``backoff[1]``
+    and resets only after a connection that stayed up ``stable_after``
+    seconds, so an observer that accepts and then rejects (e.g. a duplicate
+    source name) is not hammered. A send that makes no progress for
+    ``send_timeout`` seconds, or a peer that answers nothing for
+    ``ping_interval + ping_timeout`` seconds, closes the connection.
     """
 
     def __init__(
@@ -99,6 +108,10 @@ class WebSocketSink:
         token: str | None = None,
         open_timeout: float = 5.0,
         backoff: tuple[float, float] = (0.5, 30.0),
+        stable_after: float = 10.0,
+        send_timeout: float = 10.0,
+        ping_interval: float = 20.0,
+        ping_timeout: float = 20.0,
         ssl_context: ssl.SSLContext | None = None,
     ) -> None:
         if not 0 < backoff[0] <= backoff[1]:
@@ -107,13 +120,18 @@ class WebSocketSink:
         self._token = token
         self._open_timeout = open_timeout
         self._backoff = backoff
+        self._stable_after = stable_after
+        self._send_timeout = send_timeout
+        self._ping = (ping_interval, ping_timeout)
         self._delay = backoff[0]
         self._ssl = ssl_context
         self._conn: WSConnection | None = None
+        self._opened_at: float | None = None
         self._refused = False
         self.last_error: str | None = None  # why the last open failed
 
     def open(self) -> bool:
+        self._drop_connection()
         if self._refused:
             return False
         try:
@@ -121,6 +139,8 @@ class WebSocketSink:
                 self._url,
                 token=self._token,
                 timeout=self._open_timeout,
+                send_timeout=self._send_timeout,
+                ping=self._ping,
                 ssl_context=self._ssl,
             )
         except NotLoopbackError as e:
@@ -130,9 +150,18 @@ class WebSocketSink:
         except (OSError, HandshakeError) as e:
             self.last_error = f"{type(e).__name__}: {e}"
             return False
-        self._delay = self._backoff[0]
+        self._opened_at = time.monotonic()
         self.last_error = None
         return True
+
+    def _drop_connection(self) -> None:
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            conn.abort()
+        if self._opened_at is not None:
+            if time.monotonic() - self._opened_at >= self._stable_after:
+                self._delay = self._backoff[0]  # it was stable: start over
+            self._opened_at = None
 
     def write(self, lines: Sequence[str]) -> None:
         conn = self._conn
@@ -141,9 +170,9 @@ class WebSocketSink:
         try:
             for line in lines:
                 conn.send_text(line)
-        except OSError as e:
-            conn.abort()
-            raise SinkDisconnected(str(e)) from e
+        except Exception as e:
+            conn.abort()  # any failure ends the connection and the session
+            raise SinkDisconnected(f"{type(e).__name__}: {e}") from e
 
     def is_open(self) -> bool:
         return self._conn is not None and not self._conn.closed
@@ -151,14 +180,15 @@ class WebSocketSink:
     def retry_delay(self) -> float | None:
         if self._refused:
             return None
+        self._drop_connection()
         delay = self._delay
         self._delay = min(self._delay * 2, self._backoff[1])
         return delay
 
     def close(self) -> None:
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            conn.close()
 
 
 class MemorySink:

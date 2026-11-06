@@ -13,6 +13,7 @@ import socket
 import ssl
 import struct
 import threading
+import time
 from urllib.parse import urlsplit
 
 _GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -64,12 +65,20 @@ def _xor(payload: bytes, mask: bytes) -> bytes:
 class WSConnection:
     """An open client connection. Thread-safe sending; one reader thread."""
 
-    def __init__(self, sock: socket.socket, buffered: bytes) -> None:
+    def __init__(
+        self,
+        sock: socket.socket,
+        buffered: bytes,
+        ping: tuple[float, float] = (20.0, 20.0),
+    ) -> None:
         self._sock = sock
         self._buf = buffered
         self._send_lock = threading.Lock()
         self.closed = False
         self._close_sent = False
+        self._ping_interval, self._ping_timeout = ping
+        self._last_heard = time.monotonic()
+        self._ping_sent: float | None = None
         self._reader = threading.Thread(
             target=self._read_loop, name="rxplus-reacting-ws-reader", daemon=True
         )
@@ -82,6 +91,8 @@ class WSConnection:
         *,
         token: str | None,
         timeout: float,
+        send_timeout: float = 10.0,
+        ping: tuple[float, float] = (20.0, 20.0),
         ssl_context: ssl.SSLContext | None = None,
     ) -> "WSConnection":
         parts = urlsplit(url)
@@ -91,13 +102,7 @@ class WSConnection:
         port = parts.port or (443 if parts.scheme == "wss" else 80)
         path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
 
-        addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-        if token is None and not all(_is_loopback(str(a[4][0])) for a in addresses):
-            # Spec, Transport: off loopback the opening side must authenticate.
-            raise NotLoopbackError(
-                f"{host} is not a loopback address; a token is required"
-            )
-        sock = socket.create_connection((host, port), timeout=timeout)
+        sock = cls._dial(host, port, token, timeout)
         try:
             if parts.scheme == "wss":
                 context = ssl_context or ssl.create_default_context()
@@ -117,11 +122,42 @@ class WSConnection:
             sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("ascii"))
             head, rest = cls._read_head(sock)
             cls._check_response(head, key)
-            sock.settimeout(None)
+            # A send that makes no progress for send_timeout seconds fails
+            # (a stalled observer must not hang the writer or close()); the
+            # reader treats the same timeout as an idle tick (keepalive).
+            sock.settimeout(send_timeout)
         except BaseException:
             sock.close()
             raise
-        return cls(sock, rest)
+        return cls(sock, rest, ping)
+
+    @staticmethod
+    def _dial(host: str, port: int, token: str | None, timeout: float) -> socket.socket:
+        """Connect to an address of ``host``; without a token only to a
+        loopback address, and always to the address that was checked."""
+        last: OSError | None = None
+        refused = False
+        for family, kind, proto, _, addr in socket.getaddrinfo(
+            host, port, type=socket.SOCK_STREAM
+        ):
+            if token is None and not _is_loopback(str(addr[0])):
+                refused = True  # spec, Transport: authenticate off loopback
+                continue
+            sock = socket.socket(family, kind, proto)
+            sock.settimeout(timeout)
+            try:
+                sock.connect(addr)
+                return sock
+            except OSError as e:
+                sock.close()
+                last = e
+        if last is not None:
+            raise last
+        if refused:
+            raise NotLoopbackError(
+                f"{host} is not a loopback address; a token is required"
+            )
+        raise OSError(f"no address for {host}")
 
     @staticmethod
     def _read_head(sock: socket.socket) -> tuple[bytes, bytes]:
@@ -173,7 +209,8 @@ class WSConnection:
         self._send(_TEXT, text.encode("utf-8"))
 
     def close(self, code: int = 1000) -> None:
-        """Start the closing handshake and release the socket."""
+        """Send a Close frame (bounded by the send timeout) and release the
+        socket."""
         if not self.closed:
             try:
                 self._send(_CLOSE, struct.pack("!H", code))
@@ -191,11 +228,27 @@ class WSConnection:
 
     # ---------------------------------------------------------------- reading
 
+    def _keepalive(self) -> None:
+        """Idle tick of the reader: ping a quiet peer, give up on a dead one."""
+        now = time.monotonic()
+        if self._ping_sent is not None:
+            if now - self._ping_sent > self._ping_timeout:
+                raise ConnectionError("no answer to ping")
+        elif now - self._last_heard > self._ping_interval:
+            self._ping_sent = now
+            self._send(_PING, b"rxplus")
+
     def _recv_exact(self, n: int) -> bytes:
         while len(self._buf) < n:
-            chunk = self._sock.recv(max(4096, n - len(self._buf)))
+            try:
+                chunk = self._sock.recv(max(4096, n - len(self._buf)))
+            except TimeoutError:
+                self._keepalive()
+                continue
             if not chunk:
                 raise ConnectionError("connection closed by peer")
+            self._last_heard = time.monotonic()
+            self._ping_sent = None  # anything heard proves the peer alive
             self._buf += chunk
         data, self._buf = self._buf[:n], self._buf[n:]
         return data
