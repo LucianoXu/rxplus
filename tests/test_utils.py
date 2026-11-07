@@ -53,13 +53,15 @@ def test_the_default_monitor_report_goes_to_the_given_logger_provider():
 
 def test_bandwidth_monitor_counts_items_without_a_usable_len_as_zero():
     """Review of #31: a 0-d numpy array has __len__ but raises TypeError."""
-    import numpy as np
-
     from rxplus import BandwidthMonitor
+
+    class Scalar:  # like numpy.array(1.0), without numpy (basic install)
+        def __len__(self) -> int:
+            raise TypeError("len() of unsized object")
 
     seen: list[float] = []
     bm = BandwidthMonitor(interval=0.0, report=seen.append)
-    arr = np.array(1.0)
+    arr = Scalar()
     assert bm(arr) is arr and bm(3) == 3
     assert seen == [0.0, 0.0]
 
