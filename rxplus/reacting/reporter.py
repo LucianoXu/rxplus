@@ -692,8 +692,6 @@ class Reporter:
                 except Exception:
                     sample = None
             tot = window.get(ident)
-            with acc.lock():
-                d = acc.depth(acc.later_delta(), sample)
             if tot is not None:
                 if ident in self._mirror.links and (
                     tot.items or tot.dropped or tot.coalesced
@@ -718,6 +716,12 @@ class Reporter:
                             "max": top,
                         },
                     )
+            if st.session != session:
+                return True  # the Loss above began a new session
+            # After the flow and latency: a Loss they caused has listed the
+            # backlogs and reset the depth state this depth continues from.
+            with acc.lock():
+                d = acc.depth(acc.later_delta(), sample)
             if d.value is not None:
                 depth: Signal = {"id": ident, "value": d.value}
                 if acc.capacity is not None:
