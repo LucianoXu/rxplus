@@ -51,6 +51,17 @@ Restarts the upstream observable on error, emitting an `ErrorRestartSignal` befo
 | `reacting` | `Reporter \| Element \| None` | Report an operator element with one `attempt` span per subscription (`docs/reacting.md`, Components); `None` installs nothing |
 | `label` | `str` | The element's label (default `"retry_with_signal"`) |
 
+> **Bound your retries.** Every error is retried, including programming errors (`TypeError`,
+> `AttributeError`). With the defaults (`max_retries=None`, no `should_retry`) a source that always fails
+> is retried forever: with a delay, once per delay for the life of the subscription; without a delay, in a
+> loop on the subscribing thread, which then never returns from `subscribe()`. Pass `max_retries`, and a
+> `should_retry` that keeps bugs fatal, e.g. `should_retry=lambda e: isinstance(e.exception, (OSError,
+> TimeoutError))`. Retries without delay run in a loop, not by recursion, so the stack does not grow.
+>
+> **Scheduler.** A delayed retry is scheduled from the thread that delivered the error. Use a thread-safe
+> scheduler: `TimeoutScheduler` (default), `EventLoopScheduler`, or `AsyncIOThreadSafeScheduler` for an
+> asyncio loop, not `AsyncIOScheduler`, which may only be used from its loop's thread.
+
 ```python
 source.pipe(
     retry_with_signal(max_retries=3, delay_s=1.0)

@@ -93,7 +93,7 @@ def redirect_to[T](
     return _redirect_to
 
 
-@dataclass(slots=True)
+@dataclass
 class ErrorRestartSignal:
     """
     A signal emitted when a retry is triggered by `retry_with_signal`.
@@ -247,14 +247,32 @@ def retry_with_signal[T](
                     return 0.0
                 return d if d > 0 else 0.0
 
+            # Trampoline: a retry without delay that is requested while an
+            # attempt is subscribing on this thread (the source failed
+            # synchronously) runs after that attempt returns, in a loop, not
+            # by recursion (review of #31: ~120 retries ended in a bare
+            # RecursionError).
+            trampoline = threading.local()
+
+            def _run() -> None:
+                if getattr(trampoline, "active", False):
+                    trampoline.pending = True
+                    return
+                trampoline.active = True
+                try:
+                    trampoline.pending = True
+                    while trampoline.pending and not disposed:
+                        trampoline.pending = False
+                        _subscribe_once()
+                finally:
+                    trampoline.active = False
+
             def _retry(delay: float) -> None:
                 if delay <= 0:
-                    _subscribe_once()
+                    _run()
                     return
                 sch = retry_scheduler or TimeoutScheduler()
-                waiting[0] = sch.schedule_relative(
-                    delay, lambda _sch, _state: _subscribe_once()
-                )
+                waiting[0] = sch.schedule_relative(delay, lambda _sch, _state: _run())
                 if disposed:  # disposed while scheduling
                     _quiet_dispose(waiting[0])
 
@@ -330,7 +348,7 @@ def retry_with_signal[T](
                 elif previous is not None:
                     _quiet_dispose(previous)
 
-            _subscribe_once()
+            _run()
 
             def _dispose() -> None:
                 nonlocal disposed

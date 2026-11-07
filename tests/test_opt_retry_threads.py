@@ -164,3 +164,32 @@ def test_a_stale_attempt_whose_teardown_raises_does_not_break_the_retry():
     sub = rx.create(subscribe).pipe(retry_with_signal(3)).subscribe(out.append)
     assert out[-1] == "up"
     sub.dispose()  # swallowed: never reaches the caller
+
+
+def test_a_source_that_fails_on_subscribe_ends_wrapped_after_max_retries():
+    """Review of #31: zero-delay retries recursed; ~120 retries then a bare
+    RecursionError, the original error lost."""
+    errors: list[Exception] = []
+    signals: list[object] = []
+    rx.create(lambda o, s=None: o.on_error(TypeError("bad"))).pipe(
+        retry_with_signal(1000)
+    ).subscribe(signals.append, errors.append)
+    assert len(signals) == 1000
+    (err,) = errors
+    assert isinstance(err, RxException) and isinstance(err.exception, TypeError)
+
+
+def test_unlimited_zero_delay_retries_do_not_grow_the_stack():
+    tries = [0]
+
+    def subscribe(observer, scheduler=None):
+        tries[0] += 1
+        if tries[0] < 5000:
+            observer.on_error(TypeError("not yet"))
+        else:
+            observer.on_next("up")
+            observer.on_completed()
+
+    out: list[object] = []
+    rx.create(subscribe).pipe(retry_with_signal()).subscribe(out.append)
+    assert tries[0] == 5000 and out[-1] == "up"

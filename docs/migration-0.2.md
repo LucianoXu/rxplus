@@ -45,7 +45,8 @@ is in the last column.
 |---|---|---|---|
 | `retry_with_signal` slept `delay_s` on the thread that delivered the error | the retry is scheduled on `scheduler` (default `TimeoutScheduler`); disposing cancels a waiting retry | pass `scheduler=` to control where it runs (e.g. a test scheduler) | C |
 | errors that were not `RxException` were not retried | wrapped in `RxException` and retried; `should_retry` decides | use `should_retry` to keep some errors fatal | C |
-| `ErrorRestartSignal` was an `attrs` class; `attrs` was a dependency | a standard `dataclass` (same fields); `attrs` is no longer installed with rxplus | install `attrs` yourself if you used it through rxplus | C |
+| `ErrorRestartSignal` was an `attrs` class; `attrs` was a dependency | a standard `dataclass` (same fields, `==` as before); `attrs` is no longer installed with rxplus | install `attrs` yourself if you used it through rxplus; `<`/`>` between signals no longer exist (they compared the errors first) | C |
+| `retry_with_signal` with `max_retries=None` retried `RxException`s only | every error is retried, so an always-failing source is retried forever (without a delay, in a loop on the subscribing thread) | set `max_retries` and a `should_retry` that keeps programming errors fatal (see `docs/operators.md`) | C |
 | `FPSMonitor`, `BandwidthMonitor` printed | report through `report=` (a callable), by default an INFO log through OTel | pass `report=print` to keep printing | C |
 | `rxplus.ws.ConnectionState`, `rxplus.ws.WS_Channels` (aliases) | removed | `WSConnectionState`, `WSChannels` | C |
 

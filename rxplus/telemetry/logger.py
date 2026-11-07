@@ -230,10 +230,10 @@ class OTelLogger:
             New OTelLogger sharing the same underlying OTel Logger but
             with a derived LogContext.
         """
-        new_source = overrides.pop("source", self._source)
+        new_source = overrides.pop("source", None)
         return OTelLogger(
             self._logger,
-            source=str(new_source),
+            source=self._source if new_source is None else str(new_source),
             context=self._context.child(**overrides),
             min_severity=self._min_severity,
         )

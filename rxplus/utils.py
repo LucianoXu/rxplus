@@ -3,7 +3,7 @@
 import time
 import traceback
 from collections.abc import Callable, Sized
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from reactivex import Observable
 from reactivex import operators as ops
@@ -180,7 +180,7 @@ class BandwidthMonitor:
             log = _otel_report("BandwidthMonitor", logger_provider)
 
             def report(bandwidth: float) -> None:
-                log(f"[Bandwidth] {bandwidth:.1f} {unit}")
+                log(f"[Bandwidth] {bandwidth:.1f} {self.unit}")
 
         self._report = report
         self._bytes: int = 0
@@ -188,8 +188,12 @@ class BandwidthMonitor:
 
     def __call__[T](self, item: T) -> T:
         """Side effect: update counters, maybe log bandwidth, then pass item through."""
-        # An item without len() counts as zero bytes.
-        size = len(item) if isinstance(item, Sized) else 0
+        # An item without a usable len() counts as zero bytes (e.g. a
+        # 0-d numpy array, which has __len__ but raises TypeError).
+        try:
+            size = len(cast(Sized, item))
+        except TypeError:
+            size = 0
 
         self._bytes += size
         now = time.perf_counter()
