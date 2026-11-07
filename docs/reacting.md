@@ -186,8 +186,13 @@ behind. It never holds counts without bound; instead it turns the backlog into a
 
 The third limit is hard. Window totals live in 64 shards; an element or link belongs to one shard (by its
 id), whose `windows[k][id]` hold its totals. Callers hold the shard's lock for their whole O(1) write; the
-clock thread holds it to move a closed window out (and processes it outside), and never reads a shard
-without it, so it never iterates a structure a caller is changing. A hot-path call
+clock thread holds it to move the ended windows out (and processes them outside), and never reads a shard
+without it, so it never iterates a structure a caller is changing. It takes each shard's lock as rarely as
+it can, because under the GIL a lock held by a preempted caller stalls it for a switch interval (issue
+#27): once per step to move every ended window out (an empty shard is skipped), once per shard and window
+for the depths of the ids that have backlog activity, and never for an id with nothing to report (no
+backlog, no sampler, no change in the window). Totals moved out but not yet closed count towards the
+cap. A hot-path call
 creates a total only for the first event of an element or link in a window, never per item; that is
 where the cap is checked, so the totals held stay at or under 100 000 however the threads are scheduled
 (the count is updated without a common lock, so a few concurrent creations can pass it). The backlog
@@ -195,7 +200,7 @@ counters keep counting at the cap. Each total costs about 160 bytes, so the coun
 16 MB.
 
 A Loss gives up every window up to the current one in O(shards): each shard's windows are replaced by an
-empty dict, and depth state resets lazily. Every change not yet emitted (structural changes, span starts and ends)
+empty dict. Every change not yet emitted (structural changes, span starts and ends)
 is applied to the graph without its own signal, and a snapshot taken now, which includes them, is sent. The
 `seq` gap is at least the number of signals not sent, so observers see the loss; `t` never decreases.
 
@@ -203,10 +208,14 @@ Measured with 4 threads delivering on random links, window 0.1 s, totals sampled
 
 | Busy links | Duration | Peak totals held | Losses |
 |---|---|---|---|
-| 10 000 | 60 s | 100 000 | 30 |
-| 20 000 | 60 s | 100 001 | 80 |
-| 10 000 | 180 s | 100 001 | 91 |
-| 20 000 | 180 s | 100 001 | 267 |
+| 10 000 | 60 s | 39 604 | 0 |
+| 20 000 | 60 s | 100 000 | 2 |
+| 10 000 | 180 s | 69 503 | 0 |
+| 20 000 | 180 s | 92 908 | 1 |
+
+Before issue #27 (one lock per busy id and two per shard and window) the same runs had 30, 80, 91 and 267
+Losses. With 200 links, 8 threads and a 10 ms window (CPython 3.13, default switch interval) the clock now
+keeps up with and without counted backlogs (no Loss in 10 s), where it lost about half the counts.
 
 The peak does not grow with run length. Before the cap moved into the hot path, the bound was checked only
 on the clock thread: peaks of 150 000–330 000 were not a leak, but that thread getting less CPU than the
