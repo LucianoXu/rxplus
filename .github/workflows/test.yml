@@ -129,3 +129,27 @@ jobs:
         run: |
           python -c "import sys; assert not sys._is_gil_enabled()"
           pytest -v --tb=short tests/reacting tests/conformance
+
+  reacting-hash-seeds:
+    # Window totals live in shards chosen by hash(id): the randomised
+    # sessions take other paths under other hash seeds (review of #28).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install basic package only
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Randomised sessions under 40 hash seeds
+        run: |
+          for seed in $(seq 1 40); do
+            PYTHONHASHSEED=$seed pytest -q -p no:cacheprovider \
+              tests/reacting/test_conformance_random.py || { echo "PYTHONHASHSEED=$seed"; exit 1; }
+          done

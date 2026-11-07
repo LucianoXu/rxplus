@@ -187,3 +187,49 @@ def _wait(cond, timeout: float = 5.0) -> bool:
             return True
         time.sleep(0.01)
     return cond()
+
+
+def test_context_scheduler_drives_interval():
+    """Review of #28: it was not a periodic scheduler (rx.interval failed)."""
+    from reactivex.scheduler import HistoricalScheduler
+
+    inner = HistoricalScheduler()
+    ticks: list[int] = []
+    reactivex.interval(1.0, scheduler=rr.ContextScheduler(inner)).subscribe(
+        ticks.append
+    )
+    inner.advance_by(3.5)
+    assert ticks == [0, 1, 2]
+
+
+def test_enter_and_leave_stay_paired_across_a_session_gap(tmp_path):
+    """Review of #28: tokens were kept only while live, so after a gap
+    every item paired with the wrong token (0.01 s reported as 0.09 s)."""
+    r, sink, clock = make(window=0.1)
+    link = r.link(r.element("A"), r.element("B"))
+    src: Subject[int] = Subject()
+    src.pipe(rr.enter(link)).subscribe(lambda _: None)
+    out: Subject[int] = Subject()
+    out.pipe(rr.leave(link)).subscribe(lambda _: None)
+    r.poll()
+    clock.advance(0.05)
+    src.on_next(1)
+    src.on_next(2)
+    sink.disconnect()
+    r.poll()
+    out.on_next(1)  # leave while no session: still pops its token
+    out.on_next(2)
+    sink.connect()
+    r.poll()
+    for i in range(5):
+        clock.advance(0.03)
+        src.on_next(i)
+        clock.advance(0.01)
+        out.on_next(i)
+        r.poll()
+    clock.advance(0.3)
+    r.poll()
+    lats = by_type(sink.signals(), "latency")
+    assert lats and all(lat["max"] == pytest.approx(0.01, abs=1e-6) for lat in lats)
+    assert not link._tokens
+    conform(sink, tmp_path, window=0.1)

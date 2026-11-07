@@ -15,6 +15,8 @@ from .mechanism import RxException
 
 if TYPE_CHECKING:
     from .reacting import ReportTo
+    from .reacting._component import ComponentReport
+    from .reacting.handles import Element
     from .reacting.handles import Span as ReactingSpan
 
 
@@ -132,11 +134,36 @@ def retry_with_signal[T](
       failed attempt ends with ``error`` and the class of the underlying
       exception. ``None`` installs nothing.
     """
-    element = None
-    if reacting is not None:
+    # The operator element exists while at least one subscription is active
+    # and is removed (with its spans) when the last one ends.
+    report_lock = threading.Lock()
+    active = [0]
+    report: list[ComponentReport | None] = [None]
+
+    def _acquire() -> "Element | None":
+        if reacting is None:
+            return None
         from .reacting import _component
 
-        element = _component.ComponentReport(reacting, label, "rxplus.operator").element
+        with report_lock:
+            current = report[0]
+            if current is None:
+                current = report[0] = _component.ComponentReport(
+                    reacting, label, "rxplus.operator"
+                )
+            active[0] += 1
+            return current.element
+
+    def _release() -> None:
+        if reacting is None:
+            return
+        with report_lock:
+            active[0] -= 1
+            gone = report[0] if active[0] == 0 else None
+            if gone is not None:
+                report[0] = None
+        if gone is not None:
+            gone.remove()
 
     def _end(span: "ReactingSpan | None", err: Exception | None = None) -> None:
         if span is not None:
@@ -152,6 +179,25 @@ def retry_with_signal[T](
         ):
             attempts = 0
             disposed = False
+            element = _acquire()
+            ended = [False]
+
+            def _finish() -> None:
+                # Once per subscription: completed, failed or disposed.
+                with generation_lock:
+                    if ended[0]:
+                        return
+                    ended[0] = True
+                _release()
+
+            def _done() -> None:
+                _finish()
+                observer.on_completed()
+
+            def _fail(err: Exception) -> None:
+                _finish()
+                observer.on_error(err)
+
             # Incremented by every (re)subscription. A retry can start inside
             # source.subscribe() of the previous attempt (synchronous error);
             # the generation tells the outer call that it is no longer current.
@@ -194,7 +240,7 @@ def retry_with_signal[T](
 
                 def _on_completed() -> None:
                     _end(span)
-                    observer.on_completed()
+                    _done()
 
                 def _on_error(err: Exception) -> None:
                     _end(span, err)
@@ -204,16 +250,16 @@ def retry_with_signal[T](
                             source="retry_with_signal",
                             note="Non-RxException in retry_with_signal",
                         )
-                        observer.on_error(err)
+                        _fail(err)
                         return
 
                     nonlocal attempts
                     if should_retry is not None and not should_retry(err):
-                        observer.on_error(err)
+                        _fail(err)
                         return
 
                     if max_retries is not None and attempts >= max_retries:
-                        observer.on_error(err)
+                        _fail(err)
                         return
 
                     attempts += 1
@@ -223,7 +269,7 @@ def retry_with_signal[T](
                             ErrorRestartSignal(error=err, attempts=attempts)
                         )
                     except Exception as e:
-                        observer.on_error(
+                        _fail(
                             RxException(
                                 e,
                                 source="retry_with_signal",
@@ -268,6 +314,7 @@ def retry_with_signal[T](
                     except Exception:
                         pass
                 _end(attempt_span[0])
+                _finish()
 
             return Disposable(_dispose)
 

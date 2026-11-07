@@ -116,7 +116,7 @@ class RxWSClientGroup(Subject, OTelLoggingMixin):
             from ..reacting import _component
 
             self._report = _component.ComponentReport(
-                reacting, name or f"RxWSClientGroup :{config.port}", "rxplus.ws.group"
+                reacting, name or "RxWSClientGroup", "rxplus.ws.group"
             )
         group_element = self._report.element if self._report is not None else None
 

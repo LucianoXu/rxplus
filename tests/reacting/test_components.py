@@ -301,3 +301,97 @@ def test_components_report_from_many_threads_conform(tmp_path):
         time.sleep(2 * W)
         reporter.close(timeout=10.0)
     conform(sink, tmp_path, window=W)
+
+
+def test_labels_never_carry_the_query_string(tmp_path):
+    """Review of #28: '/chat?token=SUPERSECRET' became a label."""
+    reporter, sink = _live_reporter()
+    port = _free_port()
+    server = RxWSServer(WSConnectionConfig("127.0.0.1", port), reacting=reporter)
+    try:
+        assert _wait_for(lambda: _listening(port))
+
+        async def peer() -> None:
+            url = f"ws://127.0.0.1:{port}/chat?token=SUPERSECRET"
+            async with websockets.connect(url) as ws:
+                await ws.send("hi")
+                await asyncio.sleep(2 * W)
+
+        asyncio.run(peer())
+        client = RxWSClient(
+            WSConnectionConfig("127.0.0.1", port, "/feed?key=SUPERSECRET"),
+            reacting=reporter,
+        )
+        time.sleep(2 * W)
+        client.on_completed()
+    finally:
+        server.on_completed()
+        time.sleep(3 * W)
+        reporter.close(timeout=10.0)
+    assert not any("SUPERSECRET" in line for line in sink.lines)
+    labels = {e["label"] for e in _elements(sink)}
+    assert "connection /chat" in labels and "RxWSClient /feed" in labels
+    assert "RxWSServer" in labels  # never the (often ephemeral) port
+    conform(sink, tmp_path, window=W)
+
+
+def test_frames_that_are_never_sent_are_counted_as_dropped(tmp_path):
+    """Review of #28: frames still queued when a connection closed, and
+    values for a path without clients, vanished without a count."""
+    reporter, sink = _live_reporter()
+    port = _free_port()
+    server = RxWSServer(
+        WSConnectionConfig("127.0.0.1", port), reacting=reporter, send_queue=None
+    )
+    try:
+        assert _wait_for(lambda: _listening(port))
+        server.on_next(TaggedData("/nobody", "x"))
+        assert _wait_for(lambda: server.dropped == 1)
+
+        # A raw client that completes the handshake and then never reads:
+        # the server's sends stall, frames stay queued.
+        raw = socket.create_connection(("127.0.0.1", port))
+        raw.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        raw.sendall(
+            b"GET /slow HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
+            b"Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+            b"Sec-WebSocket-Version: 13\r\n\r\n"
+        )
+        response = b""
+        while b"\r\n\r\n" not in response:
+            response += raw.recv(1)
+        assert b" 101 " in response
+        time.sleep(0.2)
+        for _ in range(400):
+            server.on_next(TaggedData("/slow", "y" * 50_000))
+        time.sleep(0.5)
+        raw.close()
+        time.sleep(4 * W)
+    finally:
+        server.on_completed()
+        time.sleep(3 * W)
+        reporter.close(timeout=10.0)
+    by_label = {e["label"]: e for e in _elements(sink)}
+    conn = by_label["connection /slow"]
+    send_link = next(li["id"] for li in _links(sink) if li["to"] == conn["id"])
+    flows = [f for f in by_type(sink.signals(), "flow") if f["link"] == send_link]
+    sent = sum(f["items"] for f in flows)
+    dropped = sum(f["dropped"] for f in flows)
+    assert dropped > 0 and sent + dropped == 400, (sent, dropped)
+    assert server.dropped == 1 + dropped
+    conform(sink, tmp_path, window=W)
+
+
+def test_the_retry_operator_element_goes_with_its_last_subscription(tmp_path):
+    r, sink, clock = make()
+    op = retry_with_signal(1, reacting=r, label="Fetch")
+    sub = reactivex.never().pipe(op).subscribe(lambda _: None)
+    r.poll()
+    (fetch,) = [e for e in _elements(sink) if e["label"] == "Fetch"]
+    sub.dispose()
+    time.sleep(r.window * 1.5)  # removed one window later
+    clock.advance(0.2)
+    r.poll()
+    removed = [i for s in by_type(sink.signals(), "remove") for i in s["ids"]]
+    assert fetch["id"] in removed
+    conform(sink, tmp_path)

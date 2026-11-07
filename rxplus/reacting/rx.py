@@ -23,7 +23,7 @@ from typing import Any, Protocol, cast, overload
 
 import reactivex
 from reactivex import Observable, abc
-from reactivex.scheduler.scheduler import Scheduler
+from reactivex.scheduler.periodicscheduler import PeriodicScheduler
 
 from .handles import Element, Link
 
@@ -99,16 +99,16 @@ def _tokens(link: Link) -> deque[float]:
 def enter(link: Link | None) -> Probe:
     """Each item passing enters ``link``: backlog +1. Pair it with
     :func:`leave` on the far side of an asynchronous hop (``observe_on``, a
-    queue); they assume the hop keeps FIFO order."""
+    queue); they assume the hop keeps FIFO order. A token is kept for every
+    item, with or without a session (``-1`` without), so the pairs stay
+    aligned across a session gap."""
     if link is None:
         return _identity
-    st = link._st
     tokens = _tokens(link)
 
     def op[T](source: Observable[T]) -> Observable[T]:
         def on_next(observer: abc.ObserverBase[T], value: T) -> None:
-            if st.live:
-                tokens.append(link.enter())
+            tokens.append(link.enter())  # -1.0 without a session: one check
             observer.on_next(value)
 
         return _tap(source, on_next)
@@ -134,11 +134,11 @@ def leave[T](
 
     def op(source: Observable[T]) -> Observable[T]:
         def on_next(observer: abc.ObserverBase[T], value: T) -> None:
+            # Popped with or without a session, so the pairs stay aligned.
+            token = tokens.popleft() if tokens else None
             if st.live:
                 nbytes = None if size is None else size(value)
-                try:
-                    token = tokens.popleft()
-                except IndexError:
+                if token is None:  # did not pass `enter` (or was forgotten)
                     link.deliver(1, bytes=nbytes)
                 else:
                     link.leave(token, bytes=nbytes)
@@ -197,11 +197,13 @@ def span(element: Element | None, label: str) -> Probe:
     return op
 
 
-class ContextScheduler(Scheduler):
+class ContextScheduler(PeriodicScheduler):
     """Wraps a scheduler so that each action runs in a copy of the context
     taken when it was scheduled. Use it in ``observe_on`` or
     ``subscribe_on`` to keep span parents (:func:`current_span`) across a
-    thread hop; without it, a span on the far side has no parent."""
+    thread hop; without it, a span on the far side has no parent. It is a
+    periodic scheduler too (``interval``, ``timer``), built on the inner
+    scheduler's ``schedule_relative``."""
 
     def __init__(self, inner: abc.SchedulerBase) -> None:
         super().__init__()

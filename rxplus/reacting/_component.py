@@ -28,9 +28,18 @@ PORT = "port"
 _LABEL_MAX = 80  # dynamic labels built from runtime values are cut here
 
 
-def dynamic_label(prefix: str, value: str) -> str:
-    """A label such as ``"connection /chat"``, cut to a reasonable length
-    (the value comes from the peer)."""
+def path_label(path: str) -> str:
+    """A request path as structure: without its query and fragment, which
+    often carry data (tokens, ids). The path itself is treated as structure:
+    an application that puts data in paths should not report its sockets."""
+    return path.split("?", 1)[0].split("#", 1)[0] or "/"
+
+
+def dynamic_label(prefix: str, path: str) -> str:
+    """A label such as ``"connection /chat"`` from a request path (see
+    :func:`path_label`), cut to a reasonable length (it comes from the
+    peer)."""
+    value = path_label(path)
     text = f"{prefix} {value}" if value else prefix
     return text if len(text) <= _LABEL_MAX else text[: _LABEL_MAX - 1] + "…"
 
@@ -90,4 +99,11 @@ def port_of(report: ComponentReport | None, name: str) -> Element | None:
     return None if report is None else report.port(name)
 
 
-__all__ = ["PORT", "ComponentReport", "ReportTo", "dynamic_label", "port_of"]
+__all__ = [
+    "PORT",
+    "ComponentReport",
+    "ReportTo",
+    "dynamic_label",
+    "path_label",
+    "port_of",
+]

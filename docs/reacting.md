@@ -133,7 +133,7 @@ source.pipe(
 | Probe | Measures |
 |---|---|
 | `count(link, *, size=None)` | flow on `link` per item; `bytes` from `size(item)` |
-| `enter(link)` / `leave(link, *, size=None)` | a FIFO pair around an asynchronous hop: counted backlog of `link`, latency (time in the hop), flow at `leave`. An item that entered before the session counts as flow only. At most 65 536 items in flight are tracked per link (`MAX_IN_FLIGHT`); for a hop that drops, call `Link.leave_dropped` from the dropping code |
+| `enter(link)` / `leave(link, *, size=None)` | a FIFO pair around an asynchronous hop: counted backlog of `link`, latency (time in the hop), flow at `leave`. A token is kept for every item, with or without a session, so pairs stay aligned across a session gap; an item that entered before the session counts as flow only. At most 65 536 items in flight are tracked per link (`MAX_IN_FLIGHT`); for a hop that drops, call `Link.leave_dropped` from the dropping code |
 | `work(element)` | per item, the time until the downstream `on_next` returns: latency and in-flight backlog of `element` |
 | `span(element, label)` | one span per item around the downstream `on_next`; it is the current span there, so spans further down the same synchronous chain become its children; `error` (the exception's class) when downstream raises |
 
@@ -143,7 +143,8 @@ is open. Probes never change items, their order or timing, and never catch excep
 
 `ContextScheduler(inner)` wraps a scheduler so each action runs in a copy of the context taken when it was
 scheduled; use it in `observe_on`/`subscribe_on` to keep `current_span()` (span parents) across a thread
-hop. Without it a span on the far side has no parent.
+hop. Without it a span on the far side has no parent. It is a periodic scheduler too, so `interval` and
+`timer` accept it.
 
 ## Components
 
@@ -158,13 +159,13 @@ and are grouped.
 
 | Component | Element (kind; label) | Children | Links and what they report | Spans |
 |---|---|---|---|---|
-| `RxWSServer` | `rxplus.ws.server`; `name`, else `RxWSServer :<port>` | ports `send`, `recv`; one `rxplus.ws.connection.instance` per open socket, `connection <path>` | `send → connection`: one item per frame sent, its bytes, frames dropped by the send-queue policy, counted backlog (`capacity` = `send_queue`), latency from enqueue to sent. `connection → recv`: one item per message received, its bytes; a message that does not decode is `dropped` | — |
+| `RxWSServer` | `rxplus.ws.server`; `name`, else `RxWSServer` (never the port, which is often ephemeral) | ports `send`, `recv`; one `rxplus.ws.connection.instance` per open socket, `connection <path>` | `send → connection`: one item per frame sent, its bytes; `dropped`: frames discarded by the send-queue policy, the frame in flight when the socket failed, and the frames still queued when it closed (so items + dropped = frames queued); counted backlog (`capacity` = `send_queue`), latency from enqueue to sent. `connection → recv`: one item per message received, its bytes; a message that does not decode is `dropped`. Values for a path without clients have no link; `server.dropped` counts them | — |
 | `RxWSClient` | `rxplus.ws.client`; `name`, else `RxWSClient <path>` | ports `send`, `recv`; `socket` (`rxplus.ws.socket.instance`) while connected | as the server, around the socket. Frames queued while offline enter the next socket's link | `connect` per attempt; `error` with the exception's class when it fails |
-| `RxWSClientGroup` | `rxplus.ws.group`; `name`, else `RxWSClientGroup :<port>` | one `RxWSClient` element per path (`reacting_client(path)` gives the client) | those of the clients | — |
-| `retry_with_signal(..., reacting=, label="retry_with_signal")` | `rxplus.operator`; `label` | — | — | `attempt` per subscription; `error` with the class of the underlying exception when it fails |
+| `RxWSClientGroup` | `rxplus.ws.group`; `name`, else `RxWSClientGroup` | one `RxWSClient` element per path (`reacting_client(path)` gives the client) | those of the clients | — |
+| `retry_with_signal(..., reacting=, label="retry_with_signal")` | `rxplus.operator`; `label`; exists while at least one subscription is active | — | — | `attempt` per subscription; `error` with the class of the underlying exception when it fails |
 
-Labels come from construction arguments only (a request path for a connection), never from addresses or
-anything random, so they are the same in every run. A component removes its element (with its children,
+Labels come from construction arguments only (a request path for a connection, without its query string
+and fragment), never from addresses, ports or anything random, so they are the same in every run. A component removes its element (with its children,
 links and open spans) when it completes or fails. Dynamic children, and the component itself, are removed
 one window after they end: a window's counts are reported at its end and only for links that still exist,
 so a socket removed at once would lose the counts of its last window.
@@ -291,5 +292,6 @@ a file differs from its pin or the checker disagrees with a corpus expectation.
   discarded without being parsed; one larger than 1 MiB closes the connection (1009).
 - **Resources.** Memory is bounded by `queue` lines per reporter. Removed elements and links release their
   counters.
-- **Labels from peers.** A server connection is labelled by the request path its client chose (cut to 80
-  characters). Paths carry no data in rxplus's own use; if yours do, do not report the server.
+- **Labels from peers.** A server connection is labelled by the request path its client chose, without the
+  query string and fragment (which often carry tokens), cut to 80 characters. The path itself is treated as
+  structure: if your paths carry data, do not report the server (or its clients).

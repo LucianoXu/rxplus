@@ -22,7 +22,14 @@ from websockets import ClientConnection
 from ..mechanism import RxException
 from ..utils import get_full_error_info, get_short_error_info
 from ._otel_mixin import OTelLoggingMixin
-from ._sendqueue import QueueOverflow, SendOverflow, SendQueue, wire_size
+from ._sendqueue import (
+    OFF,
+    LiveFlag,
+    QueueOverflow,
+    SendOverflow,
+    SendQueue,
+    wire_size,
+)
 from .codec import WSCodec
 from .datatypes import WSConnectionConfig, WSDatatypeName, codec_for
 
@@ -252,12 +259,13 @@ class RxWSClient(Subject, OTelLoggingMixin):
         self._report: ComponentReport | None = None
         self._socket_element: Element | None = None
         self._recv_link: Link | None = None
+        self._recv_st: LiveFlag = OFF  # its reporter's live state: one check
         if reacting is not None:
             from ..reacting import _component
 
             self._report = _component.ComponentReport(
                 reacting,
-                name or f"RxWSClient {self.path}",
+                name or f"RxWSClient {_component.path_label(self.path)}",
                 "rxplus.ws.client",
                 ("send", "recv"),
             )
@@ -284,6 +292,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
             report.link(report.ports["send"], element, capacity=self._send_queue)
         )
         self._recv_link = report.link(element, report.ports["recv"])
+        self._recv_st = self._recv_link._st
 
     def _unreport_socket(self) -> None:
         """Loop thread, on disconnect: the queued frames stay, unreported
@@ -291,6 +300,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
         if self.queue is not None:
             self.queue.bind(None)
         self._recv_link = None
+        self._recv_st = OFF
         if self._socket_element is not None and self._report is not None:
             # With its links, after the window that holds its last counts.
             self._report.retire(self._socket_element, asyncio.get_running_loop())
@@ -705,6 +715,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
                     self.queue.sent(frame)
                 except (ConnectionResetError, BrokenPipeError, OSError) as e:
                     self.queue.lost(taken=True)
+                    self._count_dropped()  # the frame in flight is lost
                     self._log(
                         f"Failed to send to server {remote_desc},"
                         f" connection broken: {get_short_error_info(e)}",
@@ -713,6 +724,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
                     return
                 except websockets.exceptions.ConnectionClosed as e:
                     self.queue.lost(taken=True)
+                    self._count_dropped()  # the frame in flight is lost
                     self._log(
                         f"Failed to send to server {remote_desc},"
                         f" connection closed: {get_short_error_info(e)}",
@@ -762,7 +774,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
                         "ERROR",
                     )
                     continue
-                if recv is not None and recv._st.live:
+                if self._recv_st.live and recv is not None:
                     recv.deliver(1, bytes=wire_size(data))
                 try:
                     super().on_next(payload)

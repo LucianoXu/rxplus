@@ -27,7 +27,7 @@ from websockets import ClientConnection, Server, ServerConnection
 from ..mechanism import RxException
 from ..utils import TaggedData, get_short_error_info
 from ._otel_mixin import OTelLoggingMixin
-from ._sendqueue import QueueOverflow, SendOverflow, SendQueue, wire_size
+from ._sendqueue import OFF, QueueOverflow, SendOverflow, SendQueue, wire_size
 from .codec import WSCodec
 from .datatypes import (
     DatatypeSpec,
@@ -231,7 +231,7 @@ class RxWSServer(Subject, OTelLoggingMixin):
 
             self._report = _component.ComponentReport(
                 reacting,
-                name or f"RxWSServer :{self.port}",
+                name or "RxWSServer",  # never the port: often ephemeral
                 "rxplus.ws.server",
                 ("send", "recv"),
             )
@@ -269,9 +269,11 @@ class RxWSServer(Subject, OTelLoggingMixin):
     @property
     def dropped(self) -> int:
         """Items dropped so far: per-item failures (not ``TaggedData``,
-        cannot be encoded or decoded, a subscriber raising) plus frames
-        discarded by send-queue overflow. A reporter (X4) reports the same
-        counts as ``dropped`` on the component's links."""
+        cannot be encoded or decoded, a subscriber raising), frames
+        discarded by send-queue overflow, frames still queued when their
+        connection closed, and values for a path without clients. A reporter
+        reports the per-connection ones as ``dropped`` on that connection's
+        links (a path without clients has no link)."""
         with self._dropped_lock:
             return self._dropped
 
@@ -324,8 +326,13 @@ class RxWSServer(Subject, OTelLoggingMixin):
             return  # the loop closed meanwhile
 
     def _enqueue(self, ws_channels: WSChannels, frame: str | bytes) -> None:
-        """Loop thread: queue a frame for every client of a path."""
-        for client in ws_channels.get_queues_snapshot():
+        """Loop thread: queue a frame for every client of a path. A frame for
+        a path without clients is dropped (counted in ``dropped``)."""
+        clients = ws_channels.get_queues_snapshot()
+        if not clients:
+            self._count_dropped()
+            return
+        for client in clients:
             assert isinstance(client, _Client)
             queue = client.queue
             if queue.overflowed:
@@ -410,6 +417,8 @@ class RxWSServer(Subject, OTelLoggingMixin):
             # Unregister first: no more frames for it. A peer that does not
             # read cannot finish the closing handshake, so bound the close.
             ws_channels.remove_client(websocket, client)
+            # Frames still queued are never sent: dropped (on the link too).
+            self._count_dropped(client.queue.reset())
             client.queue.bind(None)
             if client.element is not None and self._report is not None:
                 # With its links, after the window that holds its last counts.
@@ -448,6 +457,7 @@ class RxWSServer(Subject, OTelLoggingMixin):
                 client.queue.sent(frame)
             except (ConnectionResetError, BrokenPipeError, OSError) as e:
                 client.queue.lost(taken=True)
+                self._count_dropped()  # the frame in flight is lost
                 self._log(
                     f"Failed to send to client {client.desc},"
                     f" connection broken: {get_short_error_info(e)}",
@@ -456,6 +466,7 @@ class RxWSServer(Subject, OTelLoggingMixin):
                 return
             except websockets.exceptions.ConnectionClosed as e:
                 client.queue.lost(taken=True)
+                self._count_dropped()  # the frame in flight is lost
                 self._log(
                     f"Failed to send to client {client.desc},"
                     f" connection closed: {get_short_error_info(e)}",
@@ -471,6 +482,7 @@ class RxWSServer(Subject, OTelLoggingMixin):
         remote_desc: str,
         recv: "Link | None" = None,
     ) -> None:
+        st = OFF if recv is None else recv._st  # one check per message
         while True:
             try:
                 data = await websocket.recv()
@@ -495,7 +507,7 @@ class RxWSServer(Subject, OTelLoggingMixin):
                     recv.drop()
                 self._drop(f"a message from {remote_desc} that did not decode", e)
                 continue
-            if recv is not None and recv._st.live:
+            if st.live and recv is not None:
                 recv.deliver(1, bytes=wire_size(data))
             try:
                 super().on_next(TaggedData(path, payload))
