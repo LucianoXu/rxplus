@@ -409,3 +409,18 @@ def test_reconnection_after_a_disconnect_overflow_starts_clean():
     finally:
         client.on_completed()
     assert isinstance(SendQueue(1, "drop_old").reset(), int)
+
+
+def test_values_sent_while_offline_without_buffering_are_counted_as_dropped():
+    """0.2 review: with buffer_while_disconnected=False they were dropped
+    silently, so the client's totals came up short."""
+    client = RxWSClient(
+        WSConnectionConfig("127.0.0.1", _free_port(), "/x"),  # nobody listens
+        retry_policy=RetryPolicy(base_delay=10.0),
+    )
+    try:
+        for i in range(5):
+            client.on_next(str(i))
+        assert client.dropped == 5
+    finally:
+        client.on_completed()
