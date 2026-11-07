@@ -2,10 +2,28 @@
 
 import time
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Sized
+from typing import TYPE_CHECKING, cast
 
 from reactivex import Observable
 from reactivex import operators as ops
+
+if TYPE_CHECKING:
+    from opentelemetry._logs import LoggerProvider
+
+
+def _otel_report(
+    name: str, logger_provider: "LoggerProvider | None"
+) -> Callable[[str], None]:
+    """An INFO log through OTel: ``logger_provider``, else the global
+    provider (silent unless one is configured)."""
+    from opentelemetry._logs import get_logger_provider
+
+    from .telemetry import OTelLogger
+
+    provider = logger_provider or get_logger_provider()
+    logger = OTelLogger(provider.get_logger(f"rxplus.{name}"), source=name)
+    return logger.info
 
 
 class TaggedData[TagT, InnerDataT]:
@@ -82,17 +100,35 @@ def get_full_error_info(e: Exception) -> str:
 
 
 class FPSMonitor:
-    """Print average FPS every *interval* seconds.
+    """Report the average FPS every *interval* seconds.
 
     The object is *callable* so it can be used inside `ops.map` / `ops.do_action`.
+
+    Args:
+        interval: Seconds between two reports.
+        report: Called with the FPS. Default: an INFO log through OTel
+            (``logger_provider``, else the global provider). 0.1 printed.
+        logger_provider: For the default report.
     """
 
-    def __init__(self, interval: float = 1.0) -> None:
+    def __init__(
+        self,
+        interval: float = 1.0,
+        report: Callable[[float], None] | None = None,
+        logger_provider: "LoggerProvider | None" = None,
+    ) -> None:
         self.interval = interval
+        if report is None:
+            log = _otel_report("FPSMonitor", logger_provider)
+
+            def report(fps: float) -> None:
+                log(f"[FPS] {fps:.1f}")
+
+        self._report = report
         self._count: int = 0
         self._t0: float = time.perf_counter()
 
-    def __call__(self, item):
+    def __call__[T](self, item: T) -> T:
         """Side effect: update counters, maybe log FPS, then pass item through."""
         self._count += 1
         now = time.perf_counter()
@@ -100,7 +136,7 @@ class FPSMonitor:
 
         if elapsed >= self.interval:
             fps = self._count / elapsed
-            print(f"[FPS] {fps:.1f}")
+            self._report(fps)
             self._count = 0
             self._t0 = now
 
@@ -109,7 +145,7 @@ class FPSMonitor:
 
 # -------------------------------
 class BandwidthMonitor:
-    """Print average bandwidth every *interval* seconds.
+    """Report the average bandwidth every *interval* seconds.
 
     Expects items that support ``len()`` (e.g. ``bytes``). The bandwidth is
     computed over the last *interval* seconds.
@@ -119,27 +155,44 @@ class BandwidthMonitor:
     """
 
     def __init__(
-        self, interval: float = 1.0, scale: float = 1.0, unit: str = "B/s"
+        self,
+        interval: float = 1.0,
+        scale: float = 1.0,
+        unit: str = "B/s",
+        report: Callable[[float], None] | None = None,
+        logger_provider: "LoggerProvider | None" = None,
     ) -> None:
         """
         Args:
             interval: Time window in seconds for computing the moving average.
             scale:   Factor applied to convert raw bytes per second to another
                      unit (e.g. 1/1024 for KiB/s, 1/1_048_576 for MiB/s).
-            unit:    String printed after the numeric bandwidth value.
+            unit:    Unit written after the value in the default report.
+            report:  Called with the scaled bandwidth. Default: an INFO log
+                     through OTel (``logger_provider``, else the global
+                     provider). 0.1 printed.
+            logger_provider: For the default report.
         """
         self.interval = interval
         self.scale = scale
         self.unit = unit
+        if report is None:
+            log = _otel_report("BandwidthMonitor", logger_provider)
+
+            def report(bandwidth: float) -> None:
+                log(f"[Bandwidth] {bandwidth:.1f} {self.unit}")
+
+        self._report = report
         self._bytes: int = 0
         self._t0: float = time.perf_counter()
 
-    def __call__(self, item):
+    def __call__[T](self, item: T) -> T:
         """Side effect: update counters, maybe log bandwidth, then pass item through."""
+        # An item without a usable len() counts as zero bytes (e.g. a
+        # 0-d numpy array, which has __len__ but raises TypeError).
         try:
-            size = len(item)
+            size = len(cast(Sized, item))
         except TypeError:
-            # Item does not support len(); treat as zero-length for bandwidth.
             size = 0
 
         self._bytes += size
@@ -148,7 +201,7 @@ class BandwidthMonitor:
 
         if elapsed >= self.interval:
             bandwidth = (self._bytes / elapsed) * self.scale
-            print(f"[Bandwidth] {bandwidth:.1f} {self.unit}")
+            self._report(bandwidth)
             self._bytes = 0
             self._t0 = now
 

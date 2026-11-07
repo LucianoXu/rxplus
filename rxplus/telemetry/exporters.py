@@ -9,7 +9,7 @@ import glob
 import os
 import re
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from io import TextIOWrapper
@@ -247,7 +247,7 @@ class FileLogRecordExporter(LogRecordExporter):
         return f"{self._current_logfile}.lock"
 
     @contextmanager
-    def _acquire_lock(self):
+    def _acquire_lock(self) -> Iterator[None]:
         """Cross-process file lock with waiting."""
         lock_path = self._lock_path()
         if lock_path is None:

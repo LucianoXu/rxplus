@@ -70,3 +70,168 @@ def test_dispose_during_a_retry_resubscribe_stops_the_late_subscription():
     seen = len(ticks)
     time.sleep(0.3)
     assert len(ticks) == seen, "the inner source keeps ticking after dispose"
+
+
+def test_a_delayed_retry_does_not_block_the_thread_that_delivered_the_error():
+    """F12: 0.1 slept on the error's thread (often a WS loop or a timer)."""
+    from reactivex.scheduler import HistoricalScheduler
+
+    from rxplus import ErrorRestartSignal, RxException, retry_with_signal
+
+    sched = HistoricalScheduler()
+    tries = [0]
+
+    def subscribe(observer, scheduler=None):
+        tries[0] += 1
+        if tries[0] == 1:
+            observer.on_error(RxException(OSError("down"), source="test"))
+        else:
+            observer.on_next("up")
+
+    out: list[object] = []
+    start = time.monotonic()
+    rx.create(subscribe).pipe(
+        retry_with_signal(delay_s=30.0, scheduler=sched)
+    ).subscribe(out.append)
+    assert time.monotonic() - start < 1.0  # nothing slept
+    assert tries[0] == 1 and isinstance(out[0], ErrorRestartSignal)
+    sched.advance_by(30.0)
+    assert tries[0] == 2 and out[-1] == "up"
+
+
+def test_errors_that_are_not_rx_exceptions_are_retried():
+    from rxplus import ErrorRestartSignal, RxException, retry_with_signal
+
+    tries = [0]
+
+    def subscribe(observer, scheduler=None):
+        tries[0] += 1
+        if tries[0] < 3:
+            observer.on_error(ValueError("plain"))
+        else:
+            observer.on_next("ok")
+
+    out: list[object] = []
+    rx.create(subscribe).pipe(retry_with_signal(5)).subscribe(out.append)
+    signals = [o for o in out if isinstance(o, ErrorRestartSignal)]
+    assert len(signals) == 2 and out[-1] == "ok"
+    assert isinstance(signals[0].error, RxException)
+    assert isinstance(signals[0].error.exception, ValueError)
+
+
+def test_dispose_cancels_a_retry_waiting_on_the_scheduler():
+    from reactivex.scheduler import HistoricalScheduler
+
+    from rxplus import RxException, retry_with_signal
+
+    sched = HistoricalScheduler()
+    tries = [0]
+
+    def subscribe(observer, scheduler=None):
+        tries[0] += 1
+        observer.on_error(RxException(OSError("down"), source="test"))
+
+    sub = (
+        rx.create(subscribe)
+        .pipe(retry_with_signal(delay_s=1.0, scheduler=sched))
+        .subscribe(lambda _: None)
+    )
+    sub.dispose()
+    sched.advance_by(5.0)
+    assert tries[0] == 1
+
+
+def test_a_stale_attempt_whose_teardown_raises_does_not_break_the_retry():
+    """Review of #25: wrap the stale/previous dispose() calls."""
+    from reactivex.disposable import Disposable
+
+    from rxplus import RxException, retry_with_signal
+
+    tries = [0]
+
+    def boom() -> None:
+        raise RuntimeError("teardown failed")
+
+    def subscribe(observer, scheduler=None):
+        tries[0] += 1
+        if tries[0] == 1:
+            observer.on_error(RxException(OSError("down"), source="test"))
+            return Disposable()
+        observer.on_next("up")
+        return Disposable(boom)  # the live attempt's teardown raises
+
+    out: list[object] = []
+    sub = rx.create(subscribe).pipe(retry_with_signal(3)).subscribe(out.append)
+    assert out[-1] == "up"
+    sub.dispose()  # swallowed: never reaches the caller
+
+
+def test_a_source_that_fails_on_subscribe_ends_wrapped_after_max_retries():
+    """Review of #31: zero-delay retries recursed; ~120 retries then a bare
+    RecursionError, the original error lost."""
+    errors: list[Exception] = []
+    signals: list[object] = []
+    rx.create(lambda o, s=None: o.on_error(TypeError("bad"))).pipe(
+        retry_with_signal(1000, max_sync_retries=10_000)
+    ).subscribe(signals.append, errors.append)
+    assert len(signals) == 1000
+    (err,) = errors
+    assert isinstance(err, RxException) and isinstance(err.exception, TypeError)
+
+
+def test_unlimited_zero_delay_retries_do_not_grow_the_stack():
+    tries = [0]
+
+    def subscribe(observer, scheduler=None):
+        tries[0] += 1
+        if tries[0] < 5000:
+            observer.on_error(TypeError("not yet"))
+        else:
+            observer.on_next("up")
+            observer.on_completed()
+
+    out: list[object] = []
+    rx.create(subscribe).pipe(retry_with_signal(max_sync_retries=10_000)).subscribe(
+        out.append
+    )
+    assert tries[0] == 5000 and out[-1] == "up"
+
+
+def test_a_source_that_always_fails_on_subscribe_ends_instead_of_hanging():
+    """Ruling on #31: unlimited retries (the default) must not hang in
+    subscribe(): consecutive synchronous failures without delay are bounded
+    by max_sync_retries, then the wrapped original error ends the stream."""
+    errors: list[Exception] = []
+    signals: list[object] = []
+    start = time.monotonic()
+    rx.create(lambda o, s=None: o.on_error(TypeError("bug"))).pipe(
+        retry_with_signal()
+    ).subscribe(signals.append, errors.append)
+    assert time.monotonic() - start < 1.0
+    assert len(signals) == 100
+    (err,) = errors
+    assert isinstance(err, RxException) and isinstance(err.exception, TypeError)
+
+
+def test_failures_after_subscribe_returned_are_not_bounded_by_max_sync_retries():
+    """Asynchronous failures reset the streak: still unlimited."""
+    from reactivex.scheduler import HistoricalScheduler
+
+    sched = HistoricalScheduler()
+    tries = [0]
+
+    def subscribe(observer, scheduler=None):
+        tries[0] += 1
+        if tries[0] <= 300:  # fails later, after subscribe() returned
+            sched.schedule(lambda *_: observer.on_error(OSError("down")))
+        else:
+            observer.on_next("up")
+
+    out: list[object] = []
+    errors: list[Exception] = []
+    rx.create(subscribe).pipe(retry_with_signal(max_sync_retries=5)).subscribe(
+        out.append, errors.append
+    )
+    for _ in range(400):
+        sched.advance_by(1.0)
+    assert not errors and out[-1] == "up" and tries[0] == 301

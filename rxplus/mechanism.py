@@ -10,5 +10,5 @@ class RxException(Exception):
         self.source = source
         self.note = note
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"<{self.source}> {self.note}: {self.exception}"

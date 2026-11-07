@@ -153,6 +153,9 @@ def test_spans_on_threads_with_reconnects_conform(queue, tmp_path):
         while not stop.is_set():
             with el.span("work"):
                 pass
+            # Yield the GIL: four spinning threads starved the reporter's
+            # threads and this one, and each wait below took seconds.
+            time.sleep(0)
 
     threads = [threading.Thread(target=worker, args=(e,)) for e in elements]
     for t in threads:
@@ -163,6 +166,9 @@ def test_spans_on_threads_with_reconnects_conform(queue, tmp_path):
         # A drop the writer never sees (no write while it lasts) is no drop.
         assert _wait_for(lambda: not r.live)
         sink.connect()
+        # Reconnected before the next drop: under load the writer's reopen
+        # could otherwise miss every short connected spell (CI flake).
+        assert _wait_for(lambda: r.live)
     stop.set()
     for t in threads:
         t.join()

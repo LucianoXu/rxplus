@@ -38,7 +38,7 @@ stream.pipe(stream_print_out("[DEBUG] ")).subscribe(...)
 
 ---
 
-### `retry_with_signal(max_retries, delay_s, should_retry, reacting, label)`
+### `retry_with_signal(max_retries, delay_s, should_retry, scheduler, reacting, label)`
 
 Restarts the upstream observable on error, emitting an `ErrorRestartSignal` before each retry.
 
@@ -46,9 +46,23 @@ Restarts the upstream observable on error, emitting an `ErrorRestartSignal` befo
 |-----------|------|-------------|
 | `max_retries` | `int \| None` | Max attempts; `None` for unlimited |
 | `delay_s` | `float \| Callable[[int, RxException], float]` | Delay between retries |
-| `should_retry` | `Callable[[RxException], bool] \| None` | Predicate to decide retry |
+| `should_retry` | `Callable[[RxException], bool] \| None` | Predicate to decide retry; every error is retried without it (a non-`RxException` is wrapped first) |
+| `scheduler` | `SchedulerBase \| None` | Where a delayed retry is scheduled (default `TimeoutScheduler`); nothing sleeps on the thread that delivered the error, and disposing cancels a waiting retry |
 | `reacting` | `Reporter \| Element \| None` | Report an operator element with one `attempt` span per subscription (`docs/reacting.md`, Components); `None` installs nothing |
 | `label` | `str` | The element's label (default `"retry_with_signal"`) |
+| `max_sync_retries` | `int` | Consecutive retries without delay whose resubscription fails synchronously (before `subscribe()` returns) before the stream ends with the wrapped error (default 100). Retries with a delay, and errors after a subscribe returned, do not count and end the streak |
+
+> **Bound your retries.** Every error is retried, including programming errors (`TypeError`,
+> `AttributeError`). With the defaults (`max_retries=None`, no `should_retry`) a source that always fails
+> is retried forever: with a delay, once per delay for the life of the subscription. Without a delay, a
+> source that fails synchronously on every subscribe ends after `max_sync_retries` (100) consecutive
+> attempts with the wrapped error, so `subscribe()` always returns. Pass `max_retries`, and a
+> `should_retry` that keeps bugs fatal, e.g. `should_retry=lambda e: isinstance(e.exception, (OSError,
+> TimeoutError))`. Retries without delay run in a loop, not by recursion, so the stack does not grow.
+>
+> **Scheduler.** A delayed retry is scheduled from the thread that delivered the error. Use a thread-safe
+> scheduler: `TimeoutScheduler` (default), `EventLoopScheduler`, or `AsyncIOThreadSafeScheduler` for an
+> asyncio loop, not `AsyncIOScheduler`, which may only be used from its loop's thread.
 
 ```python
 source.pipe(

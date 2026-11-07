@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from reactivex import Observable
 from reactivex.disposable import CompositeDisposable
@@ -9,32 +10,38 @@ from reactivex.subject import Subject
 
 
 @dataclass(frozen=True)
-class Duplex:
-    sink: Subject  # inbound
-    stream: Subject  # outbound
+class Duplex[TIn, TOut]:
+    """Two subjects: ``sink`` takes inbound items, ``stream`` emits outbound
+    ones (0.2: generic in both directions)."""
+
+    sink: Subject[TIn]  # inbound
+    stream: Subject[TOut]  # outbound
 
 
-def make_duplex(sink: Subject | None = None, stream: Subject | None = None) -> Duplex:
-    if sink is None:
-        sink = Subject()  # inbound
-    if stream is None:
-        stream = Subject()  # outbound
+def make_duplex[TIn, TOut](
+    sink: Subject[TIn] | None = None, stream: Subject[TOut] | None = None
+) -> Duplex[TIn, TOut]:
+    return Duplex(
+        sink if sink is not None else Subject(),
+        stream if stream is not None else Subject(),
+    )
 
-    return Duplex(sink, stream)
+
+type _Adapter = Duplex[Any, Any] | Subject[Any]
+type _Pipeline = tuple[Callable[[Observable[Any]], Observable[Any]], ...]
 
 
-def get_sink_stream(adapter: Duplex | Subject):
+def get_sink_stream(adapter: _Adapter) -> tuple[Subject[Any], Subject[Any]]:
     if isinstance(adapter, Duplex):
         return adapter.sink, adapter.stream
-    else:
-        return adapter, adapter
+    return adapter, adapter
 
 
 def connect_adapter(
-    adapterA: Duplex | Subject,
-    adapterB: Duplex | Subject,
-    A_to_B_pipeline: tuple[Callable[[Observable], Observable], ...] | None = None,
-    B_to_A_pipeline: tuple[Callable[[Observable], Observable], ...] | None = None,
+    adapterA: _Adapter,
+    adapterB: _Adapter,
+    A_to_B_pipeline: _Pipeline | None = None,
+    B_to_A_pipeline: _Pipeline | None = None,
 ) -> CompositeDisposable:
     """
     Connect two duplex adapters or subjects together.
@@ -46,8 +53,10 @@ def connect_adapter(
     To disconnect the adapters, call `dispose()` on the returned `CompositeDisposable`.
     """
 
-    sinkA, streamA = get_sink_stream(adapterA)
-    sinkB, streamB = get_sink_stream(adapterB)
+    sinkA, subjectA = get_sink_stream(adapterA)
+    sinkB, subjectB = get_sink_stream(adapterB)
+    streamA: Observable[Any] = subjectA
+    streamB: Observable[Any] = subjectB
 
     if A_to_B_pipeline is not None:
         streamA = streamA.pipe(*A_to_B_pipeline)

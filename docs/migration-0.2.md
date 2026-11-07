@@ -57,6 +57,18 @@ is in the last column.
 | `OverflowStrategy` defined in `gateway.stream` | defined in `gateway.overflow` (still exported by `rxplus.gateway`) | import from `rxplus.gateway` | B |
 | — | `RxWSServer.received` (values with their `connection_id`), `send_to(connection_id, value)`, `close_connection(connection_id)` | optional | B |
 
+## Operators, utilities and package surface (PR-C)
+
+| 0.1 | 0.2 | What to do | PR |
+|---|---|---|---|
+| `retry_with_signal` slept `delay_s` on the thread that delivered the error | the retry is scheduled on `scheduler` (default `TimeoutScheduler`); disposing cancels a waiting retry | pass `scheduler=` to control where it runs (e.g. a test scheduler) | C |
+| errors that were not `RxException` were not retried | wrapped in `RxException` and retried; `should_retry` decides | use `should_retry` to keep some errors fatal | C |
+| `ErrorRestartSignal` was an `attrs` class; `attrs` was a dependency | a standard `dataclass` (same fields, `==` as before); `attrs` is no longer installed with rxplus | install `attrs` yourself if you used it through rxplus; `<`/`>` between signals no longer exist (they compared the errors first) | C |
+| `retry_with_signal` with `max_retries=None` retried `RxException`s only | every error is retried, so an always-failing source is retried forever (with a delay) | set `max_retries` and a `should_retry` that keeps programming errors fatal (see `docs/operators.md`) | C |
+| a source failing synchronously on every subscribe, retried without delay, recursed until `RecursionError` | after `max_sync_retries` (default 100) consecutive synchronous failures without delay, the stream ends with the wrapped error; asynchronous failures and delayed retries are not bounded by it | raise `max_sync_retries` if a source legitimately fails synchronously many times in a row | C |
+| `FPSMonitor`, `BandwidthMonitor` printed | report through `report=` (a callable), by default an INFO log through OTel | pass `report=print` to keep printing | C |
+| `rxplus.ws.ConnectionState`, `rxplus.ws.WS_Channels` (aliases) | removed | `WSConnectionState`, `WSChannels` | C |
+
 ## Notes
 
 - "Logged" means an OTel log record on the component's `logger_provider` (nothing without one).
