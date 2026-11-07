@@ -170,6 +170,11 @@ class Reporter:
         return self._st.live
 
     @property
+    def window(self) -> float:
+        """The window length ``w``, seconds."""
+        return self._st.w
+
+    @property
     def clock_errors(self) -> int:
         """Clock steps that raised. Each is logged (``rxplus.reacting``) and
         recovered from with a new session; the clock thread keeps running."""

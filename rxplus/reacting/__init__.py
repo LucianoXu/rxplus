@@ -5,6 +5,7 @@ standard library (D10), so code that does not use reactivex can use it.
 See ``docs/reacting.md``.
 """
 
+from ._component import ReportTo
 from .clock import Clock, ManualClock, SystemClock
 from .handles import Element, Link, LinkKind, Span, current_span
 from .reporter import Reporter
@@ -18,6 +19,7 @@ __all__ = [
     "LinkKind",
     "ManualClock",
     "MemorySink",
+    "ReportTo",
     "Reporter",
     "Sink",
     "SinkDisconnected",
