@@ -1,0 +1,6 @@
+{"source":"rm","seq":0,"t":1762430400.0,"type":"snapshot","protocol":"reacting/1","elements":[{"id":"a","label":"A"},{"id":"a.x","label":"X","parent":"a"},{"id":"b","label":"B"},{"id":"c","label":"C"}],"links":[{"id":"l1","from":"a.x","to":"b","kind":"data"},{"id":"l2","from":"b","to":"c","kind":"data"},{"id":"l3","from":"c","to":"a","kind":"data"}]}
+{"source":"rm","seq":1,"t":1762430400.01,"type":"remove","ids":["nope","a","a.x","l1","l2"]}
+{"source":"rm","seq":2,"t":1762430400.02,"type":"remove","ids":["l3","b"]}
+{"source":"rm","seq":3,"t":1762430400.03,"type":"add","elements":[{"id":"a","label":"A again"}],"links":[{"id":"l1","from":"c","to":"a","kind":"data"}]}
+{"source":"rm","seq":4,"t":1762430400.04,"type":"add","elements":[{"id":"l2","label":"Element named l2"}]}
+{"source":"rm","seq":5,"t":1762430400.05,"type":"remove","ids":["l2","l2"]}

@@ -1,0 +1,12 @@
+{
+  "state": {
+    "sources": {}
+  },
+  "valid": false,
+  "violations": [
+    {
+      "line": 1,
+      "rule": "encoding"
+    }
+  ]
+}

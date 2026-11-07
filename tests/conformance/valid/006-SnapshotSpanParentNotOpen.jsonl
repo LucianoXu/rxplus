@@ -1,0 +1,6 @@
+{"source":"jobs","seq":0,"t":1762430400.0,"type":"snapshot","protocol":"reacting/1","elements":[{"id":"w","label":"Worker"}],"links":[]}
+{"source":"jobs","seq":1,"t":1762430400.01,"type":"span.start","span":"p","id":"w","label":"outer"}
+{"source":"jobs","seq":2,"t":1762430400.02,"type":"span.start","span":"c","id":"w","label":"inner","parent":"p"}
+{"source":"jobs","seq":3,"t":1762430400.03,"type":"span.end","span":"p","status":"ok"}
+{"source":"jobs","seq":9,"t":1762430400.2,"type":"snapshot","protocol":"reacting/1","spans":[{"span":"c","id":"w","label":"inner","parent":"p","t0":1762430400.02},{"span":"d","id":"w","label":"nested","parent":"c","t0":1762430400.15}],"elements":[{"id":"w","label":"Worker"}],"links":[]}
+{"source":"jobs","seq":10,"t":1762430400.21,"type":"span.end","span":"c","status":"ok"}

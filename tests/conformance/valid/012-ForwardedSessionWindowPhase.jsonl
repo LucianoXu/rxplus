@@ -1,0 +1,7 @@
+{"source":"slow","seq":0,"t":1762430400.37,"type":"snapshot","protocol":"reacting/1","label":"Forwarded by a relay","elements":[{"id":"p","label":"Poller"}],"links":[{"id":"k","from":"p","to":"p","kind":"data"}]}
+{"source":"slow","seq":1,"t":1762430400.5,"type":"flow","link":"k","t0":1762430400.25,"items":1,"dropped":0,"coalesced":0}
+{"source":"slow","seq":2,"t":1762430400.5,"type":"depth","id":"k","value":2}
+{"source":"slow","seq":3,"t":1762430400.75,"type":"depth","id":"k","value":2}
+{"source":"slow","seq":4,"t":1762430400.75,"type":"latency","id":"p","t0":1762430400.5,"count":3,"sum":0.3,"max":0.2}
+{"source":"slow","seq":5,"t":1762430401.0,"type":"depth","id":"k","value":0}
+{"source":"slow","seq":6,"t":1762430401.25,"type":"flow","link":"k","t0":1762430401.0,"items":0,"dropped":0,"coalesced":1}

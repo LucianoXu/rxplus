@@ -1,0 +1,2 @@
+{"source":"bad","seq":0,"t":1762430400.0,"type":"add","elements":[{"id":"x","label":"X"}]}
+{"source":"bad","seq":0,"t":1762430400.01,"type":"snapshot","protocol":"reacting/1","elements":[{"id":"a","label":"A"}],"links":[]}

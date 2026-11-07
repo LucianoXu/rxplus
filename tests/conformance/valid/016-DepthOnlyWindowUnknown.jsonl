@@ -1,0 +1,4 @@
+{"source":"s","seq":0,"t":100.0,"type":"snapshot","protocol":"reacting/1","elements":[{"id":"a","label":"A"}],"links":[]}
+{"source":"s","seq":1,"t":100.2,"type":"depth","id":"a","value":3}
+{"source":"s","seq":2,"t":100.4,"type":"depth","id":"a","value":2}
+{"source":"s","seq":3,"t":100.6,"type":"depth","id":"a","value":0}

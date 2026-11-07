@@ -1,0 +1,39 @@
+{
+  "state": {
+    "sources": {
+      "fwd": {
+        "backlog": {},
+        "elements": [
+          {
+            "id": "w",
+            "label": "Worker"
+          }
+        ],
+        "ended": [
+          {
+            "id": "w",
+            "label": "inner",
+            "span": "c",
+            "status": "ok",
+            "t0": 1762430400.3,
+            "t1": 1762430400.71
+          }
+        ],
+        "label": "Relayed",
+        "links": [],
+        "lost": 6,
+        "spans": [
+          {
+            "id": "w",
+            "label": "child",
+            "parent": "c",
+            "span": "e",
+            "t0": 1762430400.51
+          }
+        ]
+      }
+    }
+  },
+  "valid": true,
+  "violations": []
+}

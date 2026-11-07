@@ -1,0 +1,2 @@
+{"source":"bad","seq":0,"t":1762430400.0,"type":"snapshot","protocol":"reacting/1","elements":[{"id":"a","label":"A"},{"id":"b","label":"B"}],"links":[{"id":"l","from":"a","to":"b","kind":"data"}]}
+{"source":"bad","seq":1,"t":1762430400.01,"type":"add","elements":[{"id":"c","label":"C","parent":"d"},{"id":"d","label":"D"}]}

@@ -1,0 +1,77 @@
+{
+  "state": {
+    "sources": {
+      "svc": {
+        "backlog": {},
+        "elements": [
+          {
+            "id": "g",
+            "label": "Group"
+          },
+          {
+            "id": "g.a",
+            "label": "A",
+            "parent": "g"
+          },
+          {
+            "id": "g.b",
+            "kind": "operator",
+            "label": "解析器",
+            "parent": "g"
+          },
+          {
+            "id": "h",
+            "label": "H",
+            "parent": "g.a"
+          },
+          {
+            "id": "in",
+            "kind": "stream",
+            "label": "Input"
+          },
+          {
+            "id": "solo",
+            "label": "Solo"
+          }
+        ],
+        "ended": [],
+        "links": [
+          {
+            "from": "in",
+            "id": "l1",
+            "kind": "data",
+            "to": "g.a"
+          },
+          {
+            "from": "g.a",
+            "id": "l2",
+            "kind": "data",
+            "to": "g.b"
+          },
+          {
+            "from": "g.b",
+            "id": "l3",
+            "kind": "call",
+            "to": "g.b"
+          },
+          {
+            "from": "g.a",
+            "id": "l4",
+            "kind": "data",
+            "to": "g.b"
+          },
+          {
+            "from": "g.b",
+            "id": "l5",
+            "kind": "data",
+            "to": "in"
+          }
+        ],
+        "lost": 0,
+        "spans": []
+      }
+    }
+  },
+  "valid": true,
+  "violations": []
+}

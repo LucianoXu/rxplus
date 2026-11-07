@@ -1,0 +1,70 @@
+{
+  "state": {
+    "sources": {
+      "demo": {
+        "backlog": {},
+        "elements": [
+          {
+            "id": "db",
+            "kind": "service",
+            "label": "Database"
+          },
+          {
+            "id": "input",
+            "kind": "stream",
+            "label": "Input"
+          },
+          {
+            "id": "parser",
+            "kind": "operator",
+            "label": "Parser"
+          },
+          {
+            "id": "parser.in",
+            "label": "in",
+            "parent": "parser"
+          }
+        ],
+        "ended": [
+          {
+            "id": "db",
+            "label": "insert",
+            "parent": "s1",
+            "span": "s2",
+            "status": "ok",
+            "t0": 1762430400.13,
+            "t1": 1762430400.21
+          },
+          {
+            "error": "timeout",
+            "id": "parser",
+            "label": "batch",
+            "span": "s1",
+            "status": "error",
+            "t0": 1762430400.12,
+            "t1": 1762430401.6
+          }
+        ],
+        "label": "Demo pipeline",
+        "links": [
+          {
+            "from": "input",
+            "id": "l1",
+            "kind": "data",
+            "to": "parser.in"
+          },
+          {
+            "from": "parser",
+            "id": "l2",
+            "kind": "call",
+            "to": "db"
+          }
+        ],
+        "lost": 33,
+        "spans": []
+      }
+    }
+  },
+  "valid": true,
+  "violations": []
+}

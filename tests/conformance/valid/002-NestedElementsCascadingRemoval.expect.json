@@ -1,0 +1,66 @@
+{
+  "state": {
+    "sources": {
+      "app": {
+        "backlog": {},
+        "elements": [
+          {
+            "id": "sink",
+            "label": "Sink"
+          },
+          {
+            "id": "src",
+            "label": "Source"
+          }
+        ],
+        "ended": [
+          {
+            "id": "pipe.stage1.op",
+            "label": "map batch",
+            "span": "sp1",
+            "status": "error",
+            "t0": 1762430400.02,
+            "t1": 1762430400.15
+          },
+          {
+            "id": "pipe",
+            "label": "run",
+            "parent": "sp2",
+            "span": "aa",
+            "status": "error",
+            "t0": 1762430400.05,
+            "t1": 1762430400.25
+          },
+          {
+            "id": "pipe.stage2",
+            "label": "stage work",
+            "span": "zz",
+            "status": "error",
+            "t0": 1762430400.04,
+            "t1": 1762430400.25
+          }
+        ],
+        "label": "Nested pipeline",
+        "links": [
+          {
+            "from": "sink",
+            "id": "d",
+            "kind": "call",
+            "to": "sink"
+          }
+        ],
+        "lost": 0,
+        "spans": [
+          {
+            "id": "sink",
+            "label": "write",
+            "span": "sp2",
+            "t0": 1762430400.03
+          }
+        ]
+      }
+    }
+  },
+  "valid": true,
+  "violations": []
+}
