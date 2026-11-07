@@ -53,7 +53,7 @@ is in the last column.
 | an inbound peer that reconnected kept its connection id (path-keyed) | a reconnect is a new socket: `on_disconnection(old id)`, then `on_connection` with a new id | key your state by `peer_node_id` if it must survive reconnects | B |
 | `on_disconnection` for inbound connections | fires only for inbound connections that reached READY (it pairs with `on_connection`); always for outbound ones | — | B |
 | an outbound connection whose client exhausted its retries stayed `CONNECTING` | closed: `CLOSED`, removed, `on_disconnection` | — | B |
-| data frames arriving before READY were dropped | kept (up to 1024 per connection) and delivered after `on_connection` (a peer's offline buffer reaches a new socket ahead of its HELLO) | — | B |
+| a reconnecting outbound connection queued its HELLO behind the offline buffer, and the peer dropped that buffer | HELLO goes first; data between the peer's HELLO and READY is kept (`handshake_buffer=1024` frames, `handshake_buffer_bytes=1 MiB`; over either the connection closes) and delivered after `on_connection`; data before HELLO is still dropped | — | B |
 | `OverflowStrategy` defined in `gateway.stream` | defined in `gateway.overflow` (still exported by `rxplus.gateway`) | import from `rxplus.gateway` | B |
 | — | `RxWSServer.received` (values with their `connection_id`), `send_to(connection_id, value)`, `close_connection(connection_id)` | optional | B |
 

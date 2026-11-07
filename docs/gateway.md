@@ -112,9 +112,12 @@ socket that closes before its handshake completes emits neither. An outbound con
 `on_disconnection` (its id was returned by `connect()`), including one whose client exhausted
 `retry_policy.max_retries` (0.1 left it `CONNECTING` forever).
 
-Data frames that arrive before the handshake completes (a peer's offline buffer reaches the new socket
-ahead of its HELLO) are kept, up to 1024 per connection, and delivered to `sink` in order right after
-`on_connection`. 0.1 dropped them.
+An outbound connection sends its HELLO first on every socket, ahead of its offline buffer (the client's
+`greeting`). The receiving side drops data frames that arrive before the peer's HELLO, as in 0.1. Data
+frames between the peer's HELLO and READY (the buffer a reconnecting peer flushes) are kept and delivered
+to `sink` in order right after `on_connection`. They are bounded by `handshake_buffer` (1024 frames)
+and `handshake_buffer_bytes` (1 MiB of wire size) per connection; over either bound the connection is
+closed.
 
 #### HelloPayload Dataclass
 

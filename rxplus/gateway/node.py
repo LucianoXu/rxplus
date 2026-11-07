@@ -59,7 +59,9 @@ from .framing import Framing, TaggedFrame
 
 F = TypeVar("F", bound=Framing)
 
-_EARLY_LIMIT = 1024  # data frames kept per connection before READY
+# Data frames a connection keeps between the peer's HELLO and READY.
+_HANDSHAKE_BUFFER = 1024
+_HANDSHAKE_BUFFER_BYTES = 1 << 20
 
 
 class GatewayNode[F: Framing]:
@@ -115,6 +117,8 @@ class GatewayNode[F: Framing]:
         tracer_provider: TracerProvider | None = None,
         logger_provider: LoggerProvider | None = None,
         name: str | None = None,
+        handshake_buffer: int = _HANDSHAKE_BUFFER,
+        handshake_buffer_bytes: int = _HANDSHAKE_BUFFER_BYTES,
     ):
         """Initialize gateway node.
 
@@ -132,7 +136,19 @@ class GatewayNode[F: Framing]:
             logger_provider: Optional OTel LoggerProvider for log emission.
                 If None, the node logs nothing (0.1: console output).
             name: Optional node name for logging (auto-generated if not provided)
+            handshake_buffer: Data frames a connection keeps between the
+                peer's HELLO and READY (a reconnecting peer's offline buffer
+                follows its HELLO), delivered after ``on_connection``.
+                Frames before HELLO are dropped.
+            handshake_buffer_bytes: Their total wire size. Over either limit
+                the socket is closed.
         """
+        if handshake_buffer < 1 or handshake_buffer_bytes < 1:
+            raise ValueError(
+                "handshake_buffer and handshake_buffer_bytes must be at least 1"
+            )
+        self._handshake_buffer = handshake_buffer
+        self._handshake_buffer_bytes = handshake_buffer_bytes
         self.node_id = node_id or uuid.uuid4().bytes
         if len(self.node_id) != 16:
             raise ValueError(f"node_id must be 16 bytes, got {len(self.node_id)}")
@@ -261,6 +277,7 @@ class GatewayNode[F: Framing]:
                 self._inbound.pop(conn._server_connection, None)
             notify = conn.direction == "outbound" or conn._was_ready
             conn._early.clear()
+            conn._early_bytes = 0
         conn._disposables.dispose()
         self._otel_logger.info(
             f"Connection closed ({reason}): {conn.conn_id.hex()[:16]}"
@@ -303,7 +320,7 @@ class GatewayNode[F: Framing]:
             return self._handle_hello_ack(conn, typed_frame)
 
         if conn.state != GatewayConnectionState.READY:
-            self._hold_early(conn, typed_frame)
+            self._hold_early(conn, typed_frame, len(data))
             return None
 
         return TaggedFrame(
@@ -312,19 +329,38 @@ class GatewayNode[F: Framing]:
             peer_node_id=conn.peer_node_id,
         )
 
-    def _hold_early(self, conn: Connection, frame: F) -> None:
-        """Keep a data frame that arrived before READY (bounded); 0.1 dropped
-        it. A peer's offline buffer reaches a new socket ahead of its HELLO."""
+    def _hold_early(self, conn: Connection, frame: F, size: int) -> None:
+        """A data frame before READY. Between the peer's HELLO and READY it is
+        kept, bounded in frames and bytes (a reconnecting peer flushes its
+        offline buffer right after its HELLO); over a bound the socket is
+        closed. Before HELLO it is dropped, as in 0.1."""
         with self._connections_lock:
             if (
-                conn.state == GatewayConnectionState.HANDSHAKING
-                and len(conn._early) < _EARLY_LIMIT
+                conn.state != GatewayConnectionState.HANDSHAKING
+                or not conn._hello_received
+            ):
+                overflow = False
+            elif (
+                len(conn._early) < self._handshake_buffer
+                and conn._early_bytes + size <= self._handshake_buffer_bytes
             ):
                 conn._early.append(frame)
+                conn._early_bytes += size
                 return
+            else:
+                overflow = True
+                held, held_bytes = len(conn._early), conn._early_bytes
+        if not overflow:
+            self._otel_logger.warning(
+                f"Dropped a frame on non-ready connection: {conn.conn_id.hex()[:16]}"
+            )
+            return
         self._otel_logger.warning(
-            f"Dropped a frame on non-ready connection: {conn.conn_id.hex()[:16]}"
+            f"Handshake buffer full on {conn.conn_id.hex()[:16]}"
+            f" ({held} frames, {held_bytes} bytes held, next {size} bytes):"
+            " closing the connection"
         )
+        self.disconnect(conn.conn_id)
 
     def _send_frame(self, conn: Connection, frame: F | Framing) -> bool:
         """Encode and send one frame on a connection, inbound or outbound."""
@@ -412,6 +448,7 @@ class GatewayNode[F: Framing]:
                 conn._was_ready = True
                 should_emit = True
                 early, conn._early = conn._early, []
+                conn._early_bytes = 0
                 peer = conn.peer_node_id.hex()[:16] if conn.peer_node_id else "unknown"
                 self._otel_logger.info(
                     f"Handshake complete: {conn.conn_id.hex()[:16]} ↔ {peer}"
@@ -465,6 +502,9 @@ class GatewayNode[F: Framing]:
             ping_timeout=self._ping_timeout,
             name=f"{self._name}:client:{conn_id.hex()[:8]}",
             buffer_while_disconnected=True,  # Buffer messages during reconnect
+            # HELLO first on every socket, ahead of the offline buffer: the
+            # peer drops data that arrives before HELLO.
+            greeting=self._encoded_hello,
         )
 
         conn._ws_client = ws_client
@@ -549,7 +589,8 @@ class GatewayNode[F: Framing]:
             self._otel_logger.info(
                 f"WS connected, starting handshake for {conn_id_short}"
             )
-            self._send_hello_to_client(conn)
+            # Our HELLO is the client's greeting: the first frame on the
+            # socket (see connect()).
             self._check_handshake_complete(conn)
 
         elif ws_state == WSConnectionState.DISCONNECTED:
@@ -561,6 +602,8 @@ class GatewayNode[F: Framing]:
                 conn._ws_up = False
                 conn._hello_received = False
                 conn._hello_ack_received = False
+                conn._early.clear()  # held on the socket that dropped
+                conn._early_bytes = 0
                 if conn.state == GatewayConnectionState.READY:
                     self._otel_logger.info(
                         f"WS disconnected, connection {conn_id_short} no longer READY"
@@ -595,7 +638,7 @@ class GatewayNode[F: Framing]:
             return self._handle_hello_ack(conn, typed_frame)
 
         if conn.state != GatewayConnectionState.READY:
-            self._hold_early(conn, typed_frame)
+            self._hold_early(conn, typed_frame, len(data))
             return None
 
         return TaggedFrame(
@@ -604,14 +647,9 @@ class GatewayNode[F: Framing]:
             peer_node_id=conn.peer_node_id,
         )
 
-    def _send_hello_to_client(self, conn: Connection):
-        """Send HELLO frame via outbound client."""
-        if conn._ws_client is None:
-            return
-
-        hello_frame = self._framing_cls.create_hello(self.node_id)
-        conn._ws_client.on_next(self._framing_cls.encode(hello_frame))
-        self._otel_logger.debug(f"Sent HELLO to {conn.remote_addr}")
+    def _encoded_hello(self) -> bytes:
+        """Our HELLO on the wire (an outbound client's greeting)."""
+        return self._framing_cls.encode(self._framing_cls.create_hello(self.node_id))
 
     def disconnect(self, conn_id: bytes) -> bool:
         """Close a specific connection.

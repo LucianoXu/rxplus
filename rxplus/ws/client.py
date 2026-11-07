@@ -7,6 +7,7 @@ remote server on a background thread with automatic reconnection.
 import asyncio
 import random
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
@@ -160,6 +161,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
         send_queue: int | None = 1024,
         overflow: SendOverflow = "drop_old",
         send_queue_bytes: int | None = None,
+        greeting: Callable[[], str | bytes] | None = None,
     ):
         """Create a reconnecting WebSocket client.
 
@@ -177,6 +179,10 @@ class RxWSClient(Subject, OTelLoggingMixin):
             logger_provider: Optional OTel LoggerProvider for log emission.
             open_timeout: Maximum time in seconds for one connection attempt
                 (TCP connect plus handshake). ``None`` waits indefinitely.
+            greeting: Called on every new connection; the wire frame it
+                returns (not encoded by ``datatype``) is sent first, ahead of
+                any queued frame (e.g. a protocol HELLO ahead of the offline
+                buffer).
         """
         super().__init__()
         self.host = config.host
@@ -215,6 +221,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
         self.ping_timeout = ping_timeout
         self._open_timeout = open_timeout
         self._buffer_while_disconnected = buffer_while_disconnected
+        self._greeting = greeting
 
         # Outbound frames; created in _run_loop, used on the loop thread only
         self.queue: SendQueue | None = None
@@ -617,6 +624,18 @@ class RxWSClient(Subject, OTelLoggingMixin):
             assert self.queue is not None, (
                 "Queue must be initialized before _client_sender"
             )
+            if self._greeting is not None:
+                # Ahead of every queued frame; never re-queued (the next
+                # connection sends its own).
+                try:
+                    await websocket.send(self._greeting())
+                except (OSError, websockets.exceptions.ConnectionClosed) as e:
+                    self._log(
+                        f"Failed to greet server {remote_desc}:"
+                        f" {get_short_error_info(e)}",
+                        "WARN",
+                    )
+                    return
             while True:
                 try:
                     frame = await self.queue.get()  # encoded in on_next

@@ -209,24 +209,26 @@ def test_frames_buffered_across_an_outbound_reconnect_arrive():
         def drop_then_send() -> None:
             # On the client's loop: the socket dies, and before the client
             # notices, the application sends; these frames are buffered
-            # while offline and flushed into the next socket.
+            # while offline and flushed into the next socket, after HELLO.
             client.ws.transport.abort()
-            for i in range(50):
+            for i in range(200):
                 if a.send_to(cid, _Frame(9, str(i).encode())):
                     sent.append(i)
             done.set()
 
         client._loop.call_soon_threadsafe(drop_then_send)
         assert done.wait(5.0)
-        assert sent == list(range(50))
-        assert _wait_for(lambda: len(got) == 50, timeout=10.0), len(got)
-        assert got == [str(i).encode() for i in range(50)]  # in order
+        assert sent == list(range(200))
+        assert _wait_for(lambda: len(got) == 200, timeout=10.0), len(got)
+        assert got == [str(i).encode() for i in range(200)]  # in order
     finally:
         a.close()
         b.close()
 
 
-def test_data_ahead_of_hello_is_delivered_after_on_connection():
+def test_data_between_hello_and_ready_is_delivered_after_on_connection():
+    """A reconnecting peer flushes its offline buffer right after its HELLO;
+    data before HELLO is dropped, as in 0.1 (review of #26)."""
     import asyncio
 
     import websockets
@@ -239,8 +241,9 @@ def test_data_ahead_of_hello_is_delivered_after_on_connection():
 
         async def peer() -> None:
             async with websockets.connect(f"ws://127.0.0.1:{b.port}/p") as ws:
-                await ws.send(_Frame.encode(_Frame(9, b"early")))
+                await ws.send(_Frame.encode(_Frame(9, b"before hello")))
                 await ws.send(_Frame.encode(_Frame.create_hello(b"\x01" * 16)))
+                await ws.send(_Frame.encode(_Frame(9, b"early")))
                 assert _Frame.decode(await ws.recv()).is_hello()
                 assert _Frame.decode(await ws.recv()).is_hello_ack()
                 await ws.send(_Frame.encode(_Frame.create_hello_ack(b"\x01" * 16)))
@@ -249,7 +252,69 @@ def test_data_ahead_of_hello_is_delivered_after_on_connection():
 
         asyncio.run(peer())
         assert _wait_for(lambda: len(events) == 3)
+        time.sleep(0.1)
         assert events == ["connection", "early", "late"]
+    finally:
+        b.close()
+
+
+def test_a_peer_that_never_sends_hello_pins_no_memory():
+    """Review of #26 (p8): 1024 frames were held per socket before READY,
+    with no byte bound, even without a HELLO."""
+    import asyncio
+
+    import websockets
+
+    b = _node()
+    try:
+
+        async def peer() -> int:
+            async with websockets.connect(f"ws://127.0.0.1:{b.port}/x") as ws:
+                for _ in range(300):
+                    await ws.send(_Frame.encode(_Frame(9, b"\0" * 100_000)))
+                await asyncio.sleep(0.5)
+                return sum(len(c._early) for c in list(b._connections.values()))
+
+        assert asyncio.run(peer()) == 0
+    finally:
+        b.close()
+
+
+def test_the_handshake_buffer_is_bounded_in_bytes_and_closes_the_socket():
+    import asyncio
+
+    import websockets
+
+    _, quiet = configure_telemetry()
+    b = GatewayNode(
+        "127.0.0.1",
+        _free_port(),
+        framing_cls=_Frame,
+        logger_provider=quiet,
+        handshake_buffer_bytes=10_000,
+    )
+    assert _wait_for(lambda: _listening(b.port))
+    peaks: list[int] = []
+    try:
+
+        async def peer() -> bool:
+            async with websockets.connect(f"ws://127.0.0.1:{b.port}/x") as ws:
+                await ws.send(_Frame.encode(_Frame.create_hello(b"\x02" * 16)))
+                try:
+                    for _ in range(50):  # never HELLO_ACK: never READY
+                        await ws.send(_Frame.encode(_Frame(9, b"\0" * 999)))
+                        peaks.append(
+                            sum(c._early_bytes for c in list(b._connections.values()))
+                        )
+                        await asyncio.sleep(0.005)
+                    await asyncio.wait_for(ws.wait_closed(), 5.0)
+                except websockets.ConnectionClosed:
+                    pass
+                return ws.state is websockets.protocol.State.CLOSED
+
+        assert asyncio.run(peer())  # B closed the socket
+        assert max(peaks) <= 10_000
+        assert _wait_for(lambda: not b.connections)
     finally:
         b.close()
 
