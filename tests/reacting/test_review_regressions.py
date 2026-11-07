@@ -22,11 +22,11 @@ from rxplus.reacting import (
     WebSocketSink,
 )
 from rxplus.reacting._websocket import NotLoopbackError, WSConnection
-from rxplus.reacting._window import Accumulator
+from rxplus.reacting._window import SHARDS, Accumulator, Shard, Totals
 from tests.reacting.helpers import by_type, conform, make
 from tests.reacting.rawws import RawServer
 
-SURROGATE = os.fsdecode(b"cam\xff")
+SURROGATE = os.fsdecode(b"cam\xff")  # a non-UTF-8 file name: a lone surrogate
 
 
 class _Shared:
@@ -34,11 +34,25 @@ class _Shared:
 
     def __init__(self) -> None:
         self.closed = 0
-        self.windows: dict = {}
+        self.shards = tuple(Shard() for _ in range(SHARDS))
         self.epoch = 0
         self.pending = 0
         self.cap = 100_000
-        self.saturated = False  # a non-UTF-8 file name: a lone surrogate
+        self.saturated = False
+
+
+def _windows(st) -> dict:
+    """``{k: {ident: Totals}}`` across the shards (a copy, under their locks)."""
+    out: dict = {}
+    for shard in st.shards:
+        with shard.lock:
+            for k, w in shard.windows.items():
+                out.setdefault(k, {}).update(w)
+    return out
+
+
+def _totals(st) -> int:
+    return sum(len(w) for w in _windows(st).values())
 
 
 def _wait_for(cond, timeout: float = 5.0) -> bool:
@@ -332,7 +346,7 @@ def test_stalled_sink_memory_is_bounded():
         for link in links:
             link.deliver()
         time.sleep(0.001)
-    pending = len(r._st.windows)  # open windows holding counts
+    pending = len([w for w in _windows(r._st).values() if w])  # windows with counts
     queued = len(r._q) + r._inflight
     latencies = []
     for _ in range(50):
@@ -442,7 +456,7 @@ def test_a_stale_session_call_does_not_wipe_the_current_session():
     acc.record(2, 0, items=5)
     acc.record(1, 0, items=1)  # read session 1 just before session 2 began
     assert acc.next_window() == 0
-    assert shared.windows[0]["l1"].items == 5
+    assert _windows(shared)[0]["l1"].items == 5
 
 
 def test_file_sink_is_flushed_at_exit(tmp_path):
@@ -504,8 +518,6 @@ def test_a_lagging_clock_turns_old_windows_into_loss(tmp_path):
 def test_late_record_racing_the_clock_is_not_stranded(tmp_path):
     # N4: counts that land in a window the clock already closed (the caller
     # read `closed` just before it advanced) are reported with the next one.
-    from rxplus.reacting._window import Totals
-
     r, sink, clock = make(window=0.1)
     a, b, c = r.element("A"), r.element("B"), r.element("C")
     l1, l2 = r.link(a, b), r.link(b, c)
@@ -516,7 +528,10 @@ def test_late_record_racing_the_clock_is_not_stranded(tmp_path):
     r.poll()  # window 0 closed
     assert r._st.closed >= 1
     # What such a late record leaves behind: window 0 again, for l1.
-    r._st.windows.setdefault(0, {})[l1.id] = Totals(items=5)
+    shard = l1._acc._shard
+    with shard.lock:
+        shard.windows.setdefault(0, {})[l1.id] = Totals(items=5)
+        shard.count += 1
     clock.advance(0.1)
     r.poll()
     reported = sum(
@@ -538,7 +553,7 @@ def test_removed_handles_leave_the_busy_set():
         r.poll()
     clock.advance(0.2)
     r.poll()
-    assert not r._st.windows and len(r._watched) <= 1
+    assert not _totals(r._st) and len(r._watched) <= 1
 
 
 def test_queue_of_one_never_holds_two_unwritten(tmp_path):
@@ -630,7 +645,8 @@ def test_close_folds_windows_left_behind_by_a_late_record():
     acc.start_session(1)
     shared.closed = 2  # the clock already closed windows 0 and 1 ...
     acc.record(1, 0, items=3)  # ... a caller that read the clock before
-    assert list(shared.windows) == [2] and shared.windows[2]["l1"].items == 3
+    windows = _windows(shared)
+    assert list(windows) == [2] and windows[2]["l1"].items == 3
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
@@ -756,10 +772,117 @@ def test_the_cap_on_window_totals_is_hard_and_becomes_loss(tmp_path):
             link.deliver()
         clock.advance(0.01)  # same window: 40 totals...
         clock.advance(0.1)  # ... then the next window: 40 more
-    assert sum(len(w) for w in r._st.windows.values()) <= 50
+    assert _totals(r._st) <= 50
     assert r._st.saturated
     r.poll()
-    assert not r._st.saturated and not r._st.windows
+    assert not r._st.saturated and not _totals(r._st)
     sigs = sink.signals()
     assert any(s["type"] == "snapshot" and s["seq"] > 0 for s in sigs)
     conform(sink, tmp_path)
+
+
+def test_the_clock_waits_for_a_caller_write_in_progress(tmp_path):
+    # Re-review 1fc2606, B: a caller wrote into a window dict the clock had
+    # just popped, and the count was lost. The clock now moves a window out
+    # under the lock the caller holds for its whole write.
+    r, sink, clock = make(window=0.1)
+    a, b = r.element("A"), r.element("B")
+    link = r.link(a, b)
+    r.poll()
+    clock.advance(0.05)
+    acc = link._acc
+    shard = acc._shard
+    shard.lock.acquire()  # a caller in record(), window 0, past reading `closed`
+    try:
+        clock.advance(0.1)
+        closer = threading.Thread(target=r.poll)
+        closer.start()
+        time.sleep(0.2)
+        assert closer.is_alive()  # the clock waits for the write to finish
+        shard.windows.setdefault(0, {})[link.id] = Totals(items=5)
+        shard.count += 1
+    finally:
+        shard.lock.release()
+    closer.join(5.0)
+    for _ in range(3):
+        clock.advance(0.1)
+        r.poll()
+    r.close()
+    flows = by_type(sink.signals(), "flow")
+    assert sum(f["items"] for f in flows if f["link"] == link.id) == 5
+    conform(sink, tmp_path)
+
+
+def test_callers_creating_windows_never_break_the_clock(tmp_path):
+    # Re-review 1fc2606, A: callers added window keys while the clock thread
+    # iterated them ("dictionary changed size during iteration") and the
+    # clock thread died: reporting stopped for good.
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        sink = MemorySink()
+        r = Reporter("race", sink, window=0.001, queue=10**7)
+        els = [r.element(f"E{i}") for i in range(101)]
+        links = [r.link(els[i], els[i + 1]) for i in range(100)]
+        assert _wait_for(lambda: r.live)
+        stop = time.monotonic() + 1.5
+
+        def work(i: int) -> None:
+            n = 0
+            while time.monotonic() < stop:
+                links[(n * 7 + i) % len(links)].deliver()
+                n += 1
+
+        threads = [threading.Thread(target=work, args=(i,)) for i in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert r.clock_errors == 0
+        assert r._threads[0].is_alive()
+        r.close(timeout=10.0)
+    finally:
+        sys.setswitchinterval(old)
+    conform(sink, tmp_path, window=0.001)
+
+
+def test_the_clock_thread_survives_an_exception_in_a_step(tmp_path, caplog):
+    # The clock thread must never die silently: the step is logged, counted,
+    # and the reporter resynchronises with a new session.
+    sink = MemorySink()
+    r = Reporter("boom", sink, window=0.05)
+    a, b = r.element("A"), r.element("B")
+    link = r.link(a, b)
+    assert _wait_for(lambda: r.live)
+    real = r._close_one
+    armed = [True]
+
+    def close_one(k: int) -> bool:
+        if armed[0]:
+            armed[0] = False
+            raise RuntimeError("injected")
+        return real(k)
+
+    r._close_one = close_one  # type: ignore[method-assign]
+    with caplog.at_level("ERROR", logger="rxplus.reacting"):
+        link.deliver()
+        assert _wait_for(lambda: r.clock_errors == 1)
+        assert _wait_for(  # a new session
+            lambda: sum(s["seq"] == 0 for s in sink.signals()) == 2 and r.live
+        )
+        assert r._threads[0].is_alive()
+        link.deliver(3)
+        time.sleep(0.15)
+    r.close(timeout=10.0)
+    assert any(
+        rec.exc_info and str(rec.exc_info[1]) == "injected" for rec in caplog.records
+    )
+    sigs = sink.signals()
+    openings = [
+        i for i, s in enumerate(sigs) if s["type"] == "snapshot" and s["seq"] == 0
+    ]
+    assert len(openings) == 2
+    after = sigs[openings[1] :]
+    assert {e["label"] for e in after[0]["elements"]} == {"A", "B"}
+    assert sum(f["items"] for f in after if f["type"] == "flow") == 3
+    conform(sink, tmp_path, window=0.05)

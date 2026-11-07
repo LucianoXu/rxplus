@@ -22,6 +22,7 @@ one step of each, for deterministic tests.
 """
 
 import atexit
+import logging
 import os
 import threading
 import time
@@ -50,6 +51,8 @@ _MAX_IDLE = 0.05  # longest sleep of the clock thread, seconds
 _MAX_LAG = 64  # windows the clock thread may fall behind before Loss
 _MAX_PENDING = 100_000  # window totals it may hold (lag x busy) before Loss
 _CHECK_EVERY = 100  # accumulators closed between two checks of the limit
+
+_log = logging.getLogger("rxplus.reacting")
 
 type _Sampler = Callable[[], int]
 
@@ -125,6 +128,7 @@ class Reporter:
         self._pending_events: deque[_Event] = deque()  # events of this step
         self._current: _Event | None = None  # the event being processed
         self._silent = False  # _emit creates (seq) but does not queue: Loss
+        self._clock_errors = 0  # clock steps that raised (see _step)
 
         # The bounded queue: (line, opens the session, epoch), under _qlock.
         self._qlock = threading.Lock()
@@ -135,6 +139,9 @@ class Reporter:
         self._clock_done = False
 
         self._connected = False  # writer only
+        # Set once the writer's first open() returned: close() waits for it
+        # (within its timeout), so a short-lived process still records.
+        self._first_open = threading.Event()
         self._threads: list[threading.Thread] = []
         if timer:
             for target, name in (
@@ -161,6 +168,12 @@ class Reporter:
     def live(self) -> bool:
         """Whether a session is open on the sink."""
         return self._st.live
+
+    @property
+    def clock_errors(self) -> int:
+        """Clock steps that raised. Each is logged (``rxplus.reacting``) and
+        recovered from with a new session; the clock thread keeps running."""
+        return self._clock_errors
 
     def element(
         self, label: str, *, kind: str | None = None, parent: Element | None = None
@@ -259,6 +272,7 @@ class Reporter:
                 return max(deadline - time.monotonic(), 0.0)
 
             clock, writer = self._threads
+            self._first_open.wait(left())
             with self._lock:
                 self._closing = True
                 self._cond.notify_all()
@@ -374,6 +388,54 @@ class Reporter:
             self._qcond.notify_all()
 
     def _step(self) -> None:
+        """One clock step; it never raises, so the clock thread never dies.
+
+        A step that raises is a bug: it is logged and counted, the mirror is
+        rebuilt from the registry and the session ends; the next step begins
+        a new one (spec: a new session may begin at any time).
+        """
+        try:
+            self._run_step()
+        except Exception as error:
+            try:
+                self._recover(error)
+            except Exception:  # pragma: no cover - last resort
+                _log.exception("rxplus.reacting: recovery of the clock failed")
+
+    def _recover(self, error: Exception) -> None:
+        self._clock_errors += 1
+        n = self._clock_errors
+        if n & (n - 1) == 0:  # the 1st, 2nd, 4th, ...: a loop never floods the log
+            _log.error(
+                "rxplus.reacting: clock step of source %r failed (%d so far);"
+                " starting a new session",
+                self._source,
+                n,
+                exc_info=error,
+            )
+        self._pending_events.clear()
+        self._current = None
+        self._silent = False
+        with self._lock:
+            self._events = []  # the registry below already includes them
+            now = self._st.now()
+            reg, old = self._registry, self._mirror
+            mirror = Graph()
+            mirror.elements = dict(reg.elements)
+            mirror.links = dict(reg.links)
+            for sid, rec in reg.spans.items():
+                prev = old.spans.get(sid)
+                parent = rec.parent if rec.parent in reg.spans else None
+                t0 = prev.t0 if prev is not None else now
+                mirror.spans[sid] = SpanRec(sid, rec.element, rec.label, parent, t0)
+            for ident in [i for i in self._accs if not reg.exists(i)]:
+                del self._accs[ident]
+        self._mirror = mirror
+        self._watched = set()
+        if self._session_open:
+            self._end_session()
+
+    def _run_step(self) -> None:
         """Apply the callers' events, close ended windows, follow the sink."""
         with self._lock:
             events, self._events = self._events, []
@@ -402,7 +464,8 @@ class Reporter:
             st.session += 1
             st.T = t
             st.closed = 0
-            st.windows = {}  # the previous session's counts are dropped whole
+            for shard in st.shards:
+                shard.clear()  # the previous session's counts are dropped whole
             st.pending = 0
             st.saturated = False
             for acc in self._accs.values():
@@ -500,7 +563,7 @@ class Reporter:
                     return
             if not self._watched:
                 # Nothing to report until the next window with counts.
-                busy = [i for i in st.windows if i < end]
+                busy = [j for s in st.shards if (j := s.first(end)) is not None]
                 nxt = min(busy, default=end)
                 if nxt >= end:
                     break
@@ -511,10 +574,10 @@ class Reporter:
             k += 1
 
     def _pending(self) -> int:
-        """Window totals held now (exact, O(open windows)); also corrects the
-        hot path's approximate count."""
+        """Window totals held now (O(shards)); also corrects the hot path's
+        approximate count."""
         st = self._st
-        n = sum(len(w) for w in list(st.windows.values()))
+        n = sum(s.count for s in st.shards)
         st.pending = n
         return n
 
@@ -535,12 +598,10 @@ class Reporter:
             t_now = st.now()  # every later event has t >= t_now
             end = st.window_of(t_now)
             st.closed = max(end, st.closed)  # late events count in `end`
-            old, st.windows = st.windows, {}
+            lost = sum(s.clear() for s in st.shards)  # O(shards), not O(totals)
             st.pending = 0
             st.saturated = False
             st.epoch += 1
-        lost = sum(len(w) for w in old.values())  # O(windows), not O(totals)
-        del old
         self._silent = True
         try:
             if self._current is not None:
@@ -567,16 +628,20 @@ class Reporter:
         t0 = st.T + k * st.w
         t = st.T + (k + 1) * st.w
         session = st.session
-        window = st.windows.pop(k, None) or {}
-        st.pending -= len(window)
-        # Counts a caller recorded into a window that was already closed
-        # (it read `closed` just before the clock advanced) count here (R3).
-        for j in [j for j in st.windows if j < k]:
-            late_window = st.windows.pop(j)
-            st.pending -= len(late_window)
-            for ident, late in late_window.items():
-                window.setdefault(ident, Totals()).merge(late)
-        later = [w for i, w in st.windows.items() if i > k]
+        # Moved out of each shard under its lock, processed outside: no
+        # caller writes into these dicts any more. A window below k (a
+        # caller read `closed` just before the clock advanced) counts here
+        # (R3).
+        window: dict[str, Totals] = {}
+        for shard in st.shards:
+            for part in shard.take(k):
+                st.pending -= len(part)
+                for ident, part_tot in part.items():
+                    held = window.get(ident)
+                    if held is None:
+                        window[ident] = part_tot
+                    else:
+                        held.merge(part_tot)
         for n, ident in enumerate(list(window.keys() | self._watched)):
             if st.session != session:
                 return True  # a Loss began a new session: these windows are gone
@@ -594,10 +659,9 @@ class Reporter:
                     sample = int(acc.sampler())
                 except Exception:
                     sample = None
+            tot = window.get(ident)
             with acc.lock():
-                tot = window.get(ident)
-                later_delta = sum(w[ident].delta for w in later if ident in w)
-                d = acc.depth(later_delta, sample)
+                d = acc.depth(acc.later_delta(), sample)
             if tot is not None:
                 if ident in self._mirror.links and (
                     tot.items or tot.dropped or tot.coalesced
@@ -746,7 +810,10 @@ class Reporter:
                         if self._closing:
                             return
                 first = False
-                self._try_open()
+                try:
+                    self._try_open()
+                finally:
+                    self._first_open.set()
                 continue
             if closing:
                 with self._qcond:

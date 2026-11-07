@@ -101,3 +101,27 @@ jobs:
 
       - name: Run basic tests
         run: pytest -v --tb=short --ignore=tests/test_audio.py --ignore=tests/test_graphic.py
+
+  test-free-threaded:
+    # rxplus.reacting is shared by many caller threads and two of its own:
+    # run it without the GIL, where races show up (review of #22).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.14t
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14t"
+
+      - name: Install basic package only
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run the reacting tests without the GIL
+        env:
+          PYTHON_GIL: "0"
+        run: |
+          python -c "import sys; assert not sys._is_gil_enabled()"
+          pytest -v --tb=short tests/reacting tests/conformance

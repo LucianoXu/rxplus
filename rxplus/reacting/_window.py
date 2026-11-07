@@ -1,19 +1,24 @@
 """Per-window counts of flow, latency and depth (standard library only).
 
-Window counts live in one structure shared by the reporter:
-``shared.windows[k][ident]`` is the :class:`Totals` of element or link
-``ident`` in window ``k`` of the session (window ``k`` is
-``[T + k*w, T + (k+1)*w)``). So:
+Window counts live in a fixed number of :class:`Shard` s shared by the
+reporter. Each element or link belongs to one shard (by its id);
+``shard.windows[k][ident]`` is the :class:`Totals` of ``ident`` in window
+``k`` of the session (window ``k`` is ``[T + k*w, T + (k+1)*w)``). So:
 
-- closing window ``k`` pops ``windows[k]``: its keys are exactly the busy
-  elements and links, no separate bookkeeping;
-- a Loss replaces ``windows`` by an empty dict in O(1); the old counts are
-  dropped as a whole;
-- the number of totals held is ``sum(len(d) for d in windows.values())``.
+- closing window ``k`` pops ``windows[k]`` of every shard: its keys are
+  exactly the busy elements and links, no separate bookkeeping;
+- a Loss replaces each shard's ``windows`` by an empty dict; the old counts
+  are dropped as a whole;
+- ``shard.count`` is the number of totals the shard holds.
+
+**Every access to a shard's ``windows`` holds the shard's lock**, the
+clock thread's too: callers create window keys, so iterating or popping
+without it races them. The clock thread moves a closed window out under
+the lock and processes it outside.
 
 One :class:`Accumulator` per element or link holds what outlives a window:
-the counted backlog and the depth state. Hot-path calls take only its lock,
-in O(1).
+the counted backlog and the depth state, under its shard's lock. Hot-path
+calls take only that lock, in O(1).
 """
 
 import threading
@@ -48,16 +53,60 @@ class Totals:
         self.delta += other.delta
 
 
+class Shard:
+    """Window totals of the elements and links whose id maps here."""
+
+    __slots__ = ("lock", "windows", "count")
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.windows: dict[int, dict[str, Totals]] = {}  # under `lock`
+        self.count = 0  # totals in `windows` (under `lock`)
+
+    def take(self, k: int) -> list[dict[str, Totals]]:
+        """Move out the totals of window ``k`` and of any window below it."""
+        with self.lock:
+            windows = self.windows
+            if not windows:
+                return []
+            out = []
+            w = windows.pop(k, None)
+            if w is not None:
+                out.append(w)
+            if windows and min(windows) < k:
+                for j in [j for j in windows if j < k]:
+                    out.append(windows.pop(j))
+            for w in out:
+                self.count -= len(w)
+            return out
+
+    def first(self, below: int) -> int | None:
+        """The lowest window below ``below`` holding totals, if any."""
+        with self.lock:
+            found = [j for j, w in self.windows.items() if j < below and w]
+        return min(found, default=None)
+
+    def clear(self) -> int:
+        """Drop every total (O(1)); return how many were held."""
+        with self.lock:
+            n, self.count = self.count, 0
+            self.windows = {}
+        return n
+
+
+SHARDS = 64  # shards per reporter: callers on distinct ids rarely contend
+
+
 class Shared(Protocol):
     """What accumulators share with their reporter.
 
     ``closed``: windows below it are closed (set by the clock thread before
-    it closes them). ``windows``: the open windows' totals. ``epoch``:
+    it closes them). ``shards``: the open windows' totals. ``epoch``:
     incremented by a Loss; the depth state of every accumulator resets.
     """
 
     closed: int
-    windows: dict[int, dict[str, Totals]]
+    shards: tuple[Shard, ...]
     epoch: int
     pending: int  # totals held (approximate: updated without a common lock)
     cap: int  # the hard limit on `pending`
@@ -78,6 +127,7 @@ class Accumulator:
     __slots__ = (
         "ident",
         "_lock",
+        "_shard",
         "_session",
         "_shared",
         "_backlog",
@@ -95,7 +145,9 @@ class Accumulator:
         capacity: int | None = None,
     ) -> None:
         self.ident = ident
-        self._lock = threading.Lock()
+        shards = shared.shards
+        self._shard = shards[hash(ident) % len(shards)]
+        self._lock = self._shard.lock
         self._session = -1  # no session: hot-path calls are ignored
         self._shared = shared
         self._backlog = 0  # counted backlog now
@@ -131,10 +183,11 @@ class Accumulator:
                 if self._backlog + delta < 0:
                     delta = -self._backlog  # clamp: entered before the session
                 self._backlog += delta  # the backlog is kept even at the cap
-            windows = shared.windows
+            shard = self._shard
+            windows = shard.windows  # under shard.lock (held: self._lock)
             window = windows.get(k)
             if window is None:
-                window = windows.setdefault(k, {})  # atomic on a dict
+                window = windows[k] = {}
             t = window.get(self.ident)
             if t is None:
                 # A new total: once per element/link per window, never per
@@ -145,7 +198,8 @@ class Accumulator:
                     shared.saturated = True
                     return
                 shared.pending += 1
-                t = window.setdefault(self.ident, Totals())
+                shard.count += 1
+                t = window[self.ident] = Totals()
             t.items += items
             if size is not None:
                 t.bytes += size
@@ -170,8 +224,15 @@ class Accumulator:
             self._epoch = self._shared.epoch
 
     def lock(self) -> threading.Lock:
-        """The lock under which the clock thread reads this id's totals."""
+        """The lock under which the clock thread reads this id's state (its
+        shard's lock)."""
         return self._lock
+
+    def later_delta(self) -> int:
+        """The backlog change recorded in the windows still held (caller
+        holds :meth:`lock`, after taking the window being closed)."""
+        ident = self.ident
+        return sum(w[ident].delta for w in self._shard.windows.values() if ident in w)
 
     def depth(self, later_delta: int, sample: int | None) -> Depth:
         """The depth due at a window end (caller holds :meth:`lock`).
@@ -200,9 +261,11 @@ class Accumulator:
 
     def pending(self) -> int:
         """Windows holding counts of this id."""
-        return sum(1 for w in list(self._shared.windows.values()) if self.ident in w)
+        with self._lock:
+            return sum(1 for w in self._shard.windows.values() if self.ident in w)
 
     def next_window(self) -> int | None:
         """The lowest window index holding counts of this id, if any."""
-        found = [k for k, w in list(self._shared.windows.items()) if self.ident in w]
+        with self._lock:
+            found = [k for k, w in self._shard.windows.items() if self.ident in w]
         return min(found, default=None)

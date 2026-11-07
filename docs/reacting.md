@@ -116,15 +116,18 @@ behind. It never holds counts without bound; instead it turns the backlog into a
 | lag | 64 windows | the clock thread, before each window | Loss |
 | window totals held | 100 000 | the **hot path**, when a new total is created | the count is not kept; Loss at the clock thread's next turn |
 
-The third limit is hard. Window totals live in one shared structure, `windows[k][id]`. A hot-path call
+The third limit is hard. Window totals live in 64 shards; an element or link belongs to one shard (by its
+id), whose `windows[k][id]` hold its totals. Callers hold the shard's lock for their whole O(1) write; the
+clock thread holds it to move a closed window out (and processes it outside), and never reads a shard
+without it, so it never iterates a structure a caller is changing. A hot-path call
 creates a total only for the first event of an element or link in a window, never per item; that is
 where the cap is checked, so the totals held stay at or under 100 000 however the threads are scheduled
 (the count is updated without a common lock, so a few concurrent creations can pass it). The backlog
 counters keep counting at the cap. Each total costs about 160 bytes, so the counts held stay under about
 16 MB.
 
-A Loss gives up every window up to the current one in O(1): the shared structure is replaced by an empty
-one, and depth state resets lazily. Every change not yet emitted (structural changes, span starts and ends)
+A Loss gives up every window up to the current one in O(shards): each shard's windows are replaced by an
+empty dict, and depth state resets lazily. Every change not yet emitted (structural changes, span starts and ends)
 is applied to the graph without its own signal, and a snapshot taken now, which includes them, is sent. The
 `seq` gap is at least the number of signals not sent, so observers see the loss; `t` never decreases.
 
@@ -164,12 +167,19 @@ Lines are `reacting/1` signals, one JSON object per line, UTF-8, compact separat
 
 | Thread | Does | Never does |
 |---|---|---|
-| callers (the observed graph) | validate; update the registry and append a timestamped event under the reporter lock (O(1)); count into one accumulator under its own lock (O(1)) | close windows, encode JSON, call user code, touch the sink |
-| clock (`rxplus-reacting-clock-<source>`) | apply events to the mirror; close windows on time, even when the process is idle and the sink stalled, at a cost of O(busy accumulators) per window; call `depth=` samplers outside every lock; encode; queue | wait for the sink |
+| callers (the observed graph) | validate; update the registry and append a timestamped event under the reporter lock (O(1)); count into one accumulator under its shard's lock (O(1)) | close windows, encode JSON, call user code, touch the sink |
+| clock (`rxplus-reacting-clock-<source>`) | apply events to the mirror; close windows on time, even when the process is idle and the sink stalled, at a cost of O(busy accumulators) per window (each closed window is moved out of its shard under the shard's lock, then processed); call `depth=` samplers outside every lock; encode; queue | wait for the sink |
 | writer (`rxplus-reacting-writer-<source>`) | open the sink (always through its backoff when reopening); write batches; report a lost connection | build signals |
 
 Both background threads are daemons. At interpreter exit, `close(timeout=1.0)` runs for every open reporter,
-which flushes a file sink. `close(timeout)` is honoured even when the observer stops reading: after the
+which flushes a file sink; `close()` first waits (within its timeout) for the writer's first `open()`, so a
+process that exits right after creating a reporter still records its graph.
+
+The clock thread never dies. A step that raises (a bug in rxplus) is logged with its traceback, counted in
+`Reporter.clock_errors`, and recovered from: the clock rebuilds its graph from the reporter's registry,
+ends the session and begins a new one at its next step (a new `seq` 0 snapshot); counts of the windows not
+yet closed are lost. CI runs the reacting tests on free-threaded CPython 3.14t without the GIL, where
+races between callers and the clock thread show up. `close(timeout)` is honoured even when the observer stops reading: after the
 timeout the sink is closed under the blocked writer.
 
 Measured (`benchmarks/bench_reacting_core.py`, i9-13900, CPython 3.13). Each figure is the cost over an empty
@@ -189,8 +199,10 @@ Memory with a stalled sink: 499 links, a 10 ms window and a held sink for 20 s (
 
 ## Log records
 
-None: the core is standard-library only and does not log. `WebSocketSink.last_error` holds the reason the
-last connection attempt failed.
+One, through the standard library's `logging` (the core has no other dependency): logger `rxplus.reacting`,
+level ERROR, with the traceback, when a clock step raised (above); logged the 1st, 2nd, 4th, 8th, ... time,
+so a step that keeps failing never floods the log. `WebSocketSink.last_error` holds the reason the last
+connection attempt failed.
 
 ## Conformance
 

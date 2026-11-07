@@ -15,7 +15,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Literal
 
 from ._encode import check_label, check_text
-from ._window import Accumulator, Totals
+from ._window import SHARDS, Accumulator, Shard
 
 if TYPE_CHECKING:
     from .reporter import Reporter
@@ -36,7 +36,7 @@ class _Live:
         "session",
         "T",
         "closed",
-        "windows",
+        "shards",
         "epoch",
         "pending",
         "cap",
@@ -55,10 +55,10 @@ class _Live:
         self.session = -1
         self.T = 0.0
         self.closed = 0  # windows of the session below this index are closed
-        # windows[k][ident]: the totals of element/link ident in window k
-        self.windows: dict[int, dict[str, Totals]] = {}
+        # shard.windows[k][ident]: the totals of element/link ident in window k
+        self.shards = tuple(Shard() for _ in range(SHARDS))
         self.epoch = 0  # incremented by a Loss: every depth state resets
-        self.pending = 0  # totals held in `windows` (approximate)
+        self.pending = 0  # totals held in the shards (approximate)
         self.cap = 100_000  # hard limit on `pending` (the reporter sets it)
         self.saturated = False  # a total was refused at the cap
         self.w = window

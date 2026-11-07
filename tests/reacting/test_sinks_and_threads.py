@@ -81,6 +81,10 @@ def test_slow_sink_triggers_loss_not_blocking(tmp_path):
     for i in range(500):
         root.child(f"c{i}")
     assert time.perf_counter() - start < 1.0  # the caller never waits
+    # The clock thread queues the 500 adds while the sink is held (without
+    # this, a writer on another core may drain them as they come: 3.14t).
+    assert _wait_for(lambda: not r._events)
+    time.sleep(0.1)
     sink.release()
     r.close()
     sigs = sink.signals()
