@@ -49,24 +49,24 @@ mixed_stream.pipe(
 
 Callable objects for use with `ops.do_action` or `ops.map`.
 
-### `FPSMonitor(interval=1.0)`
+### `FPSMonitor(interval=1.0, report=None, logger_provider=None)`
 
-Prints frames-per-second every `interval` seconds.
+Reports frames per second every `interval` seconds: `report(fps)` if given, else an INFO log
+`[FPS] 30.2` through OTel (`logger_provider`, else the global provider; nothing without one). 0.1 printed.
 
 ```python
-stream.pipe(ops.do_action(FPSMonitor(1.0))).subscribe(...)
-# Output: [FPS] 30.2
+stream.pipe(ops.do_action(FPSMonitor(1.0, report=lambda fps: print(f"{fps:.1f} fps")))).subscribe(...)
 ```
 
-### `BandwidthMonitor(interval=1.0, scale=1.0, unit="B/s")`
+### `BandwidthMonitor(interval=1.0, scale=1.0, unit="B/s", report=None, logger_provider=None)`
 
-Measures throughput for items supporting `len()`.
+Measures throughput for items supporting `len()`; reports `report(bandwidth)` (scaled by `scale`), else an
+INFO log `[Bandwidth] 512.3 KiB/s` through OTel.
 
 ```python
 stream.pipe(
-    ops.do_action(BandwidthMonitor(1.0, scale=1/1024, unit="KiB/s"))
+    ops.do_action(BandwidthMonitor(1.0, scale=1/1024, unit="KiB/s", logger_provider=provider))
 ).subscribe(...)
-# Output: [Bandwidth] 512.3 KiB/s
 ```
 
 ---

@@ -13,7 +13,8 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 
-from opentelemetry._logs import LogRecord, SeverityNumber
+from opentelemetry._logs import Logger, LogRecord, SeverityNumber
+from opentelemetry.util.types import AttributeValue
 
 # =============================================================================
 # LogContext (absorbed from log_context.py)
@@ -163,7 +164,7 @@ class OTelLogger:
 
     def __init__(
         self,
-        logger,
+        logger: Logger,
         source: str,
         context: LogContext | None = None,
         min_severity: SeverityNumber | None = None,
@@ -182,7 +183,7 @@ class OTelLogger:
         self._context = context or LogContext()
         self._min_severity = min_severity
 
-    def info(self, message: str, **attrs) -> None:
+    def info(self, message: str, **attrs: AttributeValue) -> None:
         """Emit INFO level log.
 
         Args:
@@ -191,7 +192,7 @@ class OTelLogger:
         """
         self._emit(SeverityNumber.INFO, "INFO", message, attrs)
 
-    def debug(self, message: str, **attrs) -> None:
+    def debug(self, message: str, **attrs: AttributeValue) -> None:
         """Emit DEBUG level log.
 
         Args:
@@ -200,7 +201,7 @@ class OTelLogger:
         """
         self._emit(SeverityNumber.DEBUG, "DEBUG", message, attrs)
 
-    def warning(self, message: str, **attrs) -> None:
+    def warning(self, message: str, **attrs: AttributeValue) -> None:
         """Emit WARN level log.
 
         Args:
@@ -209,7 +210,7 @@ class OTelLogger:
         """
         self._emit(SeverityNumber.WARN, "WARN", message, attrs)
 
-    def error(self, message: str, **attrs) -> None:
+    def error(self, message: str, **attrs: AttributeValue) -> None:
         """Emit ERROR level log.
 
         Args:
@@ -218,7 +219,7 @@ class OTelLogger:
         """
         self._emit(SeverityNumber.ERROR, "ERROR", message, attrs)
 
-    def with_context(self, **overrides) -> "OTelLogger":
+    def with_context(self, **overrides: str | int | None) -> "OTelLogger":
         """Derive a child logger inheriting this logger's context with overrides.
 
         Args:
@@ -232,7 +233,7 @@ class OTelLogger:
         new_source = overrides.pop("source", self._source)
         return OTelLogger(
             self._logger,
-            source=new_source,
+            source=str(new_source),
             context=self._context.child(**overrides),
             min_severity=self._min_severity,
         )
@@ -242,7 +243,7 @@ class OTelLogger:
         severity_number: SeverityNumber,
         severity_text: str,
         message: str,
-        attrs: dict,
+        attrs: dict[str, AttributeValue],
     ) -> None:
         """Emit a log record.
 

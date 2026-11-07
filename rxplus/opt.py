@@ -1,15 +1,15 @@
 """Miscellaneous Rx operators used by ``rxplus``."""
 
 import threading
-import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from attr import dataclass
 from opentelemetry.trace import Span, StatusCode
 from reactivex import Observable, Observer, create
-from reactivex.abc import DisposableBase
+from reactivex.abc import DisposableBase, ObserverBase, SchedulerBase
 from reactivex.disposable import Disposable
+from reactivex.scheduler import TimeoutScheduler
 
 from .mechanism import RxException
 
@@ -20,23 +20,27 @@ if TYPE_CHECKING:
     from .reacting.handles import Span as ReactingSpan
 
 
-def stream_print_out(prompt: str = "Stream-Print-Out"):
+def stream_print_out[T](
+    prompt: str = "Stream-Print-Out",
+) -> Callable[[Observable[T]], Observable[T]]:
     """
     Print out and forward the data stream. For debug or info output purpose.
     """
 
-    def _stream_print_out(source):
+    def _stream_print_out(source: Observable[T]) -> Observable[T]:
 
-        def subscribe(observer, scheduler=None):
-            def on_next(value) -> None:
+        def subscribe(
+            observer: ObserverBase[T], scheduler: SchedulerBase | None = None
+        ) -> DisposableBase:
+            def on_next(value: T) -> None:
                 print(f"{prompt}{value}")
                 observer.on_next(value)
 
-            def on_error(error):
+            def on_error(error: Exception) -> None:
                 print(f"Error observed: {error}")
                 observer.on_error(error)
 
-            def on_completed():
+            def on_completed() -> None:
                 print(f"{prompt}: Completed.")
                 observer.on_completed()
 
@@ -62,7 +66,9 @@ def redirect_to[T](
     """
 
     def _redirect_to(source: Observable[T]) -> Observable[T]:
-        def subscribe(observer: Observer[T], scheduler=None):
+        def subscribe(
+            observer: ObserverBase[T], scheduler: SchedulerBase | None = None
+        ) -> DisposableBase:
             # determine the redirection function
             if callable(redirect_target):
                 redirect_fun = redirect_target
@@ -82,12 +88,12 @@ def redirect_to[T](
                 scheduler=scheduler,
             )
 
-        return Observable(subscribe)  # type: ignore[arg-type]
+        return Observable(subscribe)
 
     return _redirect_to
 
 
-@dataclass
+@dataclass(slots=True)
 class ErrorRestartSignal:
     """
     A signal emitted when a retry is triggered by `retry_with_signal`.
@@ -115,11 +121,22 @@ class ErrorRestartSignal:
         span.set_status(StatusCode.ERROR, f"Retry attempt {self.attempts}")
 
 
+def _quiet_dispose(d: DisposableBase | None) -> None:
+    """Dispose of a subscription that is no longer wanted; an error from a
+    stale attempt's teardown must not reach the live one (review of #25)."""
+    if d is not None:
+        try:
+            d.dispose()
+        except Exception:
+            pass
+
+
 def retry_with_signal[T](
     max_retries: int | None = None,
     *,
     delay_s: float | Callable[[int, RxException], float] = 0.0,
     should_retry: Callable[[RxException], bool] | None = None,
+    scheduler: SchedulerBase | None = None,
     reacting: "ReportTo | None" = None,
     label: str = "retry_with_signal",
 ) -> Callable[[Observable[T]], Observable[T | ErrorRestartSignal]]:
@@ -128,12 +145,19 @@ def retry_with_signal[T](
 
     - max_retries: maximum number of retries before surfacing the error.
     - delay_s: fixed delay (seconds) or a function (attempt, error) -> seconds.
-    - should_retry: predicate on the underlying Exception to decide retry.
+    - should_retry: predicate on the error (an ``RxException``; any other
+      exception is wrapped in one first) to decide whether to retry. Without
+      it every error is retried (0.1: only ``RxException`` was).
+    - scheduler: where a delayed retry is scheduled (default
+      ``TimeoutScheduler``); 0.1 slept on the thread that delivered the
+      error. A retry without delay subscribes again at once.
     - reacting: report an operator element (``label``, kind
       ``rxplus.operator``) with one ``attempt`` span per subscription; a
       failed attempt ends with ``error`` and the class of the underlying
       exception. ``None`` installs nothing.
     """
+    # The subscribe function below has its own `scheduler` parameter.
+    retry_scheduler = scheduler
     # The operator element exists while at least one subscription is active
     # and is removed (with its spans) when the last one ends.
     report_lock = threading.Lock()
@@ -174,9 +198,9 @@ def retry_with_signal[T](
         source: Observable[T],
     ) -> Observable[T | ErrorRestartSignal]:
         def _subscribe(
-            observer: Observer[T | ErrorRestartSignal],
-            scheduler=None,
-        ):
+            observer: ObserverBase[T | ErrorRestartSignal],
+            scheduler: SchedulerBase | None = None,
+        ) -> DisposableBase:
             attempts = 0
             disposed = False
             element = _acquire()
@@ -213,17 +237,26 @@ def retry_with_signal[T](
             live: list[DisposableBase | None] = [None]
             # The live attempt's span (reacting=): ended ok on dispose.
             attempt_span: list[ReactingSpan | None] = [None]
+            # A retry waiting on the scheduler: cancelled on dispose.
+            waiting: list[DisposableBase | None] = [None]
 
-            def _delay(attempt: int, err: RxException) -> None:
+            def _delay(attempt: int, err: RxException) -> float:
                 try:
                     d = delay_s(attempt, err) if callable(delay_s) else float(delay_s)
                 except Exception:
-                    d = 0.0
-                if d and d > 0:
-                    try:
-                        time.sleep(d)
-                    except Exception:
-                        pass
+                    return 0.0
+                return d if d > 0 else 0.0
+
+            def _retry(delay: float) -> None:
+                if delay <= 0:
+                    _subscribe_once()
+                    return
+                sch = retry_scheduler or TimeoutScheduler()
+                waiting[0] = sch.schedule_relative(
+                    delay, lambda _sch, _state: _subscribe_once()
+                )
+                if disposed:  # disposed while scheduling
+                    _quiet_dispose(waiting[0])
 
             def _subscribe_once() -> None:
                 nonlocal generation
@@ -250,8 +283,6 @@ def retry_with_signal[T](
                             source="retry_with_signal",
                             note="Non-RxException in retry_with_signal",
                         )
-                        _fail(err)
-                        return
 
                     nonlocal attempts
                     if should_retry is not None and not should_retry(err):
@@ -278,10 +309,8 @@ def retry_with_signal[T](
                         )
                         return
 
-                    _delay(attempts, err)
-
                     if not disposed:
-                        _subscribe_once()
+                        _retry(_delay(attempts, err))
 
                 subscription = source.subscribe(
                     on_next=_on_next,
@@ -297,9 +326,9 @@ def retry_with_signal[T](
                     if not stale:
                         previous, live[0] = live[0], subscription
                 if stale:
-                    subscription.dispose()
+                    _quiet_dispose(subscription)
                 elif previous is not None:
-                    previous.dispose()
+                    _quiet_dispose(previous)
 
             _subscribe_once()
 
@@ -308,16 +337,13 @@ def retry_with_signal[T](
                 with generation_lock:
                     disposed = True
                     current, live[0] = live[0], None
-                if current is not None:
-                    try:
-                        current.dispose()
-                    except Exception:
-                        pass
+                _quiet_dispose(waiting[0])
+                _quiet_dispose(current)
                 _end(attempt_span[0])
                 _finish()
 
             return Disposable(_dispose)
 
-        return create(_subscribe)  # type: ignore[arg-type]
+        return create(_subscribe)
 
     return _op

@@ -5,11 +5,12 @@ behind a single ReactiveX interface.
 """
 
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from opentelemetry._logs import LoggerProvider
 from opentelemetry.trace import TracerProvider
 from reactivex import Observable, Subject
+from reactivex.abc import DisposableBase, ObserverBase, SchedulerBase
 
 from ..utils import TaggedData
 from ._otel_mixin import OTelLoggingMixin
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
     from ..reacting.handles import Element
 
 
-class RxWSClientGroup(Subject, OTelLoggingMixin):
+class RxWSClientGroup(Subject[TaggedData[str, Any]], OTelLoggingMixin):
     """A multiplexing subject that manages a dynamic set of RxWSClient instances.
 
     One client per WebSocket path, behind a single ReactiveX interface.
@@ -152,7 +153,7 @@ class RxWSClientGroup(Subject, OTelLoggingMixin):
         self._client_factory = make_client
         self._clients_lock = threading.Lock()
         self._clients: dict[str, RxWSClient] = {}  # tag -> RxWSClient
-        self._bus: Subject[TaggedData] = Subject()  # merged inbound stream
+        self._bus: Subject[TaggedData[str, Any]] = Subject()  # merged inbound
         self._child_errors: Subject[tuple[str, Exception]] = Subject()
         self._stopped = False
 
@@ -185,7 +186,7 @@ class RxWSClientGroup(Subject, OTelLoggingMixin):
         with self._dropped_lock:
             self._dropped += 1
 
-    def on_next(self, tagged: TaggedData) -> None:
+    def on_next(self, tagged: TaggedData[str, Any]) -> None:
         """Send ``tagged.data`` on the path ``tagged.tag``.
 
         A value that is not ``TaggedData``, or a path whose datatype is
@@ -235,7 +236,11 @@ class RxWSClientGroup(Subject, OTelLoggingMixin):
         self._bus.on_completed()
 
     # ============ Observable interface ============ #
-    def _subscribe_core(self, observer, scheduler=None):
+    def _subscribe_core(
+        self,
+        observer: ObserverBase[TaggedData[str, Any]],
+        scheduler: SchedulerBase | None = None,
+    ) -> DisposableBase:
         return self._bus.subscribe(observer, scheduler=scheduler)
 
     def open_path(self, path: str) -> None:

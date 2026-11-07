@@ -26,7 +26,7 @@ def _non_daemon_thread(target: Callable[[], None]) -> threading.Thread:
 
 def create_screen_capture(
     fps: float = 10.0,
-    monitor: int | dict | None = None,
+    monitor: int | dict[str, int] | None = None,
     scheduler: rx.abc.SchedulerBase | None = None,
 ) -> Observable[np.ndarray]:
     """
@@ -47,7 +47,8 @@ def create_screen_capture(
     interval = 1.0 / fps
 
     def subscribe(
-        observer: rx.abc.ObserverBase, scheduler_: rx.abc.SchedulerBase | None = None
+        observer: rx.abc.ObserverBase[np.ndarray],
+        scheduler_: rx.abc.SchedulerBase | None = None,
     ) -> rx.abc.DisposableBase:
         # Pacing state is per subscription; shared state made concurrent
         # subscriptions slow each other down.

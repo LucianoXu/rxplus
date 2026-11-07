@@ -39,6 +39,16 @@ is in the last column.
 | a value that could not be packaged ended the server/client via `on_error` | logged at ERROR and dropped | — | #11 |
 | a terminal error (retries exhausted, bind failure) left the loop thread running | the thread ends | — | #12 |
 
+## Operators, utilities and package surface (PR-C)
+
+| 0.1 | 0.2 | What to do | PR |
+|---|---|---|---|
+| `retry_with_signal` slept `delay_s` on the thread that delivered the error | the retry is scheduled on `scheduler` (default `TimeoutScheduler`); disposing cancels a waiting retry | pass `scheduler=` to control where it runs (e.g. a test scheduler) | C |
+| errors that were not `RxException` were not retried | wrapped in `RxException` and retried; `should_retry` decides | use `should_retry` to keep some errors fatal | C |
+| `ErrorRestartSignal` was an `attrs` class; `attrs` was a dependency | a standard `dataclass` (same fields); `attrs` is no longer installed with rxplus | install `attrs` yourself if you used it through rxplus | C |
+| `FPSMonitor`, `BandwidthMonitor` printed | report through `report=` (a callable), by default an INFO log through OTel | pass `report=print` to keep printing | C |
+| `rxplus.ws.ConnectionState`, `rxplus.ws.WS_Channels` (aliases) | removed | `WSConnectionState`, `WSChannels` | C |
+
 ## Notes
 
 - "Logged" means an OTel log record on the component's `logger_provider` (nothing without one).

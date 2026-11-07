@@ -7,9 +7,10 @@ from typing import Literal
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
 from reactivex import Observable
+from reactivex.abc import DisposableBase, ObserverBase, SchedulerBase
 
 
-def to_cli(prefix: str = "") -> Callable[[Observable], Observable]:
+def to_cli[T](prefix: str = "") -> Callable[[Observable[T]], Observable[T]]:
     """
     Display upstream items to terminal without interrupting active prompts.
 
@@ -33,9 +34,11 @@ def to_cli(prefix: str = "") -> Callable[[Observable], Observable]:
     ... ).subscribe()
     """
 
-    def _to_cli(source: Observable) -> Observable:
-        def subscribe(observer, scheduler=None):
-            def on_next(value):
+    def _to_cli(source: Observable[T]) -> Observable[T]:
+        def subscribe(
+            observer: ObserverBase[T], scheduler: SchedulerBase | None = None
+        ) -> DisposableBase:
+            def on_next(value: T) -> None:
                 with patch_stdout():
                     print(f"{prefix}{value}")
                 observer.on_next(value)
@@ -58,7 +61,7 @@ def from_cli(
     mode: Literal[
         "queue", "update", "loop"
     ] = "loop",  # True = queue every question; False = only keep the latest
-):
+) -> Callable[[Observable[str]], Observable[str]]:
     """
     Turn each element from the source Observable into an interactive prompt,
     forward the user's reply downstream, and avoid prompt-toolkit concurrency issues.
@@ -80,19 +83,21 @@ def from_cli(
             f"Invalid mode: {mode}. Choose from 'queue', 'update', or 'loop'."
         )
 
-    def _from_cli(source: Observable) -> Observable:
+    def _from_cli(source: Observable[str]) -> Observable[str]:
 
-        def subscribe(observer, scheduler=None):
+        def subscribe(
+            observer: ObserverBase[str], scheduler: SchedulerBase | None = None
+        ) -> DisposableBase:
             # Runtime state ---------------------------------------------------
-            session: PromptSession = PromptSession()
+            session: PromptSession[str] = PromptSession()
             _loop = loop or asyncio.get_running_loop()
-            waiting_prompts: asyncio.Queue = asyncio.Queue()  # All pending questions
+            waiting_prompts: asyncio.Queue[str] = asyncio.Queue()  # pending questions
             current_prompt = {"text": ""}  # Mutable reference for live updates
             awaiting_input = {"flag": False}  # True while prompt_async is waiting
             done = asyncio.Event()  # Signals graceful shutdown
 
             # Background coroutine: serially handles queued questions ----------
-            async def prompt_loop():
+            async def prompt_loop() -> None:
                 while not done.is_set():
                     if mode != "loop":
                         current_prompt["text"] = await waiting_prompts.get()
@@ -116,8 +121,8 @@ def from_cli(
             _loop.create_task(prompt_loop())
 
             # Upstream on_next handler ----------------------------------------
-            def _on_next(value):
-                async def _handle():
+            def _on_next(value: str) -> None:
+                async def _handle() -> None:
                     if mode == "queue":
                         # Always queue the question; do not replace prompt while typing
                         await waiting_prompts.put(value)

@@ -125,7 +125,7 @@ class _Client:
         self.recv: Link | None = None
 
 
-class RxWSServer(Subject, OTelLoggingMixin):
+class RxWSServer(Subject[TaggedData[str, Any]], OTelLoggingMixin):
     """WebSocket server for bi-directional communication between ReactiveX components.
 
     The server handles clients on any request path. Received values are
@@ -298,7 +298,7 @@ class RxWSServer(Subject, OTelLoggingMixin):
                 "ERROR",
             )
 
-    def on_next(self, value: TaggedData) -> None:
+    def on_next(self, value: TaggedData[str, Any]) -> None:
         """Encode once and queue the frame for every client on the path.
 
         A value that is not ``TaggedData`` or cannot be encoded is logged and

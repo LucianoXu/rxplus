@@ -20,11 +20,6 @@ from .datatypes import (
 )
 from .server import RxWSServer, WSChannels, WSConnectionEvent
 
-# Backward-compatible aliases for names that have been renamed (removed in
-# PR-C of the 0.2 batch).
-ConnectionState = WSConnectionState
-WS_Channels = WSChannels
-
 __all__ = [
     # datatypes and codecs
     "WSConnectionConfig",

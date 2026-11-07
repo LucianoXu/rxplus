@@ -9,12 +9,12 @@ import random
 import threading
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import websockets
 from opentelemetry._logs import LoggerProvider
 from opentelemetry.trace import Tracer, TracerProvider
-from reactivex import Subject
+from reactivex import Observable, Subject
 from reactivex import operators as ops
 from reactivex.subject import BehaviorSubject
 from websockets import ClientConnection
@@ -87,7 +87,7 @@ class RetryPolicy:
         return delay + random.uniform(-jitter_range, jitter_range)
 
 
-class RxWSClient(Subject, OTelLoggingMixin):
+class RxWSClient(Subject[Any], OTelLoggingMixin):
     """A resilient ReactiveX-compatible WebSocket client.
 
     This subject behaves as both an *Observable* -- emitting messages arriving
@@ -307,7 +307,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
             self._socket_element = None
 
     @property
-    def connection_state(self):
+    def connection_state(self) -> Observable[WSConnectionState]:
         """Observable stream of connection state changes.
 
         Emits on every state transition including each reconnect attempt.
