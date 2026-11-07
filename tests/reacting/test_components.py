@@ -395,3 +395,46 @@ def test_the_retry_operator_element_goes_with_its_last_subscription(tmp_path):
     removed = [i for s in by_type(sink.signals(), "remove") for i in s["ids"]]
     assert fetch["id"] in removed
     conform(sink, tmp_path)
+
+
+def test_a_frame_cancelled_mid_send_is_counted_as_dropped(tmp_path):
+    """Review of #28 (p_close): the server closing a connection whose peer
+    stopped reading cancelled the send in flight; that frame was neither
+    sent nor dropped (2999 of 3000)."""
+    reporter, sink = _live_reporter()
+    port = _free_port()
+    server = RxWSServer(
+        WSConnectionConfig("127.0.0.1", port),
+        reacting=reporter,
+        send_queue=None,
+        max_size=None,
+    )
+    raw = None
+    try:
+        assert _wait_for(lambda: _listening(port))
+        raw = socket.create_connection(("127.0.0.1", port))
+        raw.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        raw.sendall(
+            b"GET /p HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
+            b"Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+            b"Sec-WebSocket-Version: 13\r\n\r\n"
+        )
+        response = b""
+        while b"\r\n\r\n" not in response:
+            response += raw.recv(1)
+        time.sleep(0.2)
+        for _ in range(600):
+            server.on_next(TaggedData("/p", "z" * 50_000))
+        time.sleep(0.5)
+    finally:
+        server.on_completed()  # cancels the stalled send
+        if raw is not None:
+            raw.close()
+        time.sleep(3 * W)
+        reporter.close(timeout=10.0)
+    flows = by_type(sink.signals(), "flow")
+    items = sum(f["items"] for f in flows)
+    dropped = sum(f["dropped"] for f in flows)
+    assert items + dropped == 600, (items, dropped, server.dropped)
+    assert server.dropped == dropped
+    conform(sink, tmp_path, window=W)

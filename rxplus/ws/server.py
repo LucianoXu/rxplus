@@ -463,6 +463,7 @@ class RxWSServer(Subject, OTelLoggingMixin):
         ws_channels.add_client(websocket, client)
         with self._clients_lock:
             self._clients[cid] = (client, ws_channels)
+        tasks: list[asyncio.Task[None]] = []
         try:
             self._log(f"Client established from {remote_desc}", "INFO")
             self._emit_event(WSConnectionEvent("opened", cid, path))
@@ -477,6 +478,7 @@ class RxWSServer(Subject, OTelLoggingMixin):
                     client.recv,
                 )
             )
+            tasks = [sender_task, receiver_task]
             done, pending = await asyncio.wait(
                 {sender_task, receiver_task}, return_when=asyncio.FIRST_COMPLETED
             )
@@ -501,6 +503,12 @@ class RxWSServer(Subject, OTelLoggingMixin):
             ws_channels.remove_client(websocket, client)
             with self._clients_lock:
                 self._clients.pop(cid, None)
+            # When this handler is cancelled (the server closing), its sender
+            # may still be in a send: let it finish (and count the frame in
+            # flight) before the queue is dropped and unbound.
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             # Frames still queued are never sent: dropped (on the link too).
             self._count_dropped(client.queue.reset())
             client.queue.bind(None)
@@ -539,6 +547,12 @@ class RxWSServer(Subject, OTelLoggingMixin):
             try:
                 await client.websocket.send(frame)
                 client.queue.sent(frame)
+            except asyncio.CancelledError:
+                # The connection is being closed (e.g. the server ends while
+                # the peer has stopped reading): the frame in flight is lost.
+                client.queue.lost(taken=True)
+                self._count_dropped()
+                raise
             except (ConnectionResetError, BrokenPipeError, OSError) as e:
                 client.queue.lost(taken=True)
                 self._count_dropped()  # the frame in flight is lost

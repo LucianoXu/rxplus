@@ -342,7 +342,9 @@ class RxWSClient(Subject, OTelLoggingMixin):
             return
 
         if not self._connected and not self._buffer_while_disconnected:
-            # Drop message when not connected and buffering is disabled
+            # Not connected and not buffering: the value is dropped, and
+            # counted (0.2 review: the totals were short by these).
+            self._count_dropped()
             return
 
         try:
@@ -357,6 +359,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
             )
             return
         if not self._loop_ready.wait(timeout=5.0):
+            self._count_dropped()
             self._log("Dropped a value: the client event loop did not start", "ERROR")
             return
 
@@ -382,9 +385,12 @@ class RxWSClient(Subject, OTelLoggingMixin):
 
     @property
     def dropped(self) -> int:
-        """Items dropped so far: values that could not be encoded, frames
-        that did not decode, subscribers raising, and frames discarded by the
-        send queue. A reporter (X4) reports them as ``dropped``."""
+        """Items dropped so far: values that could not be encoded, values
+        sent while disconnected without ``buffer_while_disconnected``, frames
+        that did not decode, subscribers raising, frames discarded by the
+        send queue, and the frame in flight when a send failed. A reporter
+        reports the per-socket ones as ``dropped`` on the socket's links
+        (while disconnected there is no socket)."""
         with self._dropped_lock:
             return self._dropped
 
@@ -745,6 +751,12 @@ class RxWSClient(Subject, OTelLoggingMixin):
                 try:
                     await websocket.send(frame)
                     self.queue.sent(frame)
+                except asyncio.CancelledError:
+                    # The connection is ending mid-send: the frame in flight
+                    # may be partly written, so it is lost, not re-sent.
+                    self.queue.lost(taken=True)
+                    self._count_dropped()
+                    raise
                 except (ConnectionResetError, BrokenPipeError, OSError) as e:
                     self.queue.lost(taken=True)
                     self._count_dropped()  # the frame in flight is lost
