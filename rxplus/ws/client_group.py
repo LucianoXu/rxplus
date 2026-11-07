@@ -5,6 +5,7 @@ behind a single ReactiveX interface.
 """
 
 import threading
+from typing import TYPE_CHECKING
 
 from opentelemetry._logs import LoggerProvider
 from opentelemetry.trace import TracerProvider
@@ -15,6 +16,11 @@ from ._otel_mixin import OTelLoggingMixin
 from ._sendqueue import SendOverflow
 from .client import DEFAULT_MAX_SIZE, RetryPolicy, RxWSClient
 from .datatypes import DatatypeSpec, WSConnectionConfig, resolve_codecs
+
+if TYPE_CHECKING:
+    from ..reacting import ReportTo
+    from ..reacting._component import ComponentReport
+    from ..reacting.handles import Element
 
 
 class RxWSClientGroup(Subject, OTelLoggingMixin):
@@ -55,6 +61,10 @@ class RxWSClientGroup(Subject, OTelLoggingMixin):
 
     allow_pickle, max_size, send_queue, overflow
         Passed to every child client (see :class:`RxWSClient`).
+    reacting
+        Report to a :class:`~rxplus.reacting.Reporter` or under an
+        :class:`~rxplus.reacting.Element`; each child client reports as a
+        child of the group's element. ``None`` installs nothing.
 
     Failures (0.2)
     --------------
@@ -83,6 +93,7 @@ class RxWSClientGroup(Subject, OTelLoggingMixin):
         send_queue: int | None = 1024,
         overflow: SendOverflow = "drop_old",
         send_queue_bytes: int | None = None,
+        reacting: "ReportTo | None" = None,
     ):
         super().__init__()
         self._name = name or f"RxWSClientGroup:{config.host}:{config.port}"
@@ -99,6 +110,15 @@ class RxWSClientGroup(Subject, OTelLoggingMixin):
         self._buffer_while_disconnected = buffer_while_disconnected
         # Codec per path; a fixed "object" without allow_pickle fails here.
         codec_for_path = resolve_codecs(datatype, allow_pickle=allow_pickle)
+
+        self._report: ComponentReport | None = None
+        if reacting is not None:
+            from ..reacting import _component
+
+            self._report = _component.ComponentReport(
+                reacting, name or "RxWSClientGroup", "rxplus.ws.group"
+            )
+        group_element = self._report.element if self._report is not None else None
 
         def make_client(path: str) -> RxWSClient:
             child_config = WSConnectionConfig(
@@ -126,6 +146,7 @@ class RxWSClientGroup(Subject, OTelLoggingMixin):
                 send_queue=send_queue,
                 overflow=overflow,
                 send_queue_bytes=send_queue_bytes,
+                reacting=group_element,
             )
 
         self._client_factory = make_client
@@ -134,6 +155,18 @@ class RxWSClientGroup(Subject, OTelLoggingMixin):
         self._bus: Subject[TaggedData] = Subject()  # merged inbound stream
         self._child_errors: Subject[tuple[str, Exception]] = Subject()
         self._stopped = False
+
+    @property
+    def reacting_element(self) -> "Element | None":
+        """The group's element, when it reports; its children are the
+        per-path clients' elements."""
+        return None if self._report is None else self._report.element
+
+    def reacting_client(self, path: str) -> RxWSClient | None:
+        """The child client of ``path``, if it exists (its ports are where
+        your probes link to)."""
+        with self._clients_lock:
+            return self._clients.get(path)
 
     @property
     def child_errors(self) -> Observable[tuple[str, Exception]]:
@@ -187,6 +220,8 @@ class RxWSClientGroup(Subject, OTelLoggingMixin):
             self._clients.clear()
         for child in children:
             child.on_completed()
+        if self._report is not None:
+            self._report.remove()
 
     def on_error(self, err: Exception) -> None:
         """Close every child, then forward the error downstream."""

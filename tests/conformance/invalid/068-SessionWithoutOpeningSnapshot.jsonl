@@ -1,0 +1,4 @@
+{"source":"bad","seq":4,"t":1762430400.2,"type":"snapshot","protocol":"reacting/1","elements":[{"id":"a","label":"A"}],"links":[]}
+{"source":"bad","seq":5,"t":1762430400.21,"type":"add","elements":[{"id":"b","label":"B"}]}
+{"source":"bad","seq":0,"t":1762430400.3,"type":"snapshot","protocol":"reacting/1","elements":[{"id":"a","label":"A"},{"id":"b","label":"B"}],"links":[]}
+{"source":"bad","seq":1,"t":1762430400.31,"type":"add","elements":[{"id":"c","label":"C"}]}

@@ -22,24 +22,30 @@ ambiguous spec text are listed in conformance/README.md.
 from __future__ import annotations
 
 import argparse
+import heapq
 import json
 import math
+import re
 import statistics
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator
 
 PROTOCOL = "reacting/1"
 MAX_INT = 2**53 - 1
 SIGNAL_TYPES = ("snapshot", "add", "remove", "flow", "depth", "latency", "span.start", "span.end")
+DEFAULT_SPAN_IDS = 100_000  # span IDs remembered per session for span-reuse; 0 remembers all
+MAX_WINDOW_BOUNDARIES = 100_000  # distinct window boundaries kept per session to infer its window
+MAX_NESTING = 64  # "A signal nests arrays and objects at most 64 levels deep, the signal itself being level 1"
 DEFAULT_TOLERANCE = 1e-6  # absolute floor, in seconds, for window comparisons
 RELATIVE_TOLERANCE = 1e-4  # window comparisons also allow this fraction of the window length
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "docs" / "spec" / "Reacting.schema.json"
 
 GENERIC_KEYS = frozenset({"source", "seq", "t", "type"})
 TYPE_KEYS = {
-    "snapshot": frozenset({"protocol", "label", "elements", "links", "spans"}),
+    "snapshot": frozenset({"protocol", "label", "elements", "links", "spans", "backlogs"}),
     "add": frozenset({"elements", "links"}),
     "remove": frozenset({"ids"}),
     "flow": frozenset({"link", "t0", "items", "bytes", "dropped", "coalesced"}),
@@ -51,11 +57,13 @@ TYPE_KEYS = {
 ELEMENT_KEYS = frozenset({"id", "label", "parent", "kind"})
 LINK_KEYS = frozenset({"id", "from", "to", "kind"})
 OPEN_SPAN_KEYS = frozenset({"span", "id", "label", "parent", "t0"})
+BACKLOG_KEYS = frozenset({"id", "value", "capacity"})
 
 # Every rule identifier the checker can report, with a one-line description (README lists them).
 RULES = {
     "encoding": "a line is not UTF-8 (including escapes of lone surrogates), or carries a byte order mark",
     "json": "a non-empty line is not one JSON object (NaN and Infinity are not JSON)",
+    "nesting-depth": "a signal nests arrays and objects more than 64 levels deep (the line is not read)",
     "duplicate-key": "a JSON object of a signal has a duplicate key",
     "attr-missing": "a required attribute is missing",
     "attr-type": "an attribute has the wrong JSON type",
@@ -74,6 +82,9 @@ RULES = {
     "add-empty": "an add has neither a non-empty elements nor a non-empty links",
     "remove-empty": "a remove has an empty ids",
     "spans-empty": "a snapshot has spans present but empty (it must be omitted)",
+    "backlogs-empty": "a snapshot has backlogs present but empty (it must be omitted)",
+    "backlog-zero": "a snapshot's backlogs entry has value 0 (only non-zero backlogs are listed)",
+    "backlog-duplicate": "a snapshot lists the backlog of one element or link twice",
     "span-error-attr": "a span.end with status ok has an error",
     "flow-zero": "a flow counts no item (items + dropped + coalesced = 0)",
     "flow-bytes": "a flow has bytes > 0 but items = 0",
@@ -105,6 +116,7 @@ SCHEMA_RULES = frozenset({
     "attr-missing", "attr-type", "attr-value", "null-attr", "int-format", "int-range",
     "time-negative", "label-empty", "id-invalid", "ref-global", "ref-invalid", "protocol",
     "add-empty", "remove-empty", "latency-count", "span-error-attr", "spans-empty",
+    "backlogs-empty", "backlog-zero",
 })
 
 # Rules that check reports but that do not make the observer ignore the signal: a parent that is
@@ -180,13 +192,22 @@ def parse_line(raw: bytes) -> Parsed:
         problems.append(("encoding", f"not valid UTF-8 ({exc.reason} at byte {exc.start})"))
         text = raw.decode("utf-8", errors="replace")
     duplicates: list[str] = []
+    depth = _nesting(text)
+    if depth > MAX_NESTING:
+        # Not read at all, so its source and seq are not known and do not count as received, as for
+        # a line that is not JSON (and as the TypeScript reader does).
+        problems.append(("nesting-depth", f"the line nests arrays and objects {depth} levels deep; a signal "
+                                          f"nests at most {MAX_NESTING} (Encoding); the line is not read"))
+        return Parsed(None, problems, duplicates)
 
     def pairs_hook(pairs: list[tuple[str, Any]]) -> dict:
-        obj: dict = {}
-        for key, value in pairs:
-            if key in obj:
-                duplicates.append(key)
-            obj[key] = value
+        obj = dict(pairs)
+        if len(obj) != len(pairs):
+            seen: set[str] = set()
+            for key, _ in pairs:
+                if key in seen:
+                    duplicates.append(key)
+                seen.add(key)
         return obj
 
     try:
@@ -200,10 +221,36 @@ def parse_line(raw: bytes) -> Parsed:
     if not isinstance(obj, dict):
         problems.append(("json", f"a line must be a JSON object, not {type(obj).__name__}"))
         return Parsed(None, problems, duplicates)
-    if _has_lone_surrogate(obj):
+    if _SURROGATE_ESCAPE.search(text) and _has_lone_surrogate(obj):
         problems.append(("encoding", "a string escapes a lone surrogate (\\uD800-\\uDFFF), "
                                      "which is not a Unicode scalar value and has no UTF-8 encoding"))
     return Parsed(obj, problems, duplicates)
+
+
+# A lone surrogate can only come from a \\u escape (bytes that encode one are not UTF-8).
+_SURROGATE_ESCAPE = re.compile(r"\\u[dD][89a-fA-F]")
+
+
+_JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"', re.DOTALL)
+_BRACKET = re.compile(r"[\[\]{}]")
+
+
+def _nesting(text: str) -> int:
+    """The deepest nesting of arrays and objects in `text`, outside JSON strings; iterative.
+
+    A line with at most MAX_NESTING brackets cannot nest deeper and is not scanned.
+    """
+    if text.count("[") + text.count("{") <= MAX_NESTING:
+        return 0
+    depth = deepest = 0
+    for bracket in _BRACKET.findall(_JSON_STRING.sub("", text)):
+        if bracket in "[{":
+            depth += 1
+            if depth > deepest:
+                deepest = depth
+        else:
+            depth -= 1
+    return deepest
 
 
 def _has_lone_surrogate(value: Any) -> bool:
@@ -221,15 +268,14 @@ def _has_lone_surrogate(value: Any) -> bool:
     return False
 
 
-def read_lines(path: str | Path) -> list[tuple[int, Parsed]]:
-    """Non-empty lines of a recording, with 1-based line numbers counting every line."""
-    data = Path(path).read_bytes()
-    out = []
-    for index, raw in enumerate(data.split(b"\n"), start=1):
-        if raw == b"":
-            continue
-        out.append((index, parse_line(raw)))
-    return out
+def read_lines(path: str | Path) -> Iterator[tuple[int, Parsed]]:
+    """Non-empty lines of a recording, with 1-based line numbers counting every line (streamed)."""
+    with open(path, "rb") as f:
+        for index, raw in enumerate(f, start=1):
+            if raw.endswith(b"\n"):
+                raw = raw[:-1]
+            if raw != b"":
+                yield index, parse_line(raw)
 
 
 def _is_int(v: Any) -> bool:
@@ -243,19 +289,25 @@ def _is_number(v: Any) -> bool:
     return type(v) is float and math.isfinite(v)
 
 
-def infer_windows(lines: list[tuple[int, Parsed]]) -> dict[tuple[str, int], float]:
+def infer_windows(lines: Iterator[tuple[int, Parsed]]) -> dict[tuple[str, int], float]:
     """Window length per session, keyed by (source, line of the session's seq-0 snapshot).
 
     The window option is not transmitted. Every flow and latency signal spans exactly one window,
-    so `t - t0` is the window length; their median gives a first estimate `d`. Every `t0` and `t`
-    is a window boundary, so `(b - b0) / k`, with `k` the number of windows between boundary `b`
-    and the first boundary `b0`, estimates the length with an error shrinking as `k` grows. The
-    median of those estimates that lie within 0.1 % of `d` is taken. A session without flow or
-    latency signals gets no entry: its window length is unknown.
+    so the median of their `t - t0` is a first estimate `d`. Near T = 1.76e9 one ULP of a time is
+    2.4e-7 s, so `d` may be off by that much, which over k windows grows k-fold. Every `t0` and `t`
+    of flow and latency, and every `t` of depth, is a window boundary. So the estimate is refined
+    over the boundaries in order of their distance from the first one: each boundary's window count
+    `k` comes from the estimate so far, and `(b - b0) / k` is a better estimate, ending in the
+    least-squares slope of boundary against window index. That slope and its decimal roundings are
+    scored by the boundaries they explain (see _refine_window). A session without flow or latency
+    signals gets no entry: its window length is unknown.
     """
     current: dict[str, int] = {}
-    widths: dict[tuple[str, int], list[float]] = {}
-    bounds: dict[tuple[str, int], list[float]] = {}
+    # bounded per session: widths by value (they take few distinct values), the first boundary, and at
+    # most MAX_WINDOW_BOUNDARIES distinct boundaries
+    widths: dict[tuple[str, int], Counter] = {}
+    first: dict[tuple[str, int], float] = {}
+    bounds: dict[tuple[str, int], set[float]] = {}
     for lineno, parsed in lines:
         obj = parsed.obj
         if obj is None:
@@ -265,29 +317,98 @@ def infer_windows(lines: list[tuple[int, Parsed]]) -> dict[tuple[str, int], floa
             continue
         if typ == "snapshot" and _is_int(obj.get("seq")) and obj.get("seq") == 0:
             current[src] = lineno
-        elif typ in ("flow", "latency") and src in current:
+        elif typ in ("flow", "latency", "depth") and src in current:
+            key = (src, current[src])
             t, t0 = obj.get("t"), obj.get("t0")
-            if _is_number(t) and _is_number(t0) and t > t0:
-                key = (src, current[src])
-                widths.setdefault(key, []).append(t - t0)
-                bounds.setdefault(key, []).extend((t0, t))
-    out = {}
-    for key, ws in widths.items():
-        d = statistics.median(ws)
-        b0 = bounds[key][0]
-        estimates = []
-        for b in bounds[key]:
-            k = round((b - b0) / d)
-            if k != 0:
-                e = (b - b0) / k
-                if abs(e - d) <= 1e-3 * d:
-                    estimates.append(e)
-        out[key] = statistics.median(estimates) if estimates else d
-    return out
+            if typ == "depth":
+                if _is_number(t) and key in bounds and len(bounds[key]) < MAX_WINDOW_BOUNDARIES:
+                    bounds[key].add(t)
+            elif _is_number(t) and _is_number(t0) and t > t0:
+                widths.setdefault(key, Counter())[t - t0] += 1
+                first.setdefault(key, t0)
+                b = bounds.setdefault(key, set())
+                if len(b) < MAX_WINDOW_BOUNDARIES:
+                    b.add(t0)
+                    b.add(t)
+    return {key: _refine_window(_median(ws), first[key], bounds[key]) for key, ws in widths.items()}
+
+
+def _median(counts: Counter) -> float:
+    """statistics.median of the multiset `counts`."""
+    n = sum(counts.values())
+    lo, hi = (n - 1) // 2, n // 2
+    seen, a = 0, None
+    for value in sorted(counts):
+        seen += counts[value]
+        if a is None and seen > lo:
+            a = value
+        if seen > hi:
+            return a if lo == hi else (a + value) / 2
+    raise ValueError("no values")
+
+
+def _refine_window(d: float, b0: float, bounds: set[float]) -> float:
+    points = sorted({b - b0 for b in bounds if b != b0}, key=abs)
+    if not points:
+        return d
+    w = d
+    for dist in points:  # nearer boundaries first: each fixes k for the farther ones
+        k = round(dist / w)
+        if k != 0 and abs(dist - k * w) <= 0.25 * w:
+            estimate = dist / k
+            if abs(estimate - w) <= 1e-3 * w:
+                w = estimate
+    # least squares of boundary against window index over the consistent boundaries (b0 included):
+    # the rounding of every boundary, b0's too, averages out
+    ks, ds = [0], [0.0]
+    for dist in points:
+        k = round(dist / w)
+        if abs(dist - k * w) <= 0.25 * w:
+            ks.append(k)
+            ds.append(dist)
+    mk, md = statistics.fmean(ks), statistics.fmean(ds)
+    var = sum((k - mk) ** 2 for k in ks)
+    fit = sum((k - mk) * (d - md) for k, d in zip(ks, ds)) / var if var else w
+    # Over few windows the fit is still off by about an ULP of the times divided by the span (5e-8 s
+    # for 10 windows near 1.79e9), which a later boundary of the session can exceed. A source's
+    # window is a configured number, usually a short decimal. So candidates are the fit and the
+    # decimal roundings of it and of the median; the one that puts the most boundaries within 4 ULPs
+    # of b0 + k*w wins, and on a tie, the shortest decimal (0.01 over 0.010000051770891463).
+    tol = 4 * math.ulp(abs(b0)) if b0 else 4 * math.ulp(1.0)
+    candidates = [fit]
+    for base in (fit, d):
+        for digits in range(1, 10):
+            c = round(base, digits)
+            if c > 0 and abs(c - fit) <= 1e-3 * fit and c not in candidates:
+                candidates.append(c)
+
+    def score(c: float) -> tuple[int, int]:
+        hits = sum(1 for dist in points if abs(dist - round(dist / c) * c) <= tol)
+        return hits, -len(repr(c))
+
+    return max(candidates, key=score)
 
 
 # --------------------------------------------------------------------------------------------
 # State
+
+
+class RecentIds:
+    """The most recent `limit` IDs added, oldest evicted first (limit 0: all of them)."""
+
+    __slots__ = ("limit", "ids")
+
+    def __init__(self, limit: int = DEFAULT_SPAN_IDS) -> None:
+        self.limit = limit
+        self.ids: dict[str, None] = {}
+
+    def __contains__(self, ident: str) -> bool:
+        return ident in self.ids
+
+    def add(self, ident: str) -> None:
+        self.ids[ident] = None
+        if self.limit and len(self.ids) > self.limit:
+            del self.ids[next(iter(self.ids))]
 
 
 @dataclass
@@ -308,15 +429,84 @@ class Session:
     elements: dict[str, dict] = field(default_factory=dict)
     links: dict[str, dict] = field(default_factory=dict)
     spans: dict[str, OpenSpan] = field(default_factory=dict)
-    used_spans: set[str] = field(default_factory=set)
+    used_spans: RecentIds = field(default_factory=RecentIds)  # recent span IDs of the session
     backlog: dict[str, dict] = field(default_factory=dict)  # since the last snapshot
     depth_last: dict[str, tuple[float, int]] = field(default_factory=dict)  # id -> (t, value)
     depth_due: dict[str, float] = field(default_factory=dict)  # id -> window end of the next depth
-    window_seen: set[tuple[str, str, int]] = field(default_factory=set)
+    depth_heap: list[tuple[float, str]] = field(default_factory=list)  # depth_due by time (may hold stale entries)
+    window_seen: dict[str, dict[str, int]] = field(default_factory=dict)  # id -> {type: latest window}
+    # indices, kept by the methods below, so that a removal costs what it removes
+    children: dict[str, set[str]] = field(default_factory=dict)  # element -> child elements
+    links_at: dict[str, set[str]] = field(default_factory=dict)  # element -> links with it as local end
+    spans_at: dict[str, set[str]] = field(default_factory=dict)  # element -> open spans on it
+    added_t: dict[str, float] = field(default_factory=dict)  # element or link -> t of its add signal
     phase: float | None = None  # a window boundary, when T is not known (relayed sessions)
     snap_t: float = 0.0  # t of the latest snapshot of the session
     snap_is_start: bool = True  # whether that snapshot is the session's seq-0 snapshot
     applied: bool = False  # whether the observer has applied a snapshot of this session
+
+
+    def put_element(self, e: dict) -> None:
+        self.elements[e["id"]] = e
+        if "parent" in e:
+            self.children.setdefault(e["parent"], set()).add(e["id"])
+
+    def put_link(self, lk: dict) -> None:
+        self.links[lk["id"]] = lk
+        for end in (lk["from"], lk["to"]):
+            if "/" not in end:
+                self.links_at.setdefault(end, set()).add(lk["id"])
+
+    def put_span(self, span: str, o: OpenSpan) -> None:
+        self.spans[span] = o
+        self.spans_at.setdefault(o.out["id"], set()).add(span)
+
+    def pop_span(self, span: str) -> OpenSpan:
+        o = self.spans.pop(span)
+        at = self.spans_at.get(o.out["id"])
+        if at is not None:
+            at.discard(span)
+            if not at:
+                del self.spans_at[o.out["id"]]
+        return o
+
+    def pop_link(self, lid: str) -> None:
+        lk = self.links.pop(lid)
+        for end in (lk["from"], lk["to"]):
+            at = self.links_at.get(end)
+            if at is not None:
+                at.discard(lid)
+                if not at:
+                    del self.links_at[end]
+
+    def pop_element(self, eid: str) -> None:
+        e = self.elements.pop(eid)
+        if "parent" in e:
+            siblings = self.children.get(e["parent"])
+            if siblings is not None:
+                siblings.discard(eid)
+                if not siblings:
+                    del self.children[e["parent"]]
+        self.children.pop(eid, None)
+
+    def replace(self, elements: dict, links: dict, spans: dict) -> None:
+        self.added_t = {}
+        self.elements, self.links, self.spans = {}, {}, {}
+        self.children, self.links_at, self.spans_at = {}, {}, {}
+        for e in elements.values():
+            self.put_element(e)
+        for lk in links.values():
+            self.put_link(lk)
+        for span, o in spans.items():
+            self.put_span(span, o)
+
+    def set_depth_due(self, ident: str, due: float) -> None:
+        self.depth_due[ident] = due
+        heapq.heappush(self.depth_heap, (due, ident))
+
+    def clear_depth_due(self) -> None:
+        self.depth_due = {}
+        self.depth_heap = []
 
 
 @dataclass
@@ -326,6 +516,7 @@ class SourceState:
     lost: int = 0
     ended: list[dict] = field(default_factory=list)
     appeared: bool = False
+    orphan_reported: bool = False  # snapshot-first was reported for signals before any session
 
 
 # --------------------------------------------------------------------------------------------
@@ -354,8 +545,14 @@ class Engine:
         window: float | None = None,
         direct: bool = False,
         tolerance: float = DEFAULT_TOLERANCE,
+        span_ids: int = DEFAULT_SPAN_IDS,
+        on_violation: Callable[[Violation], None] | None = None,
+        on_message: Callable[[int, str, str], None] | None = None,
     ) -> None:
+        """`on_violation` and `on_message(line, "warning" | "note", text)` receive each one as it is
+        found; without them, they are collected in `violations`, `warnings` and `notes`."""
         assert mode in ("check", "fold")
+        self.span_ids = span_ids
         self.mode = mode
         self.windows = windows or {}
         self.window = window
@@ -366,9 +563,20 @@ class Engine:
         self.violations: list[Violation] = []
         self.warnings: list[tuple[int, str]] = []
         self.notes: list[tuple[int, str]] = []
+        self.violation_count = 0
+        self.on_violation = on_violation or self.violations.append
+        self.on_message = on_message or self._collect_message
         self.stopped = False
         self._source: str | None = None
         self._gap = 0  # seq gap before the signal being applied  # source of the signal being read, for ref-global-self
+
+    def _collect_message(self, lineno: int, kind: str, text: str) -> None:
+        (self.warnings if kind == "warning" else self.notes).append((lineno, text))
+
+    def ended(self, st: SourceState, rec: dict) -> None:
+        """A span ended. Only `fold` keeps the record: its output lists every ended span."""
+        if self.mode == "fold":
+            st.ended.append(rec)
 
     # ---- attribute access -------------------------------------------------------------------
 
@@ -501,6 +709,23 @@ class Engine:
             L.add("t0-after-t", f"{where}: t0 {out['t0']} is after the snapshot's t {t}")
         return out if len(L.violations) == n else None
 
+    def backlog(self, L: Line, b: Any, where: str) -> dict | None:
+        if not isinstance(b, dict):
+            L.add("attr-type", f"{where} must be an object")
+            return None
+        n = len(L.violations)
+        out = {}
+        for key, kind, req in (("id", "lref", True), ("value", "int", True), ("capacity", "int", False)):
+            v = self.attr(L, b, key, kind, req, where)
+            if v is not ABSENT and v is not BAD:
+                out[key] = v
+        self.warn_unknown(L, b, BACKLOG_KEYS, where)
+        if out.get("value") == 0:
+            L.add("backlog-zero", f"{where}: value is 0; backlogs lists non-zero backlogs only")
+        elif "value" in out and "capacity" in out and out["value"] > out["capacity"]:
+            L.add("depth-capacity", f"{where}: value {out['value']} exceeds capacity {out['capacity']}")
+        return out if len(L.violations) == n else None
+
     def array_of(self, L: Line, obj: dict, key: str, required: bool, fn, where: str, *extra) -> Any:
         arr = self.attr(L, obj, key, "array", required, where)
         if arr is ABSENT or arr is BAD:
@@ -521,6 +746,9 @@ class Engine:
             sig["spans"] = self.array_of(L, obj, "spans", False, self.open_span, typ, t)
             if isinstance(obj.get("spans"), list) and not obj["spans"]:
                 L.add("spans-empty", "snapshot: spans is present but empty; it is omitted when no span is open")
+            sig["backlogs"] = self.array_of(L, obj, "backlogs", False, self.backlog, typ)
+            if isinstance(obj.get("backlogs"), list) and not obj["backlogs"]:
+                L.add("backlogs-empty", "snapshot: backlogs is present but empty; it is omitted when it would be empty")
         elif typ == "add":
             sig["elements"] = self.array_of(L, obj, "elements", False, self.element, typ)
             sig["links"] = self.array_of(L, obj, "links", False, self.link, typ)
@@ -589,8 +817,11 @@ class Engine:
         obj = parsed.obj
         if obj is not None:
             self.signal(L, obj, parsed.duplicates)
-        self.violations.extend(L.violations)
-        self.warnings.extend((lineno, w) for w in L.warnings)
+        for v in L.violations:
+            self.violation_count += 1
+            self.on_violation(v)
+        for w in L.warnings:
+            self.on_message(lineno, "warning", w)
 
     def signal(self, L: Line, obj: dict, duplicates: list[str]) -> None:
         typ = self.attr(L, obj, "type", "str", True, "signal")
@@ -629,9 +860,15 @@ class Engine:
         sequence_ok = True
         if not new_session:
             if sess is None:
-                L.add("snapshot-first", f"the first signal of source {src!r} must be a snapshot with seq 0 "
-                                        f"(got {where} with seq {seq})")
-                return  # belongs to no session: not received in Loss
+                # belongs to no session: ignored, and not received in Loss; reported once per source
+                if not st.orphan_reported:
+                    st.orphan_reported = True
+                    L.add("snapshot-first", f"source {src!r} has no session: a session begins with a snapshot "
+                                            f"with seq 0, but its first signal is {where} with seq {seq}. "
+                                            "\"If the discarded signals include the snapshot that begins the "
+                                            "session, the source begins a new session instead\" (Loss); "
+                                            "signals of this source are ignored until a seq-0 snapshot")
+                return
             if seq <= sess.last_seq:
                 L.add("seq-order", f"seq {seq} does not increase over {sess.last_seq}")
                 sequence_ok = False
@@ -682,28 +919,37 @@ class Engine:
         fresh = self.new_session(src, lineno, t)
         old = st.session
         if old is not None:  # the observer keeps the state it holds
-            fresh.elements, fresh.links, fresh.spans, fresh.backlog = old.elements, old.links, old.spans, old.backlog
+            fresh.replace(old.elements, old.links, old.spans)
+            fresh.backlog = old.backlog
         fresh.applied_t = 0.0  # nothing of the new session has been applied
         st.session = fresh
 
     def new_session(self, src: str, lineno: int, t: float) -> Session:
         w = self.window if self.window is not None else self.windows.get((src, lineno))
-        return Session(start_line=lineno, T=t, w=w, last_seq=0, last_t=t, applied_t=t, snap_t=t)
+        return Session(start_line=lineno, T=t, w=w, last_seq=0, last_t=t, applied_t=t, snap_t=t,
+                       used_spans=RecentIds(self.span_ids))
 
     # ---- windows ----------------------------------------------------------------------------
 
     def check_depth_due(self, L: Line, sess: Session, t: float, gap: int) -> None:
         if gap > 0:  # the depth signal may have been among the lost ones
-            sess.depth_due.clear()
+            sess.clear_depth_due()
             return
-        for ident, due in sorted(sess.depth_due.items()):
-            if t > due + self.wtol(sess):
-                L.add("depth-missing", f"{ident!r} had a non-zero backlog at window end {due - sess.w:.6f} "
-                                       f"but no depth signal at the next window end {due:.6f}")
+        heap, tol, overdue = sess.depth_heap, self.wtol(sess), []
+        while heap and t > heap[0][0] + tol:
+            due, ident = heapq.heappop(heap)
+            if sess.depth_due.get(ident) == due:  # not a stale entry
                 del sess.depth_due[ident]
+                overdue.append((ident, due))
+        for ident, due in sorted(overdue):
+            L.add("depth-missing", f"{ident!r} had a non-zero backlog at window end {due - sess.w:.6f} "
+                                   f"but no depth signal at the next window end {due:.6f}")
 
     def wtol(self, sess: Session) -> float:
-        return max(self.tol, RELATIVE_TOLERANCE * sess.w) if sess.w is not None else self.tol
+        # the larger of the absolute floor, a fraction of the window, and a few ULPs of the times
+        # (2.4e-7 s each near T = 1.76e9)
+        floor = max(self.tol, 4 * math.ulp(sess.T))
+        return max(floor, RELATIVE_TOLERANCE * sess.w) if sess.w is not None else floor
 
     def check_window(self, L: Line, sess: Session, typ: str, ident: str, t0: float | None, t: float) -> tuple | None:
         """Checks window alignment and duplicates; returns the window key of the signal.
@@ -713,9 +959,9 @@ class Engine:
         if sess.w is None:
             if not sess.window_note:
                 sess.window_note = True
-                self.notes.append((L.lineno, f"the window length of source {self._source!r} in the session "
+                self.on_message(L.lineno, "note", f"the window length of source {self._source!r} in the session "
                                              f"starting at line {sess.start_line} cannot be inferred (no flow or "
-                                             "latency signal); window rules are not checked (use --window)"))
+                                             "latency signal); window rules are not checked (use --window)")
             return None
         w, tol = sess.w, self.wtol(sess)
         if t0 is not None and abs((t - t0) - w) > tol:
@@ -734,14 +980,16 @@ class Engine:
             L.add("window-bounds", f"{typ}: window ends at {t}, before the end of the session's first window")
         k_end = k + 1 if t0 is not None else k
         key = (typ, ident, k_end)
-        if key in sess.window_seen:
+        if sess.window_seen.get(ident, {}).get(typ) == k_end:
             L.add("window-duplicate", f"{typ}: a second {typ} signal for {ident!r} in the window ending at {t}")
         return key
 
     def accept_window(self, sess: Session, key: tuple | None, boundary: float) -> None:
         if key is None:
             return
-        sess.window_seen.add(key)
+        typ, ident, k_end = key
+        # applied signals of a session do not go back in t, so only the latest window can repeat
+        sess.window_seen.setdefault(ident, {})[typ] = k_end
         if sess.phase is None:
             sess.phase = boundary
 
@@ -813,21 +1061,30 @@ class Engine:
                 # parent that was not open): it keeps the parent its source first sent
                 raw = raw[:2] + (cur.raw[2],) + raw[3:]
             opened.setdefault(s["span"], OpenSpan(out, raw))
+        backlogs: dict[str, dict] = {}
+        for i, b in enumerate(sig["backlogs"] if sig["backlogs"] is not ABSENT else []):
+            if b["id"] not in pos and b["id"] not in link_ids:
+                L.add("ref-missing", f"snapshot: backlogs[{i}] names {b['id']!r}, which is not a listed element or link")
+            elif b["id"] in backlogs:
+                L.add("backlog-duplicate", f"snapshot: backlogs[{i}] lists {b['id']!r} a second time")
+            else:
+                backlogs[b["id"]] = {k: b[k] for k in ("value", "capacity") if k in b}
         if L.hard:
             return False
         if not new_session and self._gap == 0 and sess.applied and (elements or links or spans):
             self.compare_snapshot(L, sess, elements, links, opened)
-        sess.elements = {e["id"]: e for e in elements}
-        sess.links = {lk["id"]: lk for lk in links}
-        sess.spans = opened
+        sess.replace({e["id"]: e for e in elements}, {lk["id"]: lk for lk in links}, opened)
         if new_session:
-            sess.used_spans = set()
-            sess.window_seen = set()
+            sess.used_spans = RecentIds(self.span_ids)
+            sess.window_seen = {}
             sess.phase = None
-        sess.used_spans |= set(opened)
-        sess.backlog = {}
+        for span in opened:
+            sess.used_spans.add(span)
+        # "the value of its last depth signal since the last snapshot, or else its value in the
+        # backlogs of that snapshot, or else zero" (Windows)
+        sess.backlog = backlogs
         sess.depth_last = {}
-        sess.depth_due = {}
+        sess.clear_depth_due()
         sess.snap_t = t
         sess.snap_is_start = new_session
         sess.applied = True
@@ -908,34 +1165,35 @@ class Engine:
         if L.hard:
             return False
         for e in elements:
-            sess.elements[e["id"]] = e
+            sess.put_element(e)
+            sess.added_t[e["id"]] = t
         for lk in links:
-            sess.links[lk["id"]] = lk
+            sess.put_link(lk)
+            sess.added_t[lk["id"]] = t
         return True
 
     def sem_remove(self, L: Line, st: SourceState, sess: Session, sig: dict, t: float, new_session: bool) -> bool:
         for ident in sig["ids"]:
             if ident in sess.elements:
-                gone = {ident}
-                grew = True
-                while grew:
-                    grew = False
-                    for eid, e in sess.elements.items():
-                        if eid not in gone and e.get("parent") in gone:
-                            gone.add(eid)
-                            grew = True
-                for eid in gone:
-                    del sess.elements[eid]
-                dead = [lid for lid, lk in sess.links.items() if lk["from"] in gone or lk["to"] in gone]
+                gone, todo = {ident}, [ident]
+                while todo:
+                    for child in sess.children.get(todo.pop(), ()):
+                        if child not in gone:
+                            gone.add(child)
+                            todo.append(child)
+                dead = {lid for eid in gone for lid in sess.links_at.get(eid, ())}
+                ending = sorted({span for eid in gone for span in sess.spans_at.get(eid, ())})
                 for lid in dead:
-                    del sess.links[lid]
-                for span_id in sorted(s for s, sp in sess.spans.items() if sp.out["id"] in gone):
-                    rec = dict(sess.spans.pop(span_id).out)
+                    sess.pop_link(lid)
+                for span_id in ending:
+                    rec = dict(sess.pop_span(span_id).out)
                     rec.update(t1=t, status="error")
-                    st.ended.append(rec)
-                self.forget(sess, gone | set(dead))
+                    self.ended(st, rec)
+                for eid in gone:
+                    sess.pop_element(eid)
+                self.forget(sess, gone | dead)
             elif ident in sess.links:
-                del sess.links[ident]
+                sess.pop_link(ident)
                 self.forget(sess, {ident})
             # otherwise skipped
         return True
@@ -945,8 +1203,9 @@ class Engine:
         for ident in ids:
             sess.backlog.pop(ident, None)
             sess.depth_last.pop(ident, None)
-            sess.depth_due.pop(ident, None)
-        sess.window_seen = {k for k in sess.window_seen if k[1] not in ids}
+            sess.depth_due.pop(ident, None)  # its heap entry becomes stale
+            sess.added_t.pop(ident, None)
+            sess.window_seen.pop(ident, None)
 
     def ref_measured(self, L: Line, sess: Session, typ: str, key: str, ident: str, links_only: bool) -> None:
         if ident in sess.links or (not links_only and ident in sess.elements):
@@ -990,7 +1249,10 @@ class Engine:
             if prev is not None and prev[1] == 0:
                 L.add("depth-zero", f"depth: {ident!r} reports 0 again; its previous depth was already 0")
             elif prev is None and sess.w is not None and (
-                    (self.direct and sess.snap_is_start) or t - sess.w > sess.snap_t + self.wtol(sess)):
+                    (self.direct and sess.snap_is_start) or t - sess.w > sess.snap_t + self.wtol(sess)
+                    or sess.added_t.get(ident, -math.inf) > t - sess.w + self.wtol(sess)):
+                # "the backlog at the end of the window before window 0, and at the end of a window
+                # before an element or link existed, is zero" (Windows)
                 prev_end = t - sess.w
                 L.add("depth-zero", f"depth: {ident!r} reports 0 but had no non-zero depth at the previous "
                                     f"window end {prev_end:.6f}")
@@ -1003,7 +1265,7 @@ class Engine:
             entry["capacity"] = sig["capacity"]
         sess.backlog[ident] = entry
         if value > 0 and sess.w is not None:
-            sess.depth_due[ident] = t + sess.w
+            sess.set_depth_due(ident, t + sess.w)
         else:
             sess.depth_due.pop(ident, None)
         return True
@@ -1026,7 +1288,7 @@ class Engine:
             else:
                 L.add("span-parent", f"span.start: parent {parent!r} is not an open span (treated as omitted)")
         raw_parent = parent if parent is not ABSENT else None
-        sess.spans[span] = OpenSpan(out, (ident, sig["label"], raw_parent, t))
+        sess.put_span(span, OpenSpan(out, (ident, sig["label"], raw_parent, t)))
         sess.used_spans.add(span)
         return True
 
@@ -1035,11 +1297,11 @@ class Engine:
         if span not in sess.spans:
             L.add("span-not-open", f"span.end: span {span!r} is not open")
             return False
-        rec = dict(sess.spans.pop(span).out)
+        rec = dict(sess.pop_span(span).out)
         rec.update(t1=t, status=sig["status"])
         if sig["error"] is not ABSENT:
             rec["error"] = sig["error"]
-        st.ended.append(rec)
+        self.ended(st, rec)
         return True
 
     # ---- results ----------------------------------------------------------------------------
@@ -1069,12 +1331,15 @@ class Engine:
 
 
 def run(path: str | Path, mode: str, window: float | None = None, direct: bool = False,
-        tolerance: float = DEFAULT_TOLERANCE) -> Engine:
-    lines = read_lines(path)
-    engine = Engine(mode, infer_windows(lines), window, direct, tolerance)
-    for lineno, parsed in lines:
+        tolerance: float = DEFAULT_TOLERANCE, span_ids: int = DEFAULT_SPAN_IDS, **callbacks: Any) -> Engine:
+    """Two passes over the file, the window lengths first, then the signals. Memory is bounded by
+    the live state, not by the recording's length (except `fold`'s list of ended spans, which is
+    its output, and violations when no on_violation callback is given). Violations come in line
+    order."""
+    windows = infer_windows(read_lines(path)) if window is None else {}
+    engine = Engine(mode, windows, window, direct, tolerance, span_ids, **callbacks)
+    for lineno, parsed in read_lines(path):
         engine.feed(lineno, parsed)
-    engine.violations.sort(key=lambda v: v.line)
     return engine
 
 
@@ -1131,6 +1396,9 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--direct", action="store_true",
                         help="the recording was taken directly from its sources, not through a relay: "
                              "anchor windows at the t of each seq-0 snapshot")
+        sp.add_argument("--span-ids", type=int, default=DEFAULT_SPAN_IDS, metavar="N",
+                        help=f"span IDs remembered per session to detect span-reuse (default {DEFAULT_SPAN_IDS}; "
+                             "0 remembers all, with memory growing with the session)")
         sp.add_argument("--tolerance", type=float, default=DEFAULT_TOLERANCE,
                         help=f"absolute tolerance in seconds for window boundaries (default {DEFAULT_TOLERANCE}); "
                              f"{RELATIVE_TOLERANCE:g} of the window length is also allowed")
@@ -1141,9 +1409,24 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.window is not None and not args.window > 0:
         parser.error("--window must be positive")
-    options = dict(window=args.window, direct=args.direct, tolerance=args.tolerance)
+    if args.span_ids < 0:
+        parser.error("--span-ids must be 0 or more")
+    options = dict(window=args.window, direct=args.direct, tolerance=args.tolerance, span_ids=args.span_ids)
     for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(errors="backslashreplace")
+    schema_rules: list[Violation] = []  # (line, rule) only, for --schema
+
+    def print_violation(v: Violation) -> None:
+        print(f"line {v.line}: {v.rule}: {v.message}")
+        if getattr(args, "schema", False):
+            schema_rules.append(Violation(v.line, v.rule, ""))
+
+    def print_message(lineno: int, kind: str, text: str) -> None:
+        print(f"line {lineno}: {kind}: {text}", file=sys.stderr)
+
+    if args.command == "check":
+        options.update(on_violation=print_violation)
+    options.update(on_message=print_message)
     try:
         engine = run(args.recording, args.command, **options)
     except OSError as exc:
@@ -1152,24 +1435,18 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # a bug in the checker, never a verdict on the recording
         print(f"check.py: internal error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
-    for lineno, warning in engine.warnings:
-        print(f"line {lineno}: warning: {warning}", file=sys.stderr)
-    for lineno, note in engine.notes:
-        print(f"line {lineno}: note: {note}", file=sys.stderr)
     if args.command == "fold":
         json.dump(engine.state(), sys.stdout, sort_keys=True, indent=2, ensure_ascii=False)
         sys.stdout.write("\n")
         return 0
-    for v in engine.violations:
-        print(f"line {v.line}: {v.rule}: {v.message}")
     if args.schema:
-        notes = schema_disagreements(args.recording, engine.violations)
+        notes = schema_disagreements(args.recording, schema_rules)
         if notes is None:
             print("check.py: --schema: the jsonschema module is not importable; skipped", file=sys.stderr)
         else:
             for note in notes:
                 print(note)
-    return 1 if engine.violations else 0
+    return 1 if engine.violation_count else 0
 
 
 if __name__ == "__main__":

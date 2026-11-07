@@ -24,6 +24,7 @@
 - Aim to keep files under ~700 LOC; guideline only (not a hard guardrail). Split/refactor when it improves clarity or testability.
 - Add brief code comments for tricky or non-obvious logic.
 - **Logging**: Use OpenTelemetry via `rxplus/telemetry.py` (`OTelLogger`), never `print` or `logging` directly. Refer to `ai-instru` for the Grafana endpoint of dhproto.
+  Exception (D19): the `rxplus.reacting` core is standard-library only (D10), so it logs through `logging`, logger `rxplus.reacting`.
 - **Documentation**: After implementing any new component or instance, add a doc in `docs/` covering: introduction, arguments, reactive components, dataflow graph, sink/stream data types, log records, potential vulnerabilities.
 
 

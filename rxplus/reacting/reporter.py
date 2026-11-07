@@ -170,6 +170,11 @@ class Reporter:
         return self._st.live
 
     @property
+    def window(self) -> float:
+        """The window length ``w``, seconds."""
+        return self._st.w
+
+    @property
     def clock_errors(self) -> int:
         """Clock steps that raised. Each is logged (``rxplus.reacting``) and
         recovered from with a new session; the clock thread keeps running."""
@@ -584,13 +589,12 @@ class Reporter:
     def _shed(self, k: int) -> None:
         """Loss when the clock thread cannot keep up (findings N3, B).
 
-        O(1) in the counts held: the shared window storage is swapped for an
-        empty one and the old one dropped whole; depth state resets lazily
-        (epoch). Every window up to the *current* one is given up. To keep
-        ``t`` monotone, every change not emitted yet (this step's remaining
-        events and any posted since) is applied to the mirror without its
-        own signal; the snapshot, taken now, includes them. The ``seq`` gap
-        counts the signals not sent.
+        O(shards) in the counts held: each shard's windows are dropped whole.
+        Every window up to the *current* one is given up. To keep ``t``
+        monotone, every change not emitted yet (this step's remaining events
+        and any posted since) is applied to the mirror without its own
+        signal; the snapshot, taken now, includes them and lists the current
+        backlogs. The ``seq`` gap counts the signals not sent.
         """
         st = self._st
         with self._lock:
@@ -601,7 +605,6 @@ class Reporter:
             lost = sum(s.clear() for s in st.shards)  # O(shards), not O(totals)
             st.pending = 0
             st.saturated = False
-            st.epoch += 1
         self._silent = True
         try:
             if self._current is not None:
@@ -616,11 +619,40 @@ class Reporter:
         lost += max(end - k, 0) * len(self._watched)  # depth signals not created
         self._watched = {i for i in self._watched if i in self._accs}
         self._seq += max(lost, 1)
+        self._emit("snapshot", t_now, self._recovery_snapshot(t_now), exempt=True)
+
+    def _recovery_snapshot(self, t: float) -> Signal:
+        """The attributes of a snapshot that follows a Loss: the mirror and
+        every non-zero backlog (spec 5ad5cdb), from which the depth rules
+        continue. O(elements and links), like the snapshot itself."""
         attrs: Signal = {"protocol": PROTOCOL}
         if self._label is not None:
             attrs["label"] = self._label
-        attrs.update(self._mirror.snapshot(t_now, new_session=False))
-        self._emit("snapshot", t_now, attrs, exempt=True)
+        attrs.update(self._mirror.snapshot(t, new_session=False))
+        with self._lock:
+            accs = list(self._accs.items())
+        backlogs: list[Signal] = []
+        for ident, acc in accs:
+            if not self._mirror.exists(ident):
+                continue  # added after the events applied so far
+            sample = None
+            if acc.sampler is not None:
+                try:  # user code: on this thread, outside every lock
+                    sample = int(acc.sampler())
+                except Exception:
+                    sample = None
+            with acc.lock():
+                value = acc.snapshot_backlog(sample)
+            if value:
+                entry: Signal = {"id": ident, "value": value}
+                if acc.capacity is not None:
+                    entry["capacity"] = acc.capacity
+                backlogs.append(entry)
+            if value or acc.sampler is not None:
+                self._watched.add(ident)  # the next window end reports it
+        if backlogs:
+            attrs["backlogs"] = backlogs
+        return attrs
 
     def _close_one(self, k: int) -> bool:
         """Close window ``k``; False when it gave up (pending over the limit)."""
@@ -660,8 +692,6 @@ class Reporter:
                 except Exception:
                     sample = None
             tot = window.get(ident)
-            with acc.lock():
-                d = acc.depth(acc.later_delta(), sample)
             if tot is not None:
                 if ident in self._mirror.links and (
                     tot.items or tot.dropped or tot.coalesced
@@ -686,6 +716,12 @@ class Reporter:
                             "max": top,
                         },
                     )
+            if st.session != session:
+                return True  # the Loss above began a new session
+            # After the flow and latency: a Loss they caused has listed the
+            # backlogs and reset the depth state this depth continues from.
+            with acc.lock():
+                d = acc.depth(acc.later_delta(), sample)
             if d.value is not None:
                 depth: Signal = {"id": ident, "value": d.value}
                 if acc.capacity is not None:
@@ -733,11 +769,7 @@ class Reporter:
             # begin a new session instead (spec, Loss).
             self._begin_session(t, self._session_epoch)
         else:
-            attrs = {"protocol": PROTOCOL}
-            if self._label is not None:
-                attrs["label"] = self._label
-            attrs.update(self._mirror.snapshot(t, new_session=False))
-            self._emit("snapshot", t, attrs, exempt=True)
+            self._emit("snapshot", t, self._recovery_snapshot(t), exempt=True)
 
     # ------------------------------------------------------------------ writer
 

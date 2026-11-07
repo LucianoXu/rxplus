@@ -55,8 +55,12 @@ Options (both subcommands):
   are then anchored at the `t` of each seq-0 snapshot (`T` in the spec), and the depth rules are
   checked from the start of each session. Hub recordings are direct: they hold the signals as
   received from the sources. Use it for them and for source file-sink recordings.
+- `--span-ids N`: how many span IDs of a session are remembered to detect `span-reuse` (default
+  100000, as against 10,000 in the TypeScript fold). A reuse of an ID older than that is not
+  reported. `0` remembers all of them, and memory then grows with the session.
 - `--tolerance S`: the absolute floor, in seconds, of the tolerance for window boundaries (default
-  `1e-6`). The tolerance is the larger of this and 10⁻⁴ of the window length.
+  `1e-6`). The tolerance is the largest of this, 4 ULPs of the session's times (about 1 µs near
+  `1.76e9`) and 10⁻⁴ of the window length.
 - `--schema` (`check` only): if the `jsonschema` module is importable, also validates each signal
   against `docs/spec/Reacting.schema.json` and prints `line <n>: schema-disagreement: …` wherever
   the schema and the spec text disagree on the shape of one signal. These lines do not change the
@@ -71,11 +75,23 @@ Warnings (unknown attributes or signal types whose names do not start with `x-`,
 Exit status: `0` the recording is valid (`check`) or was folded (`fold`); `1` it has violations
 (`check`); `2` the checker could not decide: a usage error, an unreadable file, or an internal
 error, which is a bug in the checker and is reported on stderr. Malformed input never causes
-status 2. Input too deeply nested, integers too large, or lone surrogates are violations.
+status 2. Input nested too deep, integers too large, or lone surrogates are violations.
 
 **For sources:** record a session (e.g. with the rxplus file sink) and run `check`; add `--direct`
 when the recording did not pass through a relay. **For observers:** feed each `*.jsonl` here to
 your fold, convert the result to the conformance state, and compare it with `state`.
+
+Performance: `check` and `fold` read the recording twice (window lengths first) without keeping it
+in memory. Every signal costs what it touches, so a removal costs what it removes. Memory is bounded
+by the live state, not by the recording's length. That state is the elements, links, open spans and
+backlogs; per ID, its latest window and pending depth; per session, the last `--span-ids` span IDs;
+and for window inference, at most 100,000 distinct window boundaries per session. Violations are
+printed as they are found. `fold` alone also keeps every ended span, because its output lists them.
+Measured figures:
+
+- a 498k-line, 66 MB demo recording: `check` about 9 s and 29 MB;
+- four demo sources interleaved (8.1M lines, 1.09 GB): `check --direct` 200 s and 88 MB, where it
+  used to take 1.6 GB.
 
 ## Rules
 
@@ -85,6 +101,7 @@ your fold, convert the result to the conformance state, and compare it with `sta
 |---|---|
 | `encoding` | a line is not UTF-8, or carries a byte order mark |
 | `json` | a non-empty line is not one JSON object (NaN and Infinity are not JSON) |
+| `nesting-depth` | a line nests arrays and objects more than 64 levels deep (the signal itself is level 1) |
 | `duplicate-key` | an object of a signal has a duplicate key |
 | `attr-missing` | a required attribute is missing |
 | `attr-type` | an attribute has the wrong JSON type |
@@ -103,13 +120,16 @@ your fold, convert the result to the conformance state, and compare it with `sta
 | `add-empty` | an add has neither a non-empty `elements` nor a non-empty `links` |
 | `remove-empty` | a remove has an empty `ids` |
 | `spans-empty` | a snapshot has `spans` present but empty |
+| `backlogs-empty` | a snapshot has `backlogs` present but empty |
+| `backlog-zero` | a snapshot's `backlogs` entry has `value` 0 |
+| `backlog-duplicate` | a snapshot lists the backlog of one element or link twice |
 | `span-error-attr` | a `span.end` with status `ok` has an `error` |
 | `flow-zero` | a flow counts no item (`items`, `dropped` and `coalesced` all 0) |
 | `flow-bytes` | a flow has `bytes` > 0 but `items` = 0 |
 | `depth-capacity` | a depth `value` exceeds its `capacity` |
 | `latency-count` | a latency `count` is less than 1 |
 | `latency-stats` | `max` > `sum`, or `sum` > `count` · `max` |
-| `snapshot-first` | the first signal of a source is not a snapshot with `seq` 0 |
+| `snapshot-first` | the first signal of a source is not a snapshot with `seq` 0 (reported once per source) |
 | `seq-order` | `seq` does not strictly increase within a session |
 | `t-order` | `t` decreases within a session |
 | `loss-snapshot` | a `seq` gap is not followed by a snapshot as the next signal |
@@ -192,6 +212,31 @@ R8) and are now in the spec or in ConformanceState.md:
   recording extension line (Encoding) and is skipped entirely.
 - **Observers need not check Windows** (Receivers). `fold` applies signals that break the rules
   of Windows (`invalid/049`); `check` reports them.
+- **A session begins with its seq-0 snapshot, written.** "If the discarded signals include the
+  snapshot that begins the session, the source begins a new session instead" (Loss). So the first
+  signal written for a source is a snapshot with `seq` 0, and a source whose first signal has a
+  greater `seq` breaks `snapshot-first`. It is reported once, at that signal. The source's signals
+  are ignored, and do not count as received, until a seq-0 snapshot begins a session
+  (`invalid/001`, `invalid/068`).
+- **Snapshot backlogs.** "`backlogs` (optional, array of backlogs) lists non-zero backlogs of
+  existing elements and links, each element or link at most once. Omitted when it would be empty"
+  (Snapshot signals). Each entry must name an element or link listed in the same snapshot
+  (`ref-missing`), at most once (`backlog-duplicate`), with `value` at least 1 (`backlog-zero`) and
+  not above its `capacity` (`depth-capacity`). An empty array is `backlogs-empty`. The observer
+  takes "the `value` of its last depth signal since the last snapshot, or else its `value` in the
+  `backlogs` of that snapshot, or else zero" (Windows). So `fold` starts each snapshot's backlogs
+  from its `backlogs`, and a later depth signal or a removal overrides an entry (`valid/025`, and
+  `valid/026` for a recovery snapshot). `snapshot-no-gap-change` does not compare backlogs. The
+  depth rules (`depth-zero`, `depth-missing`) are about the backlog the source really had at each
+  window end, not about what a snapshot lists. Snapshot backlogs therefore change nothing they
+  check: after any snapshot the checker still accepts a first depth of `0`, as before, unless I2
+  shows the previous window end was observed (`invalid/071` to `074`).
+- **Nesting.** "A signal nests arrays and objects at most 64 levels deep, the signal itself being
+  level 1" (Encoding). The checker measures the depth outside JSON strings before parsing, without
+  recursion, so no input can exhaust the stack. A deeper line is reported as `nesting-depth` and is
+  not read at all. Its `source` and `seq` are therefore unknown and do not count as received, as
+  for a line that is not JSON, and as the TypeScript reader does. A later signal of that source
+  sees a gap (`invalid/069`, where `lost` is 1). Exactly 64 levels is valid (`valid/024`).
 - **Measured stays measured.** "an element or link it measures stays measured while it exists"
   (Windows). This is what makes `depth-missing` checkable (`invalid/021`).
 - **Protocol mismatch.** "A reader of a recording stops reading at that line" (Receivers). `fold`
@@ -222,20 +267,32 @@ Where the spec is still silent, the checker takes the most literal reading:
 
 - **I1. Window length and origin.** `window` is not transmitted (ruling C1-R3: no new
   attributes). Per session, the first estimate `d` is the median `t - t0` of the flow and latency
-  signals. Every `t0` and `t` is a window boundary, so for each boundary `b`, the value
-  `(b - b0) / round((b - b0) / d)` estimates the length, with an error that shrinks with distance.
-  `w` is the median of those estimates within 0.1 % of `d`. This holds for lengths such as 1/3 or
-  1/60 s written with a few decimals (`valid/015`). A session without flow or latency signals has
+  signals. Near `T` = 1.76e9 one ULP of a time is 2.4e-7 s, so `d` may be off by that much, and
+  that error grows k-fold over k windows. Every flow and latency `t0` and `t`, and every depth `t`,
+  is a window boundary. So the estimate is refined over the boundaries in order of their distance
+  from the first one. Each boundary's window count comes from the estimate so far. `w` is the
+  least-squares slope of boundary against window count, which averages out the rounding of every
+  boundary. In a short session that slope is still off by about an ULP divided by its span, for
+  example 5e-8 s over 10 windows near 1.79e9. A configured window is usually a short decimal, so the
+  slope and the decimal roundings of it and of the median compete. The one that puts the most
+  boundaries within 4 ULPs of `b0 + k·w` wins, and on a tie the shortest decimal wins. This holds
+  for lengths such as 1/3 s written with 7 decimals (`valid/015`), for 0.01, 0.02 and 0.05 s with
+  sparse flows over thousands of windows (`valid/019` to `valid/021`), and for short sessions with
+  one or two flows at Unix-epoch times, w = 0.01 and 0.005 (`valid/022`, `valid/023`). A session without flow or latency signals has
   no inferable `w`. Its window rules are skipped with a note unless `--window` is given
   (`valid/016`, `valid/017`). A relay forwards "the windows of the session the original source
   emits", and the observer may never see that session's seq-0 snapshot. So by default, all window
   boundaries of a session must share one phase, set by the first applied flow, latency or depth
   signal. `--direct` anchors them at `T`; hub recordings are direct (ruling C1-R3). Boundaries
-  match within max(`--tolerance`, 10⁻⁴ · `w`).
-- **I2. The depth rules are checked only where they are observable.** A depth of `0` at window end
-  `E` is a violation only if window `E - w` ended after the latest snapshot of the session (or the
-  session start, with `--direct`). Otherwise the non-zero depth may have been lost, or emitted
-  before a relay's observer connected (`valid/008`). `depth-missing` is reported at the next signal
+  match within max(`--tolerance`, 4 ULPs of `T`, 10⁻⁴ · `w`).
+- **I2. The depth rules are checked only where they are observable.** "For these conditions, the
+  backlog at the end of the window before window 0, and at the end of a window before an element or
+  link existed, is zero" (Windows). A depth of `0` at window end `E` is therefore a violation unless
+  the depth at `E - w` was non-zero. The checker can tell this in three cases. Window `E - w` ended
+  after the latest snapshot of the session. Or the session start is known (with `--direct`). Or the
+  element or link was added after `E - w` (`invalid/067`). In any other case the non-zero depth may
+  have been lost, or emitted before a relay's observer connected, and the depth is accepted
+  (`valid/008`). `depth-missing` is reported at the next signal
   of the session that has `t > E + w` and no `seq` gap.
 - **I3. Span parents.** A snapshot may list a span whose parent is not listed (the order rule
   applies "if the parent is open"). The parent is then omitted (`valid/006`). A `span.start` whose
