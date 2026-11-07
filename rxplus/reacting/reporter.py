@@ -129,6 +129,8 @@ class Reporter:
         self._current: _Event | None = None  # the event being processed
         self._silent = False  # _emit creates (seq) but does not queue: Loss
         self._clock_errors = 0  # clock steps that raised (see _step)
+        self._recoveries = 0  # recovery snapshots built (depth state reset)
+        self._held = 0  # totals moved out of the shards, not yet closed
 
         # The bounded queue: (line, opens the session, epoch), under _qlock.
         self._qlock = threading.Lock()
@@ -559,6 +561,38 @@ class Reporter:
         # window `end` (accumulators read st.closed under their lock).
         st.closed = end
         session = st.session
+        # Every window below `end`, moved out of the shards in one pass (one
+        # lock per shard, not per window: issue #27). A window below k (a
+        # caller read `closed` just before the clock advanced) counts in k
+        # (R3). A shard that holds nothing is skipped without its lock: a
+        # total being added to it right now stays for the next step (R3).
+        closing: dict[int, dict[str, Totals]] = {}
+        for shard in st.shards:
+            if shard.count == 0 and not shard.windows:
+                continue
+            for j, part in shard.take_below(end).items():
+                # Still held (by this step) until closed: the cap counts them.
+                self._held += len(part)
+                into = closing.setdefault(max(j, k), {})
+                for ident, tot in part.items():
+                    held = into.get(ident)
+                    if held is None:
+                        into[ident] = tot
+                    else:
+                        held.merge(tot)
+        try:
+            self._close_windows(k, end, session, closing)
+        finally:
+            self._held = 0  # what is left in `closing` is dropped with it
+
+    def _close_windows(
+        self,
+        k: int,
+        end: int,
+        session: int,
+        closing: dict[int, dict[str, Totals]],
+    ) -> None:
+        st = self._st
         first = k
         while k < end and st.session == session:
             if k > first:
@@ -568,12 +602,11 @@ class Reporter:
                     return
             if not self._watched:
                 # Nothing to report until the next window with counts.
-                busy = [j for s in st.shards if (j := s.first(end)) is not None]
-                nxt = min(busy, default=end)
+                nxt = min((j for j in closing if j >= k), default=end)
                 if nxt >= end:
                     break
-                k = max(k, nxt)
-            if not self._close_one(k):
+                k = nxt
+            if not self._close_one(k, closing):
                 self._shed(k)
                 return
             k += 1
@@ -582,7 +615,7 @@ class Reporter:
         """Window totals held now (O(shards)); also corrects the hot path's
         approximate count."""
         st = self._st
-        n = sum(s.count for s in st.shards)
+        n = sum(s.count for s in st.shards) + self._held
         st.pending = n
         return n
 
@@ -604,6 +637,7 @@ class Reporter:
             st.closed = max(end, st.closed)  # late events count in `end`
             lost = sum(s.clear() for s in st.shards)  # O(shards), not O(totals)
             st.pending = 0
+            self._held = 0  # what this step had moved out is given up too
             st.saturated = False
         self._silent = True
         try:
@@ -625,6 +659,7 @@ class Reporter:
         """The attributes of a snapshot that follows a Loss: the mirror and
         every non-zero backlog (spec 5ad5cdb), from which the depth rules
         continue. O(elements and links), like the snapshot itself."""
+        self._recoveries += 1
         attrs: Signal = {"protocol": PROTOCOL}
         if self._label is not None:
             attrs["label"] = self._label
@@ -654,26 +689,17 @@ class Reporter:
             attrs["backlogs"] = backlogs
         return attrs
 
-    def _close_one(self, k: int) -> bool:
-        """Close window ``k``; False when it gave up (pending over the limit)."""
+    def _close_one(self, k: int, closing: dict[int, dict[str, Totals]]) -> bool:
+        """Close window ``k``, taken from ``closing`` (the windows this step
+        moved out of the shards, all at or after ``k``); False when it gave
+        up (pending over the limit)."""
         st = self._st
         t0 = st.T + k * st.w
         t = st.T + (k + 1) * st.w
         session = st.session
-        # Moved out of each shard under its lock, processed outside: no
-        # caller writes into these dicts any more. A window below k (a
-        # caller read `closed` just before the clock advanced) counts here
-        # (R3).
-        window: dict[str, Totals] = {}
-        for shard in st.shards:
-            for part in shard.take(k):
-                st.pending -= len(part)
-                for ident, part_tot in part.items():
-                    held = window.get(ident)
-                    if held is None:
-                        window[ident] = part_tot
-                    else:
-                        held.merge(part_tot)
+        window = closing.pop(k, {})
+        self._held -= len(window)
+        due: list[tuple[str, Accumulator, Totals | None, int | None]] = []
         for n, ident in enumerate(list(window.keys() | self._watched)):
             if st.session != session:
                 return True  # a Loss began a new session: these windows are gone
@@ -716,21 +742,70 @@ class Reporter:
                             "max": top,
                         },
                     )
-            if st.session != session:
-                return True  # the Loss above began a new session
-            # After the flow and latency: a Loss they caused has listed the
-            # backlogs and reset the depth state this depth continues from.
-            with acc.lock():
-                d = acc.depth(acc.later_delta(), sample)
-            if d.value is not None:
-                depth: Signal = {"id": ident, "value": d.value}
-                if acc.capacity is not None:
-                    depth["capacity"] = acc.capacity
-                self._emit("depth", t, depth)
-            if d.watched:
-                self._watched.add(ident)
+            if not acc.quiet(tot):
+                due.append((ident, acc, tot, sample))
             else:
-                self._watched.discard(ident)
+                self._watched.discard(ident)  # most flow-only links (issue #27)
+        if st.session != session:
+            return True  # a Loss above began a new session
+        # Depth after all the flow and latency of the window, one lock per
+        # shard (not per id: issue #27). A Loss that the flow or latency
+        # caused has listed the backlogs and set the depth state these
+        # depths continue from.
+        by_shard: dict[int, list[tuple[str, Accumulator, Totals | None, int | None]]]
+        by_shard = {}
+        for item in due:
+            by_shard.setdefault(id(item[1].lock()), []).append(item)
+        for group in by_shard.values():
+            if not self._depths(group, closing, t, session):
+                return True  # a Loss began a new session
+        return True
+
+    def _depths(
+        self,
+        group: list[tuple[str, "Accumulator", Totals | None, int | None]],
+        closing: dict[int, dict[str, Totals]],
+        t: float,
+        session: int,
+    ) -> bool:
+        """Depth of ids that share a shard: computed under its lock, emitted
+        outside it. If an emission causes a Loss, the rest are computed again
+        from the state the recovery snapshot set. False: a new session."""
+        st = self._st
+        lock = group[0][1].lock()
+        while group:
+            # Backlog changes after this boundary: in the windows this step
+            # still closes, and in those the shard holds.
+            later = [
+                sum(w[ident].delta for w in closing.values() if ident in w)
+                for ident, _, _, _ in group
+            ]
+            with lock:
+                depths = [
+                    acc.depth(acc.later_delta() + extra, sample)
+                    for (_, acc, _, sample), extra in zip(group, later, strict=True)
+                ]
+            recoveries = self._recoveries
+            for i, ((ident, acc, _, _), d) in enumerate(
+                zip(group, depths, strict=True)
+            ):
+                if d.value is not None:
+                    depth: Signal = {"id": ident, "value": d.value}
+                    if acc.capacity is not None:
+                        depth["capacity"] = acc.capacity
+                    self._emit("depth", t, depth)
+                if d.watched:
+                    self._watched.add(ident)
+                else:
+                    self._watched.discard(ident)
+                if st.session != session:
+                    return False
+                if self._recoveries != recoveries:
+                    group = group[i + 1 :]  # computed before the Loss: again
+                    break
+            else:
+                group = []
+        return True
         return True
 
     def _emit(
