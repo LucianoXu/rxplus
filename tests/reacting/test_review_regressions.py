@@ -259,7 +259,7 @@ def test_submodules_are_attributes_and_concurrent_first_import_works():
         import importlib, threading, rxplus
         assert rxplus.ws.RxWSServer and rxplus.reacting.Reporter
         names = ["RxWSServer", "tag", "OTelLogger", "GatewayNode", "Duplex",
-                 "from_cli", "retry_with_signal", "WSStr", "BufferK"] * 3
+                 "from_cli", "retry_with_signal", "WSStr", "BoundedBuffer"] * 3
         errors = []
         barrier = threading.Barrier(len(names))
         def go(n):

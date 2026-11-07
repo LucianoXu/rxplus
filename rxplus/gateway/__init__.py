@@ -2,7 +2,7 @@
 
 This package provides generic infrastructure for building protocol-specific
 reactive gateways with:
-    - Buffer overflow strategies (DropOld, DropNew, BufferK, Disconnect)
+    - A bounded buffer with overflow strategies (BoundedBuffer)
     - Stream lifecycle management (INIT → OPEN → ACTIVE → CLOSED)
     - Connection state tracking with HELLO/HELLO_ACK handshake
     - Tagged frame routing for multiplexed connections
@@ -35,7 +35,7 @@ Example:
 # Connection management
 from .connection import (
     Connection,
-    ConnectionState,
+    GatewayConnectionState,
     HelloPayload,
 )
 
@@ -50,18 +50,14 @@ from .node import (
     GatewayNode,
 )
 from .overflow import (
-    BufferK,
-    Disconnect,
+    BoundedBuffer,
     DisconnectError,
-    DropNew,
-    DropOld,
-    OverflowPolicy,
+    OverflowStrategy,
     create_overflow_policy,
 )
 
 # Stream management
 from .stream import (
-    OverflowStrategy,
     StreamInfo,
     StreamState,
     StreamTable,
@@ -69,20 +65,16 @@ from .stream import (
 
 __all__ = [
     # Overflow
-    "OverflowPolicy",
-    "DropOld",
-    "DropNew",
-    "BufferK",
-    "Disconnect",
+    "BoundedBuffer",
+    "OverflowStrategy",
     "DisconnectError",
     "create_overflow_policy",
     # Stream
-    "OverflowStrategy",
     "StreamState",
     "StreamInfo",
     "StreamTable",
     # Connection
-    "ConnectionState",
+    "GatewayConnectionState",
     "Connection",
     "HelloPayload",
     # Framing
