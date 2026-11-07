@@ -95,6 +95,10 @@ class Connection:
     _server_connection: int | None = field(default=None, repr=False)  # inbound
     _ws_up: bool = field(default=False, repr=False)  # outbound socket connected
     _hello_sent: bool = field(default=False, repr=False)  # inbound: HELLO sent
+    _was_ready: bool = field(default=False, repr=False)  # on_connection emitted
+    # Data frames that arrived before READY (e.g. a peer's offline buffer,
+    # flushed ahead of its HELLO after a reconnect); delivered once READY.
+    _early: list[object] = field(default_factory=list, repr=False)
     _hello_received: bool = field(default=False, repr=False)
     _hello_ack_received: bool = field(default=False, repr=False)
 

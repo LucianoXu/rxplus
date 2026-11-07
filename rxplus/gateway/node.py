@@ -59,6 +59,8 @@ from .framing import Framing, TaggedFrame
 
 F = TypeVar("F", bound=Framing)
 
+_EARLY_LIMIT = 1024  # data frames kept per connection before READY
+
 
 class GatewayNode[F: Framing]:
     """Symmetric gateway node with HELLO/HELLO_ACK handshake.
@@ -191,6 +193,13 @@ class GatewayNode[F: Framing]:
     def _setup_server_pipeline(self):
         """Wire up inbound connections: one Connection per server socket."""
         self._disposables.add(
+            self._server.subscribe(
+                on_error=lambda e: self._otel_logger.error(
+                    f"Server pipeline error: {e}"  # e.g. the port cannot be bound
+                ),
+            )
+        )
+        self._disposables.add(
             self._server.connections.subscribe(
                 on_next=self._on_server_connection,
                 on_error=lambda e: self._otel_logger.error(f"Server error: {e}"),
@@ -228,16 +237,37 @@ class GatewayNode[F: Framing]:
             # peer has subscribed to it.
             return
         with self._connections_lock:
-            conn_id = self._inbound.pop(event.connection_id, None)
-            closed = self._connections.pop(conn_id, None) if conn_id else None
+            conn_id = self._inbound.get(event.connection_id)
+            closed = self._connections.get(conn_id) if conn_id else None
         if closed is not None:
             # The peer's socket is gone: 0.1 kept such connections READY.
-            closed.state = GatewayConnectionState.CLOSED
-            closed._disposables.dispose()
-            self._otel_logger.info(
-                f"Inbound connection closed: {closed.conn_id.hex()[:16]}"
-            )
-            self._on_disconnection.on_next(closed.conn_id)
+            self._finish(closed, "peer socket closed")
+
+    def _finish(self, conn: Connection, reason: str) -> bool:
+        """Close a connection once: CLOSED, forgotten, subscriptions disposed.
+
+        ``on_disconnection`` pairs with ``on_connection``: it fires for an
+        inbound connection only if it reached READY, and for every outbound
+        connection (its id was returned by :meth:`connect`).
+        """
+        with self._connections_lock:
+            if conn.state == GatewayConnectionState.CLOSED:
+                return False
+            # Under the lock, so _check_handshake_complete cannot emit
+            # on_connection after this.
+            conn.state = GatewayConnectionState.CLOSED
+            self._connections.pop(conn.conn_id, None)
+            if conn._server_connection is not None:
+                self._inbound.pop(conn._server_connection, None)
+            notify = conn.direction == "outbound" or conn._was_ready
+            conn._early.clear()
+        conn._disposables.dispose()
+        self._otel_logger.info(
+            f"Connection closed ({reason}): {conn.conn_id.hex()[:16]}"
+        )
+        if notify:
+            self._on_disconnection.on_next(conn.conn_id)
+        return True
 
     def _on_inbound_data(self, received: WSReceived) -> None:
         tagged = self._handle_inbound_data(received)
@@ -272,17 +302,28 @@ class GatewayNode[F: Framing]:
         elif frame.is_hello_ack():
             return self._handle_hello_ack(conn, typed_frame)
 
-        # Only forward non-handshake events if connection is READY
         if conn.state != GatewayConnectionState.READY:
-            self._otel_logger.warning(
-                f"Received data on non-ready connection: {conn.conn_id.hex()[:16]}"
-            )
+            self._hold_early(conn, typed_frame)
             return None
 
         return TaggedFrame(
             frame=typed_frame,
             conn_id=conn.conn_id,
             peer_node_id=conn.peer_node_id,
+        )
+
+    def _hold_early(self, conn: Connection, frame: F) -> None:
+        """Keep a data frame that arrived before READY (bounded); 0.1 dropped
+        it. A peer's offline buffer reaches a new socket ahead of its HELLO."""
+        with self._connections_lock:
+            if (
+                conn.state == GatewayConnectionState.HANDSHAKING
+                and len(conn._early) < _EARLY_LIMIT
+            ):
+                conn._early.append(frame)
+                return
+        self._otel_logger.warning(
+            f"Dropped a frame on non-ready connection: {conn.conn_id.hex()[:16]}"
         )
 
     def _send_frame(self, conn: Connection, frame: F | Framing) -> bool:
@@ -360,6 +401,7 @@ class GatewayNode[F: Framing]:
         Thread-safe state transition with lock protection.
         """
         should_emit = False
+        early: list[object] = []
         with self._connections_lock:
             if (
                 conn._hello_received
@@ -367,7 +409,9 @@ class GatewayNode[F: Framing]:
                 and conn.state == GatewayConnectionState.HANDSHAKING
             ):
                 conn.state = GatewayConnectionState.READY
+                conn._was_ready = True
                 should_emit = True
+                early, conn._early = conn._early, []
                 peer = conn.peer_node_id.hex()[:16] if conn.peer_node_id else "unknown"
                 self._otel_logger.info(
                     f"Handshake complete: {conn.conn_id.hex()[:16]} ↔ {peer}"
@@ -375,6 +419,16 @@ class GatewayNode[F: Framing]:
         # Emit event outside lock to avoid potential deadlock
         if should_emit:
             self._on_connection.on_next(conn)
+            # Then the frames that arrived before READY, in order (on the
+            # thread that delivers this connection's frames).
+            for frame in early:
+                self._sink.on_next(
+                    TaggedFrame(
+                        frame=cast(F, frame),
+                        conn_id=conn.conn_id,
+                        peer_node_id=conn.peer_node_id,
+                    )
+                )
 
     def connect(self, host: str, port: int) -> bytes:
         """Initiate outbound connection to another node.
@@ -437,6 +491,11 @@ class GatewayNode[F: Framing]:
         if ws_client is None:
             return
 
+        def client_failed(error: Exception) -> None:
+            # The client ended with an error (e.g. retries exhausted): 0.1
+            # left the connection CONNECTING forever, without an event.
+            self._finish(conn, f"client error: {type(error).__name__}")
+
         # Inbound from client: decode and handle
         conn._disposables.add(
             ws_client.pipe(
@@ -444,9 +503,7 @@ class GatewayNode[F: Framing]:
                 ops.filter(lambda x: x is not None),
             ).subscribe(
                 on_next=lambda tagged: self._sink.on_next(tagged),  # type: ignore[arg-type]
-                on_error=lambda e: self._otel_logger.error(
-                    f"Client pipeline error for {conn.conn_id.hex()[:16]}: {e}"
-                ),
+                on_error=client_failed,
             )
         )
 
@@ -517,10 +574,7 @@ class GatewayNode[F: Framing]:
 
         elif ws_state == WSConnectionState.CLOSED:
             # WebSocket closed permanently (max retries or on_completed)
-            if conn.state != GatewayConnectionState.CLOSED:
-                self._otel_logger.info(f"WS closed permanently for {conn_id_short}")
-                conn.state = GatewayConnectionState.CLOSED
-                self._on_disconnection.on_next(conn.conn_id)
+            self._finish(conn, "WS closed permanently")
 
     def _handle_outbound_data(
         self, conn: Connection, data: bytes
@@ -540,12 +594,8 @@ class GatewayNode[F: Framing]:
         elif frame.is_hello_ack():
             return self._handle_hello_ack(conn, typed_frame)
 
-        # Only forward non-handshake events if connection is READY
         if conn.state != GatewayConnectionState.READY:
-            self._otel_logger.warning(
-                "Received data on non-ready outbound connection: "
-                f"{conn.conn_id.hex()[:16]}"
-            )
+            self._hold_early(conn, typed_frame)
             return None
 
         return TaggedFrame(
@@ -573,9 +623,7 @@ class GatewayNode[F: Framing]:
             True if connection was found and closed, False otherwise
         """
         with self._connections_lock:
-            conn = self._connections.pop(conn_id, None)
-            if conn is not None and conn._server_connection is not None:
-                self._inbound.pop(conn._server_connection, None)
+            conn = self._connections.get(conn_id)
 
         if conn is None:
             self._otel_logger.warning(
@@ -583,18 +631,12 @@ class GatewayNode[F: Framing]:
             )
             return False
 
-        # Close the connection
-        conn.state = GatewayConnectionState.CLOSED
-        conn._disposables.dispose()
-
+        if not self._finish(conn, "disconnect()"):
+            return False
         if conn._ws_client is not None:
             conn._ws_client.on_completed()
         if conn._server_connection is not None:
             self._server.close_connection(conn._server_connection)
-
-        self._otel_logger.info(f"Connection closed: {conn_id.hex()[:16]}")
-        self._on_disconnection.on_next(conn_id)
-
         return True
 
     def send_to(self, conn_id: bytes, frame: F) -> bool:

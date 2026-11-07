@@ -85,7 +85,7 @@ The client automatically retries connection until the server is available.
 | `ping_interval` | `30.0` | Heartbeat interval (seconds) |
 | `ping_timeout` | `30.0` | Heartbeat timeout (seconds) |
 | `name` | `None` | Custom name for log source identification |
-| `buffer_while_disconnected` | `False` | If `True`, queue messages while disconnected for delivery after reconnection. If `False`, messages are dropped when not connected. |
+| `buffer_while_disconnected` | `False` | If `True`, queue messages while disconnected for delivery after reconnection. If `False`, messages are dropped when not connected. A frame already taken for a socket that closed before it was handed over goes back to the front of the queue; one whose send failed part-way is not retried (no duplicates). |
 
 ### `RxWSClientGroup`
 

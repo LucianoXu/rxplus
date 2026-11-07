@@ -17,6 +17,7 @@ from reactivex import Subject
 from reactivex import operators as ops
 from reactivex.subject import BehaviorSubject
 from websockets import ClientConnection
+from websockets.protocol import State
 
 from ..mechanism import RxException
 from ..utils import get_full_error_info, get_short_error_info
@@ -623,6 +624,18 @@ class RxWSClient(Subject, OTelLoggingMixin):
                     # overflow="disconnect": drop this connection; the next
                     # one starts with an empty queue.
                     self._count_dropped(self.queue.reset())
+                    return
+                if websocket.state is not State.OPEN:
+                    # Closed before this frame was handed over: keep it for
+                    # the next connection (the queue outlives this one). A
+                    # failure inside send() may follow a partial write, so
+                    # that frame is not retried (no duplicates).
+                    self.queue.unget(frame)
+                    self._log(
+                        f"Server {remote_desc} closed; the frame is kept"
+                        " for the next connection",
+                        "WARN",
+                    )
                     return
                 try:
                     await websocket.send(frame)

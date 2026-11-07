@@ -104,7 +104,17 @@ class GatewayConnectionState(Enum):
 `Connection(conn_id, direction, remote_addr, state, peer_node_id, streams, created_at)`. An **inbound**
 connection is one server socket (0.2): it is created when the peer's socket opens and closed, with an
 `on_disconnection` event, when it closes. In 0.1 inbound connections were keyed by request path, never
-closed, and two peers on one path were merged.
+closed, and two peers on one path were merged. A peer that reconnects is a new socket, so a new
+connection with a new `conn_id`: key state by `peer_node_id` if it must survive reconnects.
+
+Events pair: `on_disconnection(conn_id)` follows an `on_connection` for that connection. An inbound
+socket that closes before its handshake completes emits neither. An outbound connection always ends with
+`on_disconnection` (its id was returned by `connect()`), including one whose client exhausted
+`retry_policy.max_retries` (0.1 left it `CONNECTING` forever).
+
+Data frames that arrive before the handshake completes (a peer's offline buffer reaches the new socket
+ahead of its HELLO) are kept, up to 1024 per connection, and delivered to `sink` in order right after
+`on_connection`. 0.1 dropped them.
 
 #### HelloPayload Dataclass
 

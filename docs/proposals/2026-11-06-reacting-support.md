@@ -503,8 +503,10 @@ class JsonCodec:
 **PR-B `refactor!(gateway)`: connections per socket**
 - F8: `RxWSServer.connections: Observable[WSConnectionEvent]` (additive, PR-A); `GatewayNode` keys
   inbound connections by socket, closes them on disconnect, emits `on_disconnection`.
-- F21: the four overflow classes become one `BoundedBuffer[T](limit, strategy)` used by PR-A's send
-  queues; `pop()` raises `IndexError` on empty instead of returning `None`.
+- F21: the four overflow classes become one `BoundedBuffer[T](limit, strategy)`, which serves the
+  gateway; `pop()` raises `IndexError` on empty instead of returning `None`. The WebSocket send path keeps
+  its own `SendQueue` (PR-A): it is used on the loop thread only and has a byte bound, needs a thread-safe
+  general buffer does not have (ruling on #26).
 - `GatewayNode` with no `logger_provider` logs nothing (no implicit console exporter).
 - `gateway.ConnectionState` is renamed `GatewayConnectionState`.
 

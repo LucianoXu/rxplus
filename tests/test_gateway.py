@@ -1,11 +1,13 @@
 """GatewayNode handshake over real local WebSocket connections."""
 
 import socket
+import threading
 import time
 from collections.abc import Callable
 
 from rxplus.gateway import GatewayConnectionState, GatewayNode
 from rxplus.telemetry import configure_telemetry
+from rxplus.ws import RetryPolicy
 
 
 class _Frame:
@@ -187,3 +189,165 @@ def test_node_without_logger_provider_is_silent(capfd):
     node.close()
     out, err = capfd.readouterr()
     assert "GatewayNode" not in out + err
+
+
+def test_frames_buffered_across_an_outbound_reconnect_arrive():
+    """Review of #26: the client's offline buffer reaches the new socket
+    ahead of HELLO, and B dropped it as data on a non-ready connection."""
+    a, b = _node(), _node()
+    try:
+        got: list[bytes] = []
+        b.sink.subscribe(lambda tagged: got.append(tagged.frame.payload))
+        cid = a.connect("127.0.0.1", b.port)
+        assert _wait_for(lambda: bool(b.get_ready_connections()))
+        assert _wait_for(lambda: cid in a.get_ready_connections())
+        client = a._connections[cid]._ws_client
+        assert client is not None and client._loop is not None
+        sent: list[int] = []
+        done = threading.Event()
+
+        def drop_then_send() -> None:
+            # On the client's loop: the socket dies, and before the client
+            # notices, the application sends; these frames are buffered
+            # while offline and flushed into the next socket.
+            client.ws.transport.abort()
+            for i in range(50):
+                if a.send_to(cid, _Frame(9, str(i).encode())):
+                    sent.append(i)
+            done.set()
+
+        client._loop.call_soon_threadsafe(drop_then_send)
+        assert done.wait(5.0)
+        assert sent == list(range(50))
+        assert _wait_for(lambda: len(got) == 50, timeout=10.0), len(got)
+        assert got == [str(i).encode() for i in range(50)]  # in order
+    finally:
+        a.close()
+        b.close()
+
+
+def test_data_ahead_of_hello_is_delivered_after_on_connection():
+    import asyncio
+
+    import websockets
+
+    b = _node()
+    events: list[str] = []
+    b.on_connection.subscribe(lambda conn: events.append("connection"))
+    b.sink.subscribe(lambda tagged: events.append(tagged.frame.payload.decode()))
+    try:
+
+        async def peer() -> None:
+            async with websockets.connect(f"ws://127.0.0.1:{b.port}/p") as ws:
+                await ws.send(_Frame.encode(_Frame(9, b"early")))
+                await ws.send(_Frame.encode(_Frame.create_hello(b"\x01" * 16)))
+                assert _Frame.decode(await ws.recv()).is_hello()
+                assert _Frame.decode(await ws.recv()).is_hello_ack()
+                await ws.send(_Frame.encode(_Frame.create_hello_ack(b"\x01" * 16)))
+                await ws.send(_Frame.encode(_Frame(9, b"late")))
+                await asyncio.sleep(0.3)
+
+        asyncio.run(peer())
+        assert _wait_for(lambda: len(events) == 3)
+        assert events == ["connection", "early", "late"]
+    finally:
+        b.close()
+
+
+def test_an_inbound_socket_that_never_handshakes_emits_no_events():
+    """on_disconnection pairs with on_connection (review of #26)."""
+    import asyncio
+
+    import websockets
+
+    b = _node()
+    connected: list[bytes] = []
+    disconnected: list[bytes] = []
+    b.on_connection.subscribe(lambda conn: connected.append(conn.conn_id))
+    b.on_disconnection.subscribe(disconnected.append)
+    try:
+
+        async def peer() -> None:
+            async with websockets.connect(f"ws://127.0.0.1:{b.port}/p") as ws:
+                await ws.send(_Frame.encode(_Frame(9, b"never ready")))
+                await asyncio.sleep(0.2)
+
+        asyncio.run(peer())
+        assert _wait_for(lambda: not b.connections)
+        time.sleep(0.2)
+        assert connected == [] and disconnected == []
+    finally:
+        b.close()
+
+
+def test_an_outbound_client_that_exhausts_its_retries_is_closed():
+    """0.1 left it CONNECTING in the table forever, without an event."""
+    _, quiet = configure_telemetry()
+    a = GatewayNode(
+        "127.0.0.1",
+        _free_port(),
+        framing_cls=_Frame,
+        logger_provider=quiet,
+        retry_policy=RetryPolicy(max_retries=1, base_delay=0.05),
+    )
+    try:
+        disconnected: list[bytes] = []
+        a.on_disconnection.subscribe(disconnected.append)
+        cid = a.connect("127.0.0.1", _free_port())  # nobody listens
+        assert _wait_for(lambda: disconnected == [cid], timeout=10.0)
+        assert a.get_connection(cid) is None
+    finally:
+        a.close()
+
+
+def test_disconnect_closes_once_with_one_event():
+    a, b = _node(), _node()
+    try:
+        disconnected: list[bytes] = []
+        a.on_disconnection.subscribe(disconnected.append)
+        cid = a.connect("127.0.0.1", b.port)
+        assert _wait_for(lambda: cid in a.get_ready_connections())
+        conn = a.get_connection(cid)
+        assert conn is not None
+        assert a.disconnect(cid)
+        assert not a.disconnect(cid)
+        assert conn.state == GatewayConnectionState.CLOSED
+        assert a.get_connection(cid) is None
+        time.sleep(0.2)
+        assert disconnected == [cid]
+    finally:
+        a.close()
+        b.close()
+
+
+def test_a_server_that_cannot_bind_logs_an_error():
+    """Review of #26: the bind failure went unreported."""
+    from opentelemetry.sdk._logs.export import (
+        InMemoryLogRecordExporter,
+        SimpleLogRecordProcessor,
+    )
+
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        port = taken.getsockname()[1]
+        exporter = InMemoryLogRecordExporter()
+        _, provider = configure_telemetry()
+        provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
+        node = GatewayNode(
+            "127.0.0.1", port, framing_cls=_Frame, logger_provider=provider
+        )
+        try:
+
+            def errors() -> list[str]:
+                return [
+                    str(r.log_record.body)
+                    for r in exporter.get_finished_logs()
+                    if r.log_record.severity_text == "ERROR"
+                ]
+
+            assert _wait_for(
+                lambda: any("Server pipeline error" in e for e in errors())
+            ), errors()
+        finally:
+            node.close()

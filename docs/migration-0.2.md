@@ -48,7 +48,12 @@ is in the last column.
 | `GatewayNode()` without `logger_provider` logged to the console | logs nothing | pass a `logger_provider` to see logs | B |
 | `ConnectionState` (`rxplus.ConnectionState`, `rxplus.gateway.ConnectionState`) | `GatewayConnectionState` | rename | B |
 | `DropOld`, `DropNew`, `BufferK`, `Disconnect`, `OverflowPolicy` | `BoundedBuffer(limit, strategy)` | `DropOld(n)` → `BoundedBuffer(n, "drop_old")`, etc. | B |
-| `buffer.pop()` returned `None` when empty | raises `IndexError` | check `len(buffer)` or catch `IndexError` | B |
+| `buffer.pop()` / `peek()` returned `None` when empty | raise `IndexError` | check `len(buffer)` or catch `IndexError` | B |
+| `DropOld(max_size=n)`, `DropNew(max_size=n)`, `Disconnect(max_size=n)`, `BufferK(k=n)` | `BoundedBuffer(limit=n, strategy=...)` | rename the keyword to `limit` | B |
+| an inbound peer that reconnected kept its connection id (path-keyed) | a reconnect is a new socket: `on_disconnection(old id)`, then `on_connection` with a new id | key your state by `peer_node_id` if it must survive reconnects | B |
+| `on_disconnection` for inbound connections | fires only for inbound connections that reached READY (it pairs with `on_connection`); always for outbound ones | — | B |
+| an outbound connection whose client exhausted its retries stayed `CONNECTING` | closed: `CLOSED`, removed, `on_disconnection` | — | B |
+| data frames arriving before READY were dropped | kept (up to 1024 per connection) and delivered after `on_connection` (a peer's offline buffer reaches a new socket ahead of its HELLO) | — | B |
 | `OverflowStrategy` defined in `gateway.stream` | defined in `gateway.overflow` (still exported by `rxplus.gateway`) | import from `rxplus.gateway` | B |
 | — | `RxWSServer.received` (values with their `connection_id`), `send_to(connection_id, value)`, `close_connection(connection_id)` | optional | B |
 

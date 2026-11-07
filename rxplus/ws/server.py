@@ -217,6 +217,7 @@ class RxWSServer(Subject, OTelLoggingMixin):
         # thread, read by send_to from any thread.
         self._clients_lock = threading.Lock()
         self._clients: dict[int, tuple[_Client, WSChannels]] = {}
+        self._closing_tasks: set[asyncio.Task[None]] = set()
 
         # Private asyncio loop in a background thread
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -270,8 +271,15 @@ class RxWSServer(Subject, OTelLoggingMixin):
         if entry is None or loop is None or loop.is_closed():
             return False
         websocket = entry[0].websocket
+
+        def start() -> None:
+            # Keep a reference until done: the loop holds tasks only weakly.
+            task = loop.create_task(websocket.close())
+            self._closing_tasks.add(task)
+            task.add_done_callback(self._closing_tasks.discard)
+
         try:
-            loop.call_soon_threadsafe(lambda: loop.create_task(websocket.close()))
+            loop.call_soon_threadsafe(start)
         except RuntimeError:
             return False
         return True
