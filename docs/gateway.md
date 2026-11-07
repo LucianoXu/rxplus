@@ -116,8 +116,17 @@ An outbound connection sends its HELLO first on every socket, ahead of its offli
 `greeting`). The receiving side drops data frames that arrive before the peer's HELLO, as in 0.1. Data
 frames between the peer's HELLO and READY (the buffer a reconnecting peer flushes) are kept and delivered
 to `sink` in order right after `on_connection`. They are bounded by `handshake_buffer` (1024 frames)
-and `handshake_buffer_bytes` (1 MiB of wire size) per connection; over either bound the connection is
-closed.
+and `handshake_buffer_bytes` (1 MiB of wire size) per connection. Over either bound the connection is
+closed, and how depends on the side:
+
+- inbound (the peer dialled this node): the socket closes; the peer's client reconnects, and what it had
+  flushed is lost;
+- outbound (this node dialled): the connection **ends**, with `on_disconnection` and no reconnect.
+
+So that a reconnect never overflows the peer's hold, an outbound connection's send queue, which is also
+its offline buffer, has the same bounds (`send_queue=handshake_buffer`,
+`send_queue_bytes=handshake_buffer_bytes`). Beyond them it drops its oldest frames and counts them in the
+client's `dropped`. Nodes that talk to each other should use the same limits.
 
 #### HelloPayload Dataclass
 

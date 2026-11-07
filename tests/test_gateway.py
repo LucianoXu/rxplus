@@ -416,3 +416,36 @@ def test_a_server_that_cannot_bind_logs_an_error():
             ), errors()
         finally:
             node.close()
+
+
+def test_an_offline_backlog_over_the_peers_hold_keeps_its_newest_frames():
+    """Review of #26 (p9): 200 x 20 KB buffered offline overflowed the peer's
+    1 MiB handshake hold, which closed the socket and lost all of them. The
+    outbound client's queue now has the same bounds and drops the oldest."""
+    a, b = _node(), _node()
+    try:
+        got: list[int] = []
+        b.sink.subscribe(lambda tagged: got.append(int(tagged.frame.payload[:8])))
+        cid = a.connect("127.0.0.1", b.port)
+        assert _wait_for(lambda: bool(b.get_ready_connections()))
+        assert _wait_for(lambda: cid in a.get_ready_connections())
+        client = a._connections[cid]._ws_client
+        assert client is not None and client._loop is not None
+        done = threading.Event()
+
+        def drop_then_send() -> None:
+            client.ws.transport.abort()
+            for i in range(200):
+                a.send_to(cid, _Frame(9, b"%08d" % i + b"x" * 20_000))
+            done.set()
+
+        client._loop.call_soon_threadsafe(drop_then_send)
+        assert done.wait(5.0)
+        kept = (1 << 20) // (1 + 8 + 20_000)  # wire size of one frame
+        assert _wait_for(lambda: len(got) == kept, timeout=10.0), len(got)
+        assert got == list(range(200 - kept, 200))  # the newest, in order
+        assert client.dropped == 200 - kept
+        assert a.get_connection(cid) is not None
+    finally:
+        a.close()
+        b.close()

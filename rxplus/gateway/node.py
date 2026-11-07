@@ -502,6 +502,13 @@ class GatewayNode[F: Framing]:
             ping_timeout=self._ping_timeout,
             name=f"{self._name}:client:{conn_id.hex()[:8]}",
             buffer_while_disconnected=True,  # Buffer messages during reconnect
+            # What a reconnect flushes after HELLO must fit the peer's hold
+            # between HELLO and READY (same defaults): the offline buffer
+            # drops its oldest frames, counted in the client's `dropped`,
+            # instead of overflowing the peer, which would close the socket
+            # and lose the whole buffer.
+            send_queue=self._handshake_buffer,
+            send_queue_bytes=self._handshake_buffer_bytes,
             # HELLO first on every socket, ahead of the offline buffer: the
             # peer drops data that arrives before HELLO.
             greeting=self._encoded_hello,
