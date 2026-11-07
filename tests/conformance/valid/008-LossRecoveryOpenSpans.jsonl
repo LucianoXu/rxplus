@@ -1,0 +1,12 @@
+{"source":"etl","seq":0,"t":1762430400.0,"type":"snapshot","protocol":"reacting/1","elements":[{"id":"reader","label":"Reader"},{"id":"writer","label":"Writer"},{"id":"cache","label":"Cache"}],"links":[{"id":"f","from":"reader","to":"writer","kind":"data"}]}
+{"source":"etl","seq":1,"t":1762430400.01,"type":"span.start","span":"a","id":"reader","label":"scan"}
+{"source":"etl","seq":2,"t":1762430400.02,"type":"span.start","span":"b","id":"writer","label":"flush","parent":"a"}
+{"source":"etl","seq":3,"t":1762430400.03,"type":"span.start","span":"c","id":"cache","label":"warm"}
+{"source":"etl","seq":4,"t":1762430400.1,"type":"depth","id":"f","value":9}
+{"source":"etl","seq":5,"t":1762430400.1,"type":"flow","link":"f","t0":1762430400.0,"items":3,"dropped":0,"coalesced":0}
+{"source":"etl","seq":20,"t":1762430400.35,"type":"snapshot","protocol":"reacting/1","spans":[{"span":"a","id":"reader","label":"scan","t0":1762430400.01},{"span":"b","id":"writer","label":"flush","parent":"a","t0":1762430400.02},{"span":"e","id":"cache2","label":"load","parent":"a","t0":1762430400.3}],"elements":[{"id":"reader","label":"Reader"},{"id":"writer","label":"Writer"},{"id":"cache2","label":"Cache 2"}],"links":[{"id":"f","from":"reader","to":"writer","kind":"data"},{"id":"g","from":"writer","to":"cache2","kind":"data"}]}
+{"source":"etl","seq":21,"t":1762430400.4,"type":"depth","id":"f","value":0}
+{"source":"etl","seq":22,"t":1762430400.4,"type":"flow","link":"f","t0":1762430400.3,"items":1,"dropped":0,"coalesced":0}
+{"source":"etl","seq":23,"t":1762430400.42,"type":"span.end","span":"b","status":"ok"}
+{"source":"etl","seq":24,"t":1762430400.43,"type":"span.end","span":"a","status":"error","error":"disk full"}
+{"source":"etl","seq":25,"t":1762430400.44,"type":"span.start","span":"d","id":"writer","label":"retry","parent":"e"}

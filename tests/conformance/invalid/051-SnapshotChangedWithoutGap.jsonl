@@ -1,0 +1,2 @@
+{"source":"s","seq":0,"t":100.0,"type":"snapshot","protocol":"reacting/1","elements":[{"id":"a","label":"A"},{"id":"b","label":"B"}],"links":[]}
+{"source":"s","seq":1,"t":100.01,"type":"snapshot","protocol":"reacting/1","elements":[{"id":"a","label":"A2"},{"id":"z","label":"Z"}],"links":[]}

@@ -1,0 +1,64 @@
+{
+  "state": {
+    "sources": {
+      "api": {
+        "backlog": {},
+        "elements": [],
+        "ended": [],
+        "links": [],
+        "lost": 0,
+        "spans": []
+      },
+      "worker": {
+        "backlog": {},
+        "elements": [
+          {
+            "id": "q",
+            "label": "Queue"
+          },
+          {
+            "id": "run",
+            "label": "Runner"
+          }
+        ],
+        "ended": [
+          {
+            "id": "run",
+            "label": "step",
+            "parent": "j1",
+            "span": "j2",
+            "status": "ok",
+            "t0": 1762430400.65,
+            "t1": 1762430400.81
+          }
+        ],
+        "label": "Worker",
+        "links": [
+          {
+            "from": "run",
+            "id": "back",
+            "kind": "call",
+            "to": "api/gw"
+          },
+          {
+            "from": "q",
+            "id": "w1",
+            "kind": "data",
+            "to": "run"
+          }
+        ],
+        "lost": 0,
+        "spans": [
+          {
+            "id": "run",
+            "label": "job",
+            "span": "j1",
+            "t0": 1762430400.61
+          }
+        ]
+      }
+    }
+  },
+  "valid": true,
+  "violations": []
+}

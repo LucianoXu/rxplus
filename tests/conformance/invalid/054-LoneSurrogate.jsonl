@@ -1,0 +1,2 @@
+{"source":"s","seq":0,"t":100.0,"type":"snapshot","protocol":"reacting/1","elements":[{"id":"a","label":"A"}],"links":[{"id":"l","from":"a","to":"a","kind":"data"}]}
+{"source":"s","seq":1,"t":100.01,"type":"add","elements":[{"id":"b","label":"\ud800"}]}

@@ -1,0 +1,21 @@
+{
+  "state": {
+    "sources": {
+      "s": {
+        "backlog": {},
+        "elements": [
+          {
+            "id": "a",
+            "label": "A"
+          }
+        ],
+        "ended": [],
+        "links": [],
+        "lost": 0,
+        "spans": []
+      }
+    }
+  },
+  "valid": true,
+  "violations": []
+}

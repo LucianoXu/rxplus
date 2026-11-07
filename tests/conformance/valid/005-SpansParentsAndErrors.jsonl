@@ -1,0 +1,11 @@
+{"source":"jobs","seq":0,"t":1762430400.0,"type":"snapshot","protocol":"reacting/1","elements":[{"id":"w1","label":"Worker 1"},{"id":"w2","label":"Worker 2"},{"id":"tmp","label":"Temp"}],"links":[]}
+{"source":"jobs","seq":1,"t":1762430400.01,"type":"span.start","span":"root","id":"w1","label":"request"}
+{"source":"jobs","seq":2,"t":1762430400.02,"type":"span.start","span":"child1","id":"w2","label":"query","parent":"root"}
+{"source":"jobs","seq":3,"t":1762430400.03,"type":"span.start","span":"grand","id":"w2","label":"fetch","parent":"child1"}
+{"source":"jobs","seq":4,"t":1762430400.04,"type":"span.end","span":"grand","status":"ok"}
+{"source":"jobs","seq":5,"t":1762430400.05,"type":"span.end","span":"root","status":"error","error":"upstream failed"}
+{"source":"jobs","seq":6,"t":1762430400.06,"type":"span.start","span":"child2","id":"w1","label":"retry","parent":"child1"}
+{"source":"jobs","seq":7,"t":1762430400.07,"type":"span.start","span":"t1","id":"tmp","label":"temp work","parent":"child2"}
+{"source":"jobs","seq":8,"t":1762430400.08,"type":"span.end","span":"child2","status":"error"}
+{"source":"jobs","seq":9,"t":1762430400.09,"type":"remove","ids":["tmp"]}
+{"source":"jobs","seq":10,"t":1762430400.095,"type":"span.start","span":"late","id":"w1","label":"late"}

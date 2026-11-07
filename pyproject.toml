@@ -65,7 +65,7 @@ dev = [
 [tool.ruff]
 target-version = "py313"
 line-length = 88
-extend-exclude = ["ai-instru"]
+extend-exclude = ["ai-instru", "tests/conformance/check.py"]  # vendored (D16)
 
 [tool.ruff.lint]
 select = [

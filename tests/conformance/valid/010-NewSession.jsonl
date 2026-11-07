@@ -1,0 +1,9 @@
+{"source":"app","seq":0,"t":1762430400.0,"type":"snapshot","protocol":"reacting/1","label":"App v1","elements":[{"id":"a","label":"A"}],"links":[]}
+{"source":"app","seq":1,"t":1762430400.01,"type":"span.start","span":"s1","id":"a","label":"first"}
+{"source":"app","seq":2,"t":1762430400.1,"type":"depth","id":"a","value":2}
+{"source":"app","seq":5,"t":1762430400.15,"type":"snapshot","protocol":"reacting/1","label":"App v1","spans":[{"span":"s1","id":"a","label":"first","t0":1762430400.01}],"elements":[{"id":"a","label":"A"}],"links":[]}
+{"source":"app","seq":6,"t":1762430400.16,"type":"span.end","span":"s1","status":"ok"}
+{"source":"app","seq":0,"t":1762430400.5,"type":"snapshot","protocol":"reacting/1","elements":[{"id":"a","label":"App A"},{"id":"b","label":"B"}],"links":[{"id":"ab","from":"a","to":"b","kind":"data"}]}
+{"source":"app","seq":1,"t":1762430400.52,"type":"span.start","span":"s1","id":"b","label":"second"}
+{"source":"app","seq":2,"t":1762430400.6,"type":"depth","id":"ab","value":1}
+{"source":"app","seq":3,"t":1762430400.65,"type":"remove","ids":["b"]}

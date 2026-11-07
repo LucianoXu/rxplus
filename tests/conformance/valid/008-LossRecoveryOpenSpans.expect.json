@@ -1,0 +1,76 @@
+{
+  "state": {
+    "sources": {
+      "etl": {
+        "backlog": {},
+        "elements": [
+          {
+            "id": "cache2",
+            "label": "Cache 2"
+          },
+          {
+            "id": "reader",
+            "label": "Reader"
+          },
+          {
+            "id": "writer",
+            "label": "Writer"
+          }
+        ],
+        "ended": [
+          {
+            "id": "writer",
+            "label": "flush",
+            "parent": "a",
+            "span": "b",
+            "status": "ok",
+            "t0": 1762430400.02,
+            "t1": 1762430400.42
+          },
+          {
+            "error": "disk full",
+            "id": "reader",
+            "label": "scan",
+            "span": "a",
+            "status": "error",
+            "t0": 1762430400.01,
+            "t1": 1762430400.43
+          }
+        ],
+        "links": [
+          {
+            "from": "reader",
+            "id": "f",
+            "kind": "data",
+            "to": "writer"
+          },
+          {
+            "from": "writer",
+            "id": "g",
+            "kind": "data",
+            "to": "cache2"
+          }
+        ],
+        "lost": 14,
+        "spans": [
+          {
+            "id": "writer",
+            "label": "retry",
+            "parent": "e",
+            "span": "d",
+            "t0": 1762430400.44
+          },
+          {
+            "id": "cache2",
+            "label": "load",
+            "parent": "a",
+            "span": "e",
+            "t0": 1762430400.3
+          }
+        ]
+      }
+    }
+  },
+  "valid": true,
+  "violations": []
+}

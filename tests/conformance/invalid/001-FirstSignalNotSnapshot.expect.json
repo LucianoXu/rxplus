@@ -1,0 +1,26 @@
+{
+  "state": {
+    "sources": {
+      "bad": {
+        "backlog": {},
+        "elements": [
+          {
+            "id": "a",
+            "label": "A"
+          }
+        ],
+        "ended": [],
+        "links": [],
+        "lost": 0,
+        "spans": []
+      }
+    }
+  },
+  "valid": false,
+  "violations": [
+    {
+      "line": 1,
+      "rule": "snapshot-first"
+    }
+  ]
+}

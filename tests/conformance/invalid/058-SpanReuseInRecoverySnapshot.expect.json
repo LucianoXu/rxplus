@@ -1,0 +1,46 @@
+{
+  "state": {
+    "sources": {
+      "bad": {
+        "backlog": {},
+        "elements": [
+          {
+            "id": "a",
+            "label": "A"
+          },
+          {
+            "id": "b",
+            "label": "B"
+          }
+        ],
+        "ended": [
+          {
+            "id": "a",
+            "label": "first",
+            "span": "s",
+            "status": "ok",
+            "t0": 1762430400.01,
+            "t1": 1762430400.02
+          }
+        ],
+        "links": [
+          {
+            "from": "a",
+            "id": "l",
+            "kind": "data",
+            "to": "b"
+          }
+        ],
+        "lost": 2,
+        "spans": []
+      }
+    }
+  },
+  "valid": false,
+  "violations": [
+    {
+      "line": 4,
+      "rule": "span-reuse"
+    }
+  ]
+}

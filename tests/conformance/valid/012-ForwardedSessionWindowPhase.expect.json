@@ -1,0 +1,29 @@
+{
+  "state": {
+    "sources": {
+      "slow": {
+        "backlog": {},
+        "elements": [
+          {
+            "id": "p",
+            "label": "Poller"
+          }
+        ],
+        "ended": [],
+        "label": "Forwarded by a relay",
+        "links": [
+          {
+            "from": "p",
+            "id": "k",
+            "kind": "data",
+            "to": "p"
+          }
+        ],
+        "lost": 0,
+        "spans": []
+      }
+    }
+  },
+  "valid": true,
+  "violations": []
+}

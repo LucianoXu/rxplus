@@ -1,0 +1,2 @@
+{"source":"bad","seq":0,"t":1762430400.0,"type":"snapshot","protocol":"reacting/1","elements":[{"id":"a","label":"A"},{"id":"b","label":"B"}],"links":[{"id":"l","from":"a","to":"b","kind":"data"}]}
+{"source":"bad","seq":2,"t":1762430400.5,"type":"snapshot","protocol":"reacting/1","spans":[{"span":"s","id":"a","label":"work","t0":1762430400.6}],"elements":[{"id":"a","label":"A"},{"id":"b","label":"B"}],"links":[{"id":"l","from":"a","to":"b","kind":"data"}]}

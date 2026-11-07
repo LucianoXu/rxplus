@@ -1,0 +1,32 @@
+{
+  "state": {
+    "sources": {
+      "rm": {
+        "backlog": {},
+        "elements": [
+          {
+            "id": "a",
+            "label": "A again"
+          },
+          {
+            "id": "c",
+            "label": "C"
+          }
+        ],
+        "ended": [],
+        "links": [
+          {
+            "from": "c",
+            "id": "l1",
+            "kind": "data",
+            "to": "a"
+          }
+        ],
+        "lost": 0,
+        "spans": []
+      }
+    }
+  },
+  "valid": true,
+  "violations": []
+}

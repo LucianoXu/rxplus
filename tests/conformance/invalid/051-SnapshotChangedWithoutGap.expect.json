@@ -1,0 +1,30 @@
+{
+  "state": {
+    "sources": {
+      "s": {
+        "backlog": {},
+        "elements": [
+          {
+            "id": "a",
+            "label": "A2"
+          },
+          {
+            "id": "z",
+            "label": "Z"
+          }
+        ],
+        "ended": [],
+        "links": [],
+        "lost": 0,
+        "spans": []
+      }
+    }
+  },
+  "valid": false,
+  "violations": [
+    {
+      "line": 2,
+      "rule": "snapshot-no-gap-change"
+    }
+  ]
+}

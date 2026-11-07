@@ -1,0 +1,14 @@
+{"source":"api","seq":0,"t":1762430400.537,"type":"snapshot","protocol":"reacting/1","label":"API","elements":[{"id":"gw","label":"Gateway"},{"id":"h","label":"Handler","parent":"gw"}],"links":[{"id":"l1","from":"gw","to":"h","kind":"data"},{"id":"out","from":"h","to":"worker/q","kind":"data"}]}
+{"source":"worker","seq":0,"t":1762430400.54,"type":"snapshot","protocol":"reacting/1","label":"Worker","elements":[{"id":"q","label":"Queue"},{"id":"run","label":"Runner"}],"links":[{"id":"w1","from":"q","to":"run","kind":"data"},{"id":"back","from":"run","to":"api/gw","kind":"call"}]}
+{"source":"api","seq":1,"t":1762430400.6,"type":"flow","link":"l1","t0":1762430400.5,"items":4,"dropped":0,"coalesced":0}
+{"source":"api","seq":2,"t":1762430400.6,"type":"flow","link":"out","t0":1762430400.5,"items":4,"dropped":0,"coalesced":0}
+{"source":"worker","seq":1,"t":1762430400.6,"type":"depth","id":"q","value":4}
+{"source":"api","seq":3,"t":1762430400.6,"type":"depth","id":"l1","value":2}
+{"source":"worker","seq":2,"t":1762430400.61,"type":"span.start","span":"j1","id":"run","label":"job"}
+{"source":"worker","seq":3,"t":1762430400.65,"type":"span.start","span":"j2","id":"run","label":"step","parent":"j1"}
+{"source":"api","seq":4,"t":1762430400.7,"type":"depth","id":"l1","value":0}
+{"source":"worker","seq":4,"t":1762430400.7,"type":"depth","id":"q","value":1}
+{"source":"api","seq":5,"t":1762430400.72,"type":"remove","ids":["gw"]}
+{"source":"api","seq":6,"t":1762430400.72,"type":"snapshot","protocol":"reacting/1","elements":[],"links":[]}
+{"source":"worker","seq":5,"t":1762430400.8,"type":"depth","id":"q","value":0}
+{"source":"worker","seq":6,"t":1762430400.81,"type":"span.end","span":"j2","status":"ok"}

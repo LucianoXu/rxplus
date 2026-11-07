@@ -1,0 +1,11 @@
+{"type":"x-recording","x-tool":"conformance corpus","started":"2025-11-06T12:00:00Z"}
+{"source":"ext","seq":0,"t":1762430400,"type":"snapshot","protocol":"reacting/1","x-color":"#336699","elements":[{"id":"a","label":"A","x-shape":"box","description":"unknown non-x attribute"}],"links":[{"id":"self","from":"a","to":"a","kind":"data","x-weight":3}]}
+
+{"source":"ext","seq":1,"t":1762430400.01,"type":"x-marker","label":"checkpoint","x-anything":[1,2]}
+{"source":"ext","seq":2,"t":1762430400.02,"type":"add","elements":[{"id":"b","label":"B","x-hint":{"nested":true}}]}
+{"type":"x-comment","t":1.0,"text":"recording extension lines may appear anywhere, in any t order"}
+{"source":"ext","seq":3,"t":1762430400.03,"type":"span.start","span":"s","id":"b","label":"work","x-trace":"abc123"}
+{"source":"ext","seq":4,"t":1762430400.05,"type":"x-progress","done":3}
+{"source":"ext","seq":5,"t":1762430400.1,"type":"depth","id":"self","value":2,"x-unit":"items"}
+
+{"type":"x-end"}

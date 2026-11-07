@@ -1,0 +1,5 @@
+{"source":"svc","seq":0,"t":1762430400.0,"type":"snapshot","protocol":"reacting/1","elements":[{"id":"in","label":"Input","kind":"stream"}],"links":[]}
+{"source":"svc","seq":1,"t":1762430400.01,"type":"add","elements":[{"id":"g","label":"Group"},{"id":"g.a","label":"A","parent":"g"},{"id":"g.b","label":"解析器","parent":"g","kind":"operator"}],"links":[{"id":"l1","from":"in","to":"g.a","kind":"data"},{"id":"l2","from":"g.a","to":"g.b","kind":"data"},{"id":"l3","from":"g.b","to":"g.b","kind":"call"},{"id":"l4","from":"g.a","to":"g.b","kind":"data"}]}
+{"source":"svc","seq":2,"t":1762430400.02,"type":"add","links":[{"id":"l5","from":"g.b","to":"in","kind":"data"}]}
+{"source":"svc","seq":3,"t":1762430400.03,"type":"add","elements":[{"id":"solo","label":"Solo"}]}
+{"source":"svc","seq":4,"t":1762430400.04,"type":"add","elements":[{"id":"h","label":"H","parent":"g.a"}],"links":[]}

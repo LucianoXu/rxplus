@@ -1,0 +1,38 @@
+{
+  "state": {
+    "sources": {
+      "app": {
+        "backlog": {},
+        "elements": [
+          {
+            "id": "a",
+            "label": "App A"
+          }
+        ],
+        "ended": [
+          {
+            "id": "a",
+            "label": "first",
+            "span": "s1",
+            "status": "ok",
+            "t0": 1762430400.01,
+            "t1": 1762430400.16
+          },
+          {
+            "id": "b",
+            "label": "second",
+            "span": "s1",
+            "status": "error",
+            "t0": 1762430400.52,
+            "t1": 1762430400.65
+          }
+        ],
+        "links": [],
+        "lost": 2,
+        "spans": []
+      }
+    }
+  },
+  "valid": true,
+  "violations": []
+}

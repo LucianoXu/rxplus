@@ -1,0 +1,26 @@
+{
+  "state": {
+    "sources": {
+      "bad": {
+        "backlog": {},
+        "elements": [
+          {
+            "id": "b",
+            "label": "B"
+          }
+        ],
+        "ended": [],
+        "links": [],
+        "lost": 0,
+        "spans": []
+      }
+    }
+  },
+  "valid": false,
+  "violations": [
+    {
+      "line": 3,
+      "rule": "ref-missing"
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "state": {
+    "sources": {
+      "win": {
+        "backlog": {
+          "q": {
+            "capacity": 16,
+            "value": 1
+          }
+        },
+        "elements": [
+          {
+            "id": "op",
+            "label": "Operator"
+          },
+          {
+            "id": "out",
+            "label": "Output (new)"
+          },
+          {
+            "id": "src",
+            "label": "Source"
+          }
+        ],
+        "ended": [],
+        "links": [
+          {
+            "from": "src",
+            "id": "q",
+            "kind": "data",
+            "to": "op"
+          },
+          {
+            "from": "op",
+            "id": "r",
+            "kind": "call",
+            "to": "out"
+          }
+        ],
+        "lost": 0,
+        "spans": []
+      }
+    }
+  },
+  "valid": true,
+  "violations": []
+}

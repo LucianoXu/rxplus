@@ -1,0 +1,18 @@
+{"source":"win","seq":0,"t":1762430400.0,"type":"snapshot","protocol":"reacting/1","elements":[{"id":"src","label":"Source"},{"id":"op","label":"Operator"},{"id":"out","label":"Output"}],"links":[{"id":"q","from":"src","to":"op","kind":"data"},{"id":"r","from":"op","to":"out","kind":"call"}]}
+{"source":"win","seq":1,"t":1762430400.1,"type":"flow","link":"q","t0":1762430400.0,"items":10,"dropped":0,"coalesced":0,"bytes":800}
+{"source":"win","seq":2,"t":1762430400.1,"type":"depth","id":"q","value":3,"capacity":16}
+{"source":"win","seq":3,"t":1762430400.1,"type":"depth","id":"op","value":1}
+{"source":"win","seq":4,"t":1762430400.2,"type":"depth","id":"op","value":0}
+{"source":"win","seq":5,"t":1762430400.2,"type":"flow","link":"q","t0":1762430400.1,"items":0,"dropped":2,"coalesced":0}
+{"source":"win","seq":6,"t":1762430400.2,"type":"latency","id":"r","t0":1762430400.1,"count":2,"sum":0.03,"max":0.02}
+{"source":"win","seq":7,"t":1762430400.2,"type":"flow","link":"r","t0":1762430400.1,"items":2,"dropped":0,"coalesced":0}
+{"source":"win","seq":8,"t":1762430400.2,"type":"depth","id":"q","value":5,"capacity":16}
+{"source":"win","seq":9,"t":1762430400.3,"type":"flow","link":"q","t0":1762430400.2,"items":0,"dropped":0,"coalesced":4}
+{"source":"win","seq":10,"t":1762430400.3,"type":"depth","id":"q","value":0,"capacity":16}
+{"source":"win","seq":11,"t":1762430400.5,"type":"depth","id":"op","value":7}
+{"source":"win","seq":12,"t":1762430400.5,"type":"depth","id":"out","value":2}
+{"source":"win","seq":13,"t":1762430400.5,"type":"latency","id":"op","t0":1762430400.4,"count":1,"sum":0.05,"max":0.05}
+{"source":"win","seq":14,"t":1762430400.55,"type":"remove","ids":["out"]}
+{"source":"win","seq":15,"t":1762430400.56,"type":"add","elements":[{"id":"out","label":"Output (new)"}],"links":[{"id":"r","from":"op","to":"out","kind":"call"}]}
+{"source":"win","seq":16,"t":1762430400.6,"type":"depth","id":"op","value":0}
+{"source":"win","seq":17,"t":1762430400.7,"type":"depth","id":"q","value":1,"capacity":16}
