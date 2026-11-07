@@ -6,8 +6,12 @@ protocol (Reacting repository, `docs/spec/Reacting.md`). Design: `docs/proposals
 (approved, D16).
 
 The core uses only the standard library (D10): `import rxplus.reacting` loads neither reactivex nor
-websockets nor OpenTelemetry. The Rx probe operators and the `reacting=` parameter of rxplus components come
-in a later release step (X4).
+websockets nor OpenTelemetry. The Rx probe operators are in `rxplus.reacting.rx` (reactivex), and rxplus
+components report themselves when given `reacting=` (see Components).
+
+A complete example: `python -m tasks.task_reacting_pipeline` runs a WebSocket server, a few clients and
+probes on the user's own stages, live into the Reacting hub (start it in the Reacting repository with
+`npm run serve`; sources dial `ws://127.0.0.1:8787/source`), or into a file with `--record run.jsonl`.
 
 ## Example
 
@@ -100,9 +104,72 @@ Sinks:
   lines include the session's opening snapshot, a new session begins instead (spec fa173ab). Lines are
   created on schedule even while the sink is stalled, so `queue` bounds memory. The caller never waits.
 
+- **Recovery snapshots carry backlogs.** A snapshot that follows a Loss lists every non-zero backlog at its
+  time (counted now, or sampled) in `backlogs` (spec 5ad5cdb), so an observer does not show zero backlogs
+  until the next depth signals. The depth rules continue from the listed value: one that drains reports
+  `0` at the next window end.
+
 - **Validation.** Labels, kinds, IDs and error strings are checked where you pass them, with or without a
   session: non-empty where required, no `/` in IDs, and encodable as UTF-8. A lone surrogate from
   `os.fsdecode` of a non-UTF-8 name raises `ValueError` at the call, never later.
+
+## Probe operators (`rxplus.reacting.rx`)
+
+```python
+from rxplus.reacting import rx as rr
+
+source.pipe(
+    rr.count(recv_to_parse),                 # each item is delivered on the link (flow)
+    ops.map(parse),
+    rr.enter(parse_to_store),                # backlog +1 ...
+    ops.observe_on(rr.ContextScheduler(pool)),
+    rr.leave(parse_to_store),                # ... -1 on the far side: backlog and latency of the hop
+    rr.work(store),                          # time until downstream on_next returns: latency of `store`
+    ops.map(store_and_ack),
+    rr.span(store, "batch"),                 # one span per item (coarse streams)
+)
+```
+
+| Probe | Measures |
+|---|---|
+| `count(link, *, size=None)` | flow on `link` per item; `bytes` from `size(item)` |
+| `enter(link)` / `leave(link, *, size=None)` | a FIFO pair around an asynchronous hop: counted backlog of `link`, latency (time in the hop), flow at `leave`. An item that entered before the session counts as flow only. At most 65 536 items in flight are tracked per link (`MAX_IN_FLIGHT`); for a hop that drops, call `Link.leave_dropped` from the dropping code |
+| `work(element)` | per item, the time until the downstream `on_next` returns: latency and in-flight backlog of `element` |
+| `span(element, label)` | one span per item around the downstream `on_next`; it is the current span there, so spans further down the same synchronous chain become its children; `error` (the exception's class) when downstream raises |
+
+Every probe takes a handle or `None`; with `None` it is the identity operator (`rr.count(link if reporter
+else None)` costs nothing without a reporter). With a handle it costs one check per item while no session
+is open. Probes never change items, their order or timing, and never catch exceptions.
+
+`ContextScheduler(inner)` wraps a scheduler so each action runs in a copy of the context taken when it was
+scheduled; use it in `observe_on`/`subscribe_on` to keep `current_span()` (span parents) across a thread
+hop. Without it a span on the far side has no parent.
+
+## Components
+
+rxplus components take `reacting: Reporter | Element | None = None`, last in their signature (D2).
+`None` installs nothing. A `Reporter` makes the component's element top-level; an `Element` makes it a
+child of yours. `component.reacting_element` is its element and `component.reacting_port("send" | "recv")`
+its ports, which your own links attach to (a component cannot see what it is subscribed to).
+
+Kinds follow the convention shared with the Reacting viewer (Reacting DESIGN §4.1): ports have kind `port`
+and are drawn on their parent's border; short-lived dynamic children have a kind ending in `.instance`
+and are grouped.
+
+| Component | Element (kind; label) | Children | Links and what they report | Spans |
+|---|---|---|---|---|
+| `RxWSServer` | `rxplus.ws.server`; `name`, else `RxWSServer :<port>` | ports `send`, `recv`; one `rxplus.ws.connection.instance` per open socket, `connection <path>` | `send → connection`: one item per frame sent, its bytes, frames dropped by the send-queue policy, counted backlog (`capacity` = `send_queue`), latency from enqueue to sent. `connection → recv`: one item per message received, its bytes; a message that does not decode is `dropped` | — |
+| `RxWSClient` | `rxplus.ws.client`; `name`, else `RxWSClient <path>` | ports `send`, `recv`; `socket` (`rxplus.ws.socket.instance`) while connected | as the server, around the socket. Frames queued while offline enter the next socket's link | `connect` per attempt; `error` with the exception's class when it fails |
+| `RxWSClientGroup` | `rxplus.ws.group`; `name`, else `RxWSClientGroup :<port>` | one `RxWSClient` element per path (`reacting_client(path)` gives the client) | those of the clients | — |
+| `retry_with_signal(..., reacting=, label="retry_with_signal")` | `rxplus.operator`; `label` | — | — | `attempt` per subscription; `error` with the class of the underlying exception when it fails |
+
+Labels come from construction arguments only (a request path for a connection), never from addresses or
+anything random, so they are the same in every run. A component removes its element (with its children,
+links and open spans) when it completes or fails. Dynamic children, and the component itself, are removed
+one window after they end: a window's counts are reported at its end and only for links that still exist,
+so a socket removed at once would lose the counts of its last window.
+
+`GatewayNode` and the audio and screen components do not report yet.
 
 ## Limits
 
@@ -224,3 +291,5 @@ a file differs from its pin or the checker disagrees with a corpus expectation.
   discarded without being parsed; one larger than 1 MiB closes the connection (1009).
 - **Resources.** Memory is bounded by `queue` lines per reporter. Removed elements and links release their
   counters.
+- **Labels from peers.** A server connection is labelled by the request path its client chose (cut to 80
+  characters). Paths carry no data in rxplus's own use; if yours do, do not report the server.

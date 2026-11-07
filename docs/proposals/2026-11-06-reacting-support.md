@@ -351,7 +351,9 @@ gateway connection by direction and order (`outbound 1`, `inbound 2`), never by 
 
 ### 2.3 What each component reports
 
-Kinds are prefixed `rxplus.`; ports have kind `port`.
+Kinds are prefixed `rxplus.`; ports have kind `port`, and dynamic children (connections, sockets) a kind
+ending in `.instance` (Reacting DESIGN §4.1; as built in X4: `rxplus.ws.connection.instance`,
+`rxplus.ws.socket.instance`). `GatewayNode` and the audio and screen components follow after #26.
 
 | Component | Elements | Links (kind) | Flow / depth / latency | Spans |
 |---|---|---|---|---|

@@ -19,7 +19,7 @@ import contextvars
 from collections import deque
 from collections.abc import Callable
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol, cast, overload
 
 import reactivex
 from reactivex import Observable, abc
@@ -28,6 +28,13 @@ from reactivex.scheduler.scheduler import Scheduler
 from .handles import Element, Link
 
 type Operator[T] = Callable[[Observable[T]], Observable[T]]
+
+
+class Probe(Protocol):
+    """An operator that passes items of any type through unchanged."""
+
+    def __call__[T](self, source: Observable[T], /) -> Observable[T]: ...
+
 
 #: Tokens an ``enter`` probe keeps for its ``leave`` probe, per link. A hop
 #: that drops items without ``Link.leave_dropped`` would otherwise grow it
@@ -59,9 +66,13 @@ def _tap[T](
     return Observable(subscribe)
 
 
+@overload
+def count(link: Link | None) -> Probe: ...
+@overload
+def count[T](link: Link | None, *, size: Callable[[T], int]) -> Operator[T]: ...
 def count[T](
     link: Link | None, *, size: Callable[[T], int] | None = None
-) -> Operator[T]:
+) -> Probe | Operator[T]:
     """Each item passing is delivered on ``link`` (flow; bytes if ``size``)."""
     if link is None:
         return _identity
@@ -75,7 +86,7 @@ def count[T](
 
         return _tap(source, on_next)
 
-    return op
+    return op if size is not None else cast(Probe, op)
 
 
 def _tokens(link: Link) -> deque[float]:
@@ -85,7 +96,7 @@ def _tokens(link: Link) -> deque[float]:
     return tokens
 
 
-def enter[T](link: Link | None) -> Operator[T]:
+def enter(link: Link | None) -> Probe:
     """Each item passing enters ``link``: backlog +1. Pair it with
     :func:`leave` on the far side of an asynchronous hop (``observe_on``, a
     queue); they assume the hop keeps FIFO order."""
@@ -94,7 +105,7 @@ def enter[T](link: Link | None) -> Operator[T]:
     st = link._st
     tokens = _tokens(link)
 
-    def op(source: Observable[T]) -> Observable[T]:
+    def op[T](source: Observable[T]) -> Observable[T]:
         def on_next(observer: abc.ObserverBase[T], value: T) -> None:
             if st.live:
                 tokens.append(link.enter())
@@ -105,9 +116,13 @@ def enter[T](link: Link | None) -> Operator[T]:
     return op
 
 
+@overload
+def leave(link: Link | None) -> Probe: ...
+@overload
+def leave[T](link: Link | None, *, size: Callable[[T], int]) -> Operator[T]: ...
 def leave[T](
     link: Link | None, *, size: Callable[[T], int] | None = None
-) -> Operator[T]:
+) -> Probe | Operator[T]:
     """Each item passing leaves ``link``, entered by :func:`enter`: it is
     delivered (flow; bytes if ``size``), backlog -1, and its time in the hop
     counts as latency. An item that entered before the session counts as
@@ -131,17 +146,17 @@ def leave[T](
 
         return _tap(source, on_next)
 
-    return op
+    return op if size is not None else cast(Probe, op)
 
 
-def work[T](element: Element | None) -> Operator[T]:
+def work(element: Element | None) -> Probe:
     """Time until the downstream ``on_next`` returns, per item: latency and
     in-flight backlog of ``element``."""
     if element is None:
         return _identity
     st = element._st
 
-    def op(source: Observable[T]) -> Observable[T]:
+    def op[T](source: Observable[T]) -> Observable[T]:
         def on_next(observer: abc.ObserverBase[T], value: T) -> None:
             if not st.live:
                 observer.on_next(value)
@@ -157,7 +172,7 @@ def work[T](element: Element | None) -> Operator[T]:
     return op
 
 
-def span[T](element: Element | None, label: str) -> Operator[T]:
+def span(element: Element | None, label: str) -> Probe:
     """One span per item around the downstream ``on_next`` (for coarse
     streams). It is the current span for that call, so spans started further
     down the same synchronous chain are its children; it ends with ``error``
@@ -169,7 +184,7 @@ def span[T](element: Element | None, label: str) -> Operator[T]:
 
     check_label(label, "span label")
 
-    def op(source: Observable[T]) -> Observable[T]:
+    def op[T](source: Observable[T]) -> Observable[T]:
         def on_next(observer: abc.ObserverBase[T], value: T) -> None:
             if not st.live:
                 observer.on_next(value)
@@ -232,6 +247,7 @@ __all__ = [
     "MAX_IN_FLIGHT",
     "ContextScheduler",
     "Operator",
+    "Probe",
     "count",
     "enter",
     "leave",
