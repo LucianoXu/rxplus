@@ -40,7 +40,7 @@ from ._encode import (
     encode,
 )
 from ._graph import ElementRec, Graph, LinkRec, SpanRec
-from ._window import Accumulator
+from ._window import Accumulator, Totals
 from .clock import Clock, SystemClock
 from .handles import _CURRENT, Element, Link, LinkKind, Span, _Live
 from .sinks import Sink
@@ -49,7 +49,7 @@ _NOTIFY_EVENTS = 4096  # wake the clock thread early when this many are pending
 _MAX_IDLE = 0.05  # longest sleep of the clock thread, seconds
 _MAX_LAG = 64  # windows the clock thread may fall behind before Loss
 _MAX_PENDING = 100_000  # window totals it may hold (lag x busy) before Loss
-_CHECK_EVERY = 1000  # accumulators closed between two checks of the limit
+_CHECK_EVERY = 100  # accumulators closed between two checks of the limit
 
 type _Sampler = Callable[[], int]
 
@@ -102,13 +102,13 @@ class Reporter:
         self._batch = max(1, min(64, queue // 4))
         self._clock: Clock = clock or SystemClock()
         self._st = _Live(self._clock.monotonic, self._clock.wall(), float(window))
+        self._st.cap = _MAX_PENDING
 
         # Callers' side, under _lock.
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
         self._registry = Graph()
         self._accs: dict[str, Accumulator] = {}
-        self._busy: deque[str] = deque()
         self._events: list[_Event] = []
         self._counter = {"e": 0, "l": 0, "s": 0}
         self._want_session = False  # set by the writer: a connection is open
@@ -121,9 +121,8 @@ class Reporter:
         self._session_open = False
         self._session_epoch = -1
         self._seq = 0
-        self._busy_ids: set[str] = set()
         self._watched: set[str] = set()
-        self._pending: deque[_Event] = deque()  # events of the current step
+        self._pending_events: deque[_Event] = deque()  # events of this step
         self._current: _Event | None = None  # the event being processed
         self._silent = False  # _emit creates (seq) but does not queue: Loss
 
@@ -295,7 +294,7 @@ class Reporter:
     def _new_acc(
         self, ident: str, sampler: _Sampler | None, capacity: int | None
     ) -> Accumulator:
-        acc = Accumulator(ident, self._busy, self._st, sampler, capacity)
+        acc = Accumulator(ident, self._st, sampler, capacity)
         if self._st.live:
             acc.start_session(self._st.session)
         self._accs[ident] = acc
@@ -383,9 +382,9 @@ class Reporter:
             now = self._st.now()  # every later event has t >= now
         if self._session_open and (not want or epoch != self._session_epoch):
             self._end_session()
-        self._pending = deque(events)
-        while self._pending:
-            ev = self._current = self._pending.popleft()
+        self._pending_events = deque(events)
+        while self._pending_events:
+            ev = self._current = self._pending_events.popleft()
             if self._session_open:
                 self._close_until(ev.t)
             if self._current is ev:  # not already applied by a Loss (_shed)
@@ -403,11 +402,12 @@ class Reporter:
             st.session += 1
             st.T = t
             st.closed = 0
+            st.windows = {}  # the previous session's counts are dropped whole
+            st.pending = 0
+            st.saturated = False
             for acc in self._accs.values():
                 acc.start_session(st.session)
             st.live = True
-        self._busy.clear()
-        self._busy_ids.clear()
         self._watched = {
             i for i in self._mirror.links if (a := self._accs.get(i)) and a.sampler
         }
@@ -452,7 +452,6 @@ class Reporter:
                 for ident in removed:
                     self._accs.pop(ident, None)
             for ident in removed:
-                self._busy_ids.discard(ident)
                 self._watched.discard(ident)
             self._emit("remove", ev.t, {"ids": ids})
         elif ev.kind == "span.start":
@@ -483,85 +482,77 @@ class Reporter:
         k = st.closed
         if end <= k:
             return
-        self._drain_busy()
-        if end - k > _MAX_LAG or self._pending_estimate(k) > _MAX_PENDING:
-            # The clock thread fell behind by more windows than it may keep
-            # counts for: treat the backlog of windows as Loss (finding N3).
+        if st.saturated or end - k > _MAX_LAG or self._pending() > _MAX_PENDING:
+            # Fallen behind by more than the clock may keep counts for: Loss
+            # (findings N3, B).
             self._shed(k)
             return
         # From here on, a late hot-path event for a window < end counts in
         # window `end` (accumulators read st.closed under their lock).
         st.closed = end
-        self._drain_busy()
         session = st.session
         first = k
         while k < end and st.session == session:
             if k > first:
-                # Re-check while catching up (finding B): a catch-up that
-                # started under the limits may fall further behind.
                 lag = st.window_of(st.now()) - k
-                if lag > _MAX_LAG or self._pending_estimate(k) > _MAX_PENDING:
+                if st.saturated or lag > _MAX_LAG or self._pending() > _MAX_PENDING:
                     self._shed(k)
                     return
             if not self._watched:
-                nxt = [
-                    w
-                    for w in (
-                        self._accs[i].next_window()
-                        for i in self._busy_ids
-                        if i in self._accs
-                    )
-                    if w is not None
-                ]
-                first = min(nxt, default=end)
-                if first >= end:
+                # Nothing to report until the next window with counts.
+                busy = [i for i in st.windows if i < end]
+                nxt = min(busy, default=end)
+                if nxt >= end:
                     break
-                k = max(k, first)
+                k = max(k, nxt)
             if not self._close_one(k):
-                # Too many window totals pending (finding B): lose what this
-                # call was to close; the step's last close (up to its `now`)
-                # then loses the rest at once, keeping t monotone.
                 self._shed(k)
                 return
             k += 1
 
+    def _pending(self) -> int:
+        """Window totals held now (exact, O(open windows)); also corrects the
+        hot path's approximate count."""
+        st = self._st
+        n = sum(len(w) for w in list(st.windows.values()))
+        st.pending = n
+        return n
+
     def _shed(self, k: int) -> None:
         """Loss when the clock thread cannot keep up (findings N3, B).
 
-        Every window up to the *current* one is given up and its counts
-        discarded, so accumulator memory stays within ``_MAX_PENDING`` plus
-        what one check interval adds. To keep ``t`` monotone, every change
-        not emitted yet (this step's remaining events and any posted since)
-        is applied to the mirror without its own signal; the snapshot, taken
-        now, includes them. The ``seq`` gap counts the signals not sent.
+        O(1) in the counts held: the shared window storage is swapped for an
+        empty one and the old one dropped whole; depth state resets lazily
+        (epoch). Every window up to the *current* one is given up. To keep
+        ``t`` monotone, every change not emitted yet (this step's remaining
+        events and any posted since) is applied to the mirror without its
+        own signal; the snapshot, taken now, includes them. The ``seq`` gap
+        counts the signals not sent.
         """
         st = self._st
         with self._lock:
             more, self._events = self._events, []
             t_now = st.now()  # every later event has t >= t_now
+            end = st.window_of(t_now)
+            st.closed = max(end, st.closed)  # late events count in `end`
+            old, st.windows = st.windows, {}
+            st.pending = 0
+            st.saturated = False
+            st.epoch += 1
+        lost = sum(len(w) for w in old.values())  # O(windows), not O(totals)
+        del old
         self._silent = True
         try:
             if self._current is not None:
                 ev, self._current = self._current, None
                 self._apply(ev)
-            while self._pending:
-                self._apply(self._pending.popleft())
+            while self._pending_events:
+                self._apply(self._pending_events.popleft())
             for ev in more:
                 self._apply(ev)
         finally:
             self._silent = False
-        end = st.window_of(t_now)
-        st.closed = max(end, st.closed)  # late events count in window `end`
-        self._drain_busy()
-        lost = 0
-        for ident in self._busy_ids | self._watched:
-            acc = self._accs.get(ident)
-            if acc is not None:
-                lost += acc.drop_windows(end)
         lost += max(end - k, 0) * len(self._watched)  # depth signals not created
-        self._busy_ids = {
-            i for i in self._busy_ids if (a := self._accs.get(i)) and a.pending()
-        }
         self._watched = {i for i in self._watched if i in self._accs}
         self._seq += max(lost, 1)
         attrs: Signal = {"protocol": PROTOCOL}
@@ -570,40 +561,32 @@ class Reporter:
         attrs.update(self._mirror.snapshot(t_now, new_session=False))
         self._emit("snapshot", t_now, attrs, exempt=True)
 
-    def _drain_busy(self) -> None:
-        busy = self._busy
-        accs = self._accs
-        while busy:
-            ident = busy.popleft()
-            if ident in accs:  # a removed handle's late entry is dropped (N5)
-                self._busy_ids.add(ident)
-
-    def _pending_estimate(self, k: int) -> int:
-        """Upper bound of the window totals held: busy accumulators times the
-        windows from ``k`` to now (each holds at most one per window)."""
-        st = self._st
-        windows = st.window_of(st.now()) - k + 1
-        return windows * (len(self._busy_ids) + len(self._busy))
-
     def _close_one(self, k: int) -> bool:
         """Close window ``k``; False when it gave up (pending over the limit)."""
         st = self._st
         t0 = st.T + k * st.w
         t = st.T + (k + 1) * st.w
         session = st.session
-        for n, ident in enumerate(list(self._busy_ids | self._watched)):
+        window = st.windows.pop(k, None) or {}
+        st.pending -= len(window)
+        # Counts a caller recorded into a window that was already closed
+        # (it read `closed` just before the clock advanced) count here (R3).
+        for j in [j for j in st.windows if j < k]:
+            late_window = st.windows.pop(j)
+            st.pending -= len(late_window)
+            for ident, late in late_window.items():
+                window.setdefault(ident, Totals()).merge(late)
+        later = [w for i, w in st.windows.items() if i > k]
+        for n, ident in enumerate(list(window.keys() | self._watched)):
             if st.session != session:
                 return True  # a Loss began a new session: these windows are gone
-            if n % _CHECK_EVERY == _CHECK_EVERY - 1:
-                if self._pending_estimate(k) > _MAX_PENDING:
-                    return False
+            if n % _CHECK_EVERY == _CHECK_EVERY - 1 and (
+                st.saturated or self._pending() > _MAX_PENDING
+            ):
+                return False
             acc = self._accs.get(ident)
-            if acc is None:
-                # Removed: forget it (it was leaking one entry per removal).
-                self._busy_ids.discard(ident)
-                self._watched.discard(ident)
-                continue
-            if not self._mirror.exists(ident):
+            if acc is None or not self._mirror.exists(ident):
+                self._watched.discard(ident)  # removed: forget it (N5)
                 continue
             sample = None
             if acc.sampler is not None:
@@ -611,8 +594,10 @@ class Reporter:
                     sample = int(acc.sampler())
                 except Exception:
                     sample = None
-            res = acc.close(k, sample)
-            tot = res.totals
+            with acc.lock():
+                tot = window.get(ident)
+                later_delta = sum(w[ident].delta for w in later if ident in w)
+                d = acc.depth(later_delta, sample)
             if tot is not None:
                 if ident in self._mirror.links and (
                     tot.items or tot.dropped or tot.coalesced
@@ -637,17 +622,15 @@ class Reporter:
                             "max": top,
                         },
                     )
-            if res.depth is not None:
-                depth: Signal = {"id": ident, "value": res.depth}
+            if d.value is not None:
+                depth: Signal = {"id": ident, "value": d.value}
                 if acc.capacity is not None:
                     depth["capacity"] = acc.capacity
                 self._emit("depth", t, depth)
-            if res.watched:
+            if d.watched:
                 self._watched.add(ident)
             else:
                 self._watched.discard(ident)
-            if res.empty:
-                self._busy_ids.discard(ident)
         return True
 
     def _emit(

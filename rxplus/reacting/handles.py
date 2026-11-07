@@ -15,7 +15,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Literal
 
 from ._encode import check_label, check_text
-from ._window import Accumulator
+from ._window import Accumulator, Totals
 
 if TYPE_CHECKING:
     from .reporter import Reporter
@@ -36,6 +36,11 @@ class _Live:
         "session",
         "T",
         "closed",
+        "windows",
+        "epoch",
+        "pending",
+        "cap",
+        "saturated",
         "w",
         "inv_w",
         "base_t",
@@ -50,6 +55,12 @@ class _Live:
         self.session = -1
         self.T = 0.0
         self.closed = 0  # windows of the session below this index are closed
+        # windows[k][ident]: the totals of element/link ident in window k
+        self.windows: dict[int, dict[str, Totals]] = {}
+        self.epoch = 0  # incremented by a Loss: every depth state resets
+        self.pending = 0  # totals held in `windows` (approximate)
+        self.cap = 100_000  # hard limit on `pending` (the reporter sets it)
+        self.saturated = False  # a total was refused at the cap
         self.w = window
         self.inv_w = 1.0 / window
         self.base_t = base_t

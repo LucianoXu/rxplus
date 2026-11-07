@@ -10,7 +10,6 @@ import sys
 import textwrap
 import threading
 import time
-from collections import deque
 from pathlib import Path
 
 import pytest
@@ -27,7 +26,19 @@ from rxplus.reacting._window import Accumulator
 from tests.reacting.helpers import by_type, conform, make
 from tests.reacting.rawws import RawServer
 
-SURROGATE = os.fsdecode(b"cam\xff")  # a non-UTF-8 file name: a lone surrogate
+SURROGATE = os.fsdecode(b"cam\xff")
+
+
+class _Shared:
+    """The reporter state an accumulator reads (for unit tests)."""
+
+    def __init__(self) -> None:
+        self.closed = 0
+        self.windows: dict = {}
+        self.epoch = 0
+        self.pending = 0
+        self.cap = 100_000
+        self.saturated = False  # a non-UTF-8 file name: a lone surrogate
 
 
 def _wait_for(cond, timeout: float = 5.0) -> bool:
@@ -321,7 +332,7 @@ def test_stalled_sink_memory_is_bounded():
         for link in links:
             link.deliver()
         time.sleep(0.001)
-    pending = max(len(a._windows) for a in list(r._accs.values()))
+    pending = len(r._st.windows)  # open windows holding counts
     queued = len(r._q) + r._inflight
     latencies = []
     for _ in range(50):
@@ -425,16 +436,13 @@ def test_span_parents_do_not_leak_between_reporters(tmp_path):
 
 def test_a_stale_session_call_does_not_wipe_the_current_session():
     # Finding 12.
-    class Shared:
-        closed = 0
-
-    acc = Accumulator("l1", deque(), Shared())
+    shared = _Shared()
+    acc = Accumulator("l1", shared)
     acc.start_session(2)
     acc.record(2, 0, items=5)
     acc.record(1, 0, items=1)  # read session 1 just before session 2 began
     assert acc.next_window() == 0
-    res = acc.close(0, None)
-    assert res.totals is not None and res.totals.items == 5
+    assert shared.windows[0]["l1"].items == 5
 
 
 def test_file_sink_is_flushed_at_exit(tmp_path):
@@ -494,41 +502,23 @@ def test_a_lagging_clock_turns_old_windows_into_loss(tmp_path):
 
 
 def test_late_record_racing_the_clock_is_not_stranded(tmp_path):
-    # N4: a record whose counts land after the clock closed that window is
-    # counted in a later window, never left behind.
+    # N4: counts that land in a window the clock already closed (the caller
+    # read `closed` just before it advanced) are reported with the next one.
+    from rxplus.reacting._window import Totals
+
     r, sink, clock = make(window=0.1)
     a, b, c = r.element("A"), r.element("B"), r.element("C")
     l1, l2 = r.link(a, b), r.link(b, c)
     r.poll()
-
-    class Busy(deque):
-        hit = False
-
-        clock_thread: threading.Thread | None = None
-
-        def append(self, ident: str) -> None:
-            super().append(ident)
-            if ident == l1.id and not Busy.hit:
-                Busy.hit = True
-                clock.advance(0.1)  # the window ends ...
-                # ... and the clock thread closes it while this record still
-                # holds the accumulator lock (a GIL switch at this point).
-                Busy.clock_thread = threading.Thread(target=r._step)
-                Busy.clock_thread.start()
-                time.sleep(0.1)
-
-    busy = Busy(r._busy)
-    r._busy = busy
-    for acc in r._accs.values():
-        acc._busy = busy
     clock.advance(0.05)
     l2.deliver()
-    l1.deliver(5)
-    assert Busy.clock_thread is not None
-    Busy.clock_thread.join(5)
-    for _ in range(3):
-        clock.advance(0.1)
-        r.poll()
+    clock.advance(0.1)
+    r.poll()  # window 0 closed
+    assert r._st.closed >= 1
+    # What such a late record leaves behind: window 0 again, for l1.
+    r._st.windows.setdefault(0, {})[l1.id] = Totals(items=5)
+    clock.advance(0.1)
+    r.poll()
     reported = sum(
         f["items"] for f in by_type(sink.signals(), "flow") if f["link"] == l1.id
     )
@@ -548,7 +538,7 @@ def test_removed_handles_leave_the_busy_set():
         r.poll()
     clock.advance(0.2)
     r.poll()
-    assert len(r._busy_ids) <= 1
+    assert not r._st.windows and len(r._watched) <= 1
 
 
 def test_queue_of_one_never_holds_two_unwritten(tmp_path):
@@ -635,17 +625,12 @@ def test_a_forked_child_reports_nothing_and_leaves_the_parent_alone():
 def test_close_folds_windows_left_behind_by_a_late_record():
     # N4, the residual race: counts recorded into window 0 after the clock
     # moved on are reported with the next window it closes.
-    class Shared:
-        closed = 0
-
-    shared = Shared()
-    acc = Accumulator("l1", deque(), shared)
+    shared = _Shared()
+    acc = Accumulator("l1", shared)
     acc.start_session(1)
-    acc.record(1, 0, items=3)  # read closed == 0 ...
-    shared.closed = 2  # ... the clock already closed windows 0 and 1
-    res = acc.close(2, None)
-    assert res.totals is not None and res.totals.items == 3
-    assert acc.pending() == 0
+    shared.closed = 2  # the clock already closed windows 0 and 1 ...
+    acc.record(1, 0, items=3)  # ... a caller that read the clock before
+    assert list(shared.windows) == [2] and shared.windows[2]["l1"].items == 3
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
@@ -757,3 +742,24 @@ def test_loss_with_events_pending_keeps_t_monotone_and_the_graph(tmp_path):
     state = conform(sink, tmp_path)
     ids = {e["id"] for e in state["elements"]}
     assert all(e.id in ids for e in late)
+
+
+def test_the_cap_on_window_totals_is_hard_and_becomes_loss(tmp_path):
+    # Re-review B: however the clock thread is scheduled, the totals held
+    # never exceed the cap; refused counts turn into a Loss.
+    r, sink, clock = make(window=0.1)
+    r._st.cap = 50  # a small cap for the test
+    links = [r.link(r.element(f"A{i}"), r.element(f"B{i}")) for i in range(40)]
+    r.poll()
+    for _ in range(5):  # 200 totals wanted, no clock step in between
+        for link in links:
+            link.deliver()
+        clock.advance(0.01)  # same window: 40 totals...
+        clock.advance(0.1)  # ... then the next window: 40 more
+    assert sum(len(w) for w in r._st.windows.values()) <= 50
+    assert r._st.saturated
+    r.poll()
+    assert not r._st.saturated and not r._st.windows
+    sigs = sink.signals()
+    assert any(s["type"] == "snapshot" and s["seq"] > 0 for s in sigs)
+    conform(sink, tmp_path)

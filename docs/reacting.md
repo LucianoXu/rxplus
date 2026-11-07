@@ -107,24 +107,39 @@ Sinks:
 ## Limits
 
 The clock thread closes each window in O(busy elements and links), at roughly 10–40 µs per busy one on
-CPython. Above a few thousand busy links per window it may fall behind. Rather than hold counts without
-bound, it turns the backlog into a **Loss**:
+CPython (more when other threads keep the GIL busy). Above a few thousand busy links per window it may fall
+behind. It never holds counts without bound; instead it turns the backlog into a **Loss**:
 
-| Limit | Value | Meaning |
-|---|---|---|
-| `queue` | your option (default 10 000) | lines created and not yet written, the batch being written included; above it, Loss |
-| lag | 64 windows | windows that ended but are not closed yet; above it, Loss |
-| pending window totals | 100 000 | estimated as busy elements and links × windows outstanding, checked every 1 000 elements or links while closing; above it, Loss |
+| Limit | Value | Enforced by | Above it |
+|---|---|---|---|
+| `queue` | your option (default 10 000) | the clock thread, at each line | Loss: queued lines discarded |
+| lag | 64 windows | the clock thread, before each window | Loss |
+| window totals held | 100 000 | the **hot path**, when a new total is created | the count is not kept; Loss at the clock thread's next turn |
 
-A Loss from the clock lagging gives up every window up to the current one and discards their counts. It
-applies every change not yet emitted (structural changes, span starts and ends) to the graph without its
-own signal, and sends a snapshot taken now, which includes those changes. The `seq` gap is at least the
-number of signals not sent, so observers see the loss; `t` never decreases. Each window total costs about
-160 bytes (measured), so the counts held stay under about 16 MB plus one check interval's worth.
+The third limit is hard. Window totals live in one shared structure, `windows[k][id]`. A hot-path call
+creates a total only for the first event of an element or link in a window, never per item; that is
+where the cap is checked, so the totals held stay at or under 100 000 however the threads are scheduled
+(the count is updated without a common lock, so a few concurrent creations can pass it). The backlog
+counters keep counting at the cap. Each total costs about 160 bytes, so the counts held stay under about
+16 MB.
 
-Measured with the reviewers' load probe: 4 threads delivering on random links, window 0.1 s, 30 s. Peak
-pending totals were about 98 000 with 10 000 busy links and about 111 000 with 20 000, that is, the
-limit plus at most one window's worth. Recordings made under that load pass the checker.
+A Loss gives up every window up to the current one in O(1): the shared structure is replaced by an empty
+one, and depth state resets lazily. Every change not yet emitted (structural changes, span starts and ends)
+is applied to the graph without its own signal, and a snapshot taken now, which includes them, is sent. The
+`seq` gap is at least the number of signals not sent, so observers see the loss; `t` never decreases.
+
+Measured with 4 threads delivering on random links, window 0.1 s, totals sampled every 20 ms:
+
+| Busy links | Duration | Peak totals held | Losses |
+|---|---|---|---|
+| 10 000 | 60 s | 100 000 | 30 |
+| 20 000 | 60 s | 100 001 | 80 |
+| 10 000 | 180 s | 100 001 | 91 |
+| 20 000 | 180 s | 100 001 | 267 |
+
+The peak does not grow with run length. Before the cap moved into the hot path, the bound was checked only
+on the clock thread: peaks of 150 000–330 000 were not a leak, but that thread getting less CPU than the
+callers. A sink that keeps every line in memory makes it worse.
 
 ## Dataflow
 
