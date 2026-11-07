@@ -159,55 +159,56 @@ class Framing(Protocol):
 
 ```python
 @dataclass
-class TaggedFrame(Generic[T]):
-    """A frame tagged with connection identifier."""
-    conn_id: bytes  # Connection identifier
-    frame: T        # The frame data
+class TaggedFrame[T]:
+    """A frame tagged with the connection it came from."""
+    frame: T
+    conn_id: bytes                    # 16 bytes
+    peer_node_id: bytes | None = None # set once the handshake completed
 ```
 
 ### GatewayNode (`node.py`)
 
-Base class for symmetric peer-to-peer gateway nodes.
+Symmetric peer-to-peer node: it listens, dials, and treats both directions alike.
 
 ```python
-class GatewayNode(Generic[F: Framing]):
-    """Generic gateway node for peer-to-peer communication.
-    
-    Type Parameters:
-        F: Frame type implementing the Framing protocol
-    """
-    
+class GatewayNode[F: Framing]:
     def __init__(
         self,
-        host: str = "0.0.0.0",
-        port: int = 8765,
-        node_id: str | None = None,
-        overflow_strategy: str = "drop-old",
-        overflow_size: int = 1000,
-        frame_type: type[F] = None,
+        host: str,
+        port: int,
+        framing_cls: type[F],
+        node_id: bytes | None = None,          # 16 bytes; random if None
+        ping_interval: float | None = 30.0,
+        ping_timeout: float | None = 30.0,
+        retry_policy: RetryPolicy | None = None,  # None: RetryPolicy(base_delay=2.0)
+        tracer_provider: TracerProvider | None = None,
+        logger_provider: LoggerProvider | None = None,  # None: silent
+        name: str | None = None,
+        handshake_buffer: int = 1024,           # frames between HELLO and READY
+        handshake_buffer_bytes: int = 1 << 20,  # their wire size
     ): ...
-    
-    # Properties
-    @property
-    def node_id(self) -> str: ...
-    
-    @property
-    def sink(self) -> rx.Subject[TaggedFrame[F]]: ...
-    
-    @property
-    def stream(self) -> rx.Observable[TaggedFrame[F]]: ...
-    
-    @property
-    def events(self) -> rx.Observable[tuple[str, Any]]: ...
-    
-    # Lifecycle
-    def start(self) -> None: ...
-    def stop(self) -> None: ...
-    async def connect_to(self, uri: str) -> bytes: ...
-    
-    # Connection Management
+
+    # Connections
+    def connect(self, host: str, port: int) -> bytes: ...   # returns the conn_id
+    def disconnect(self, conn_id: bytes) -> bool: ...
     def get_connection(self, conn_id: bytes) -> Connection | None: ...
-    def get_connected_peers(self) -> list[bytes]: ...
+    def get_ready_connections(self) -> dict[bytes, Connection]: ...
+    @property
+    def connections(self) -> dict[bytes, Connection]: ...  # a copy
+
+    # Frames
+    def send_to(self, conn_id: bytes, frame: F) -> bool: ...  # False unless READY
+    def broadcast(self, frame: F) -> int: ...                 # READY connections reached
+    @property
+    def sink(self) -> Observable[TaggedFrame[F]]: ...         # every inbound data frame
+
+    # Events
+    @property
+    def on_connection(self) -> Observable[Connection]: ...    # a connection became READY
+    @property
+    def on_disconnection(self) -> Observable[bytes]: ...      # conn_id; pairs with on_connection
+
+    def close(self) -> None: ...
 ```
 
 ## Dataflow Graph
