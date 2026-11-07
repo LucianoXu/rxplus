@@ -25,33 +25,20 @@ rxplus/gateway/
 
 ## Components
 
-### Overflow Policies (`overflow.py`)
+### Bounded buffer (`overflow.py`)
 
-Thread-safe buffer overflow strategies implementing a common `OverflowPolicy[T]` interface.
+`BoundedBuffer[T](limit, strategy="drop_old")` is one thread-safe FIFO of at most `limit` items (0.2 replaces
+the four 0.1 classes `DropOld`, `DropNew`, `BufferK`, `Disconnect`). When full, `push` applies the strategy:
 
-#### Classes
+| Strategy | When full |
+|----------|-----------|
+| `"drop_old"` | drops the oldest item, which `push` returns |
+| `"drop_new"` | refuses the new item, which `push` returns |
+| `"buffer_k"` | raises `OverflowError` |
+| `"disconnect"` | raises `DisconnectError` (the caller closes the connection) |
 
-| Class | Description | Behavior |
-|-------|-------------|----------|
-| `DropOld` | Ring buffer that drops oldest items | FIFO queue, evicts oldest when full |
-| `DropNew` | Buffer that rejects new items when full | Silently drops new items at capacity |
-| `BufferK` | Hard limit with disconnect | Raises `DisconnectError` when limit exceeded |
-| `Disconnect` | Zero tolerance | Raises `DisconnectError` on first push |
-
-#### Factory Function
-
-```python
-def create_overflow_policy(strategy: str, size: int) -> OverflowPolicy[T]:
-    """Create an overflow policy from strategy name.
-    
-    Args:
-        strategy: One of 'drop-old', 'drop-new', 'buffer-k', 'disconnect'
-        size: Buffer capacity
-        
-    Returns:
-        Configured overflow policy instance
-    """
-```
+`pop()` and `peek()` raise `IndexError` on an empty buffer (0.1 returned `None`, which was ambiguous for a
+buffer holding `None`). `create_overflow_policy(strategy, buffer_limit=100)` builds one.
 
 ### Stream Management (`stream.py`)
 
@@ -100,28 +87,46 @@ class StreamTable:
 
 Structures for managing connection state and handshake payloads.
 
-#### ConnectionState Enum
+#### GatewayConnectionState Enum
+
+(0.1: `ConnectionState`.)
 
 ```python
-class ConnectionState(Enum):
-    PENDING = "pending"       # Awaiting HELLO
-    HANDSHAKING = "handshaking"  # HELLO sent, awaiting HELLO_ACK
-    CONNECTED = "connected"   # Handshake complete
-    DISCONNECTED = "disconnected"  # Connection terminated
+class GatewayConnectionState(Enum):
+    CONNECTING = auto()   # outbound: transport connecting
+    HANDSHAKING = auto()  # HELLO / HELLO_ACK exchange in progress
+    READY = auto()        # handshake complete: frames flow
+    CLOSED = auto()       # terminated
 ```
 
 #### Connection Dataclass
 
-```python
-@dataclass
-class Connection:
-    conn_id: bytes           # Raw connection identifier
-    state: ConnectionState   # Current state
-    remote_node_id: str | None  # Peer's node ID (set after handshake)
-    streams: StreamTable     # Per-connection stream table
-    overflow: OverflowPolicy[Any]  # Per-connection overflow policy
-    created_at: float        # Connection timestamp
-```
+`Connection(conn_id, direction, remote_addr, state, peer_node_id, streams, created_at)`. An **inbound**
+connection is one server socket (0.2): it is created when the peer's socket opens and closed, with an
+`on_disconnection` event, when it closes. In 0.1 inbound connections were keyed by request path, never
+closed, and two peers on one path were merged. A peer that reconnects is a new socket, so a new
+connection with a new `conn_id`: key state by `peer_node_id` if it must survive reconnects.
+
+Events pair: `on_disconnection(conn_id)` follows an `on_connection` for that connection. An inbound
+socket that closes before its handshake completes emits neither. An outbound connection always ends with
+`on_disconnection` (its id was returned by `connect()`), including one whose client exhausted
+`retry_policy.max_retries` (0.1 left it `CONNECTING` forever).
+
+An outbound connection sends its HELLO first on every socket, ahead of its offline buffer (the client's
+`greeting`). The receiving side drops data frames that arrive before the peer's HELLO, as in 0.1. Data
+frames between the peer's HELLO and READY (the buffer a reconnecting peer flushes) are kept and delivered
+to `sink` in order right after `on_connection`. They are bounded by `handshake_buffer` (1024 frames)
+and `handshake_buffer_bytes` (1 MiB of wire size) per connection. Over either bound the connection is
+closed, and how depends on the side:
+
+- inbound (the peer dialled this node): the socket closes; the peer's client reconnects, and what it had
+  flushed is lost;
+- outbound (this node dialled): the connection **ends**, with `on_disconnection` and no reconnect.
+
+So that a reconnect never overflows the peer's hold, an outbound connection's send queue, which is also
+its offline buffer, has the same bounds (`send_queue=handshake_buffer`,
+`send_queue_bytes=handshake_buffer_bytes`). Beyond them it drops its oldest frames and counts them in the
+client's `dropped`. Nodes that talk to each other should use the same limits.
 
 #### HelloPayload Dataclass
 
@@ -163,55 +168,56 @@ class Framing(Protocol):
 
 ```python
 @dataclass
-class TaggedFrame(Generic[T]):
-    """A frame tagged with connection identifier."""
-    conn_id: bytes  # Connection identifier
-    frame: T        # The frame data
+class TaggedFrame[T]:
+    """A frame tagged with the connection it came from."""
+    frame: T
+    conn_id: bytes                    # 16 bytes
+    peer_node_id: bytes | None = None # set once the handshake completed
 ```
 
 ### GatewayNode (`node.py`)
 
-Base class for symmetric peer-to-peer gateway nodes.
+Symmetric peer-to-peer node: it listens, dials, and treats both directions alike.
 
 ```python
-class GatewayNode(Generic[F: Framing]):
-    """Generic gateway node for peer-to-peer communication.
-    
-    Type Parameters:
-        F: Frame type implementing the Framing protocol
-    """
-    
+class GatewayNode[F: Framing]:
     def __init__(
         self,
-        host: str = "0.0.0.0",
-        port: int = 8765,
-        node_id: str | None = None,
-        overflow_strategy: str = "drop-old",
-        overflow_size: int = 1000,
-        frame_type: type[F] = None,
+        host: str,
+        port: int,
+        framing_cls: type[F],
+        node_id: bytes | None = None,          # 16 bytes; random if None
+        ping_interval: float | None = 30.0,
+        ping_timeout: float | None = 30.0,
+        retry_policy: RetryPolicy | None = None,  # None: RetryPolicy(base_delay=2.0)
+        tracer_provider: TracerProvider | None = None,
+        logger_provider: LoggerProvider | None = None,  # None: silent
+        name: str | None = None,
+        handshake_buffer: int = 1024,           # frames between HELLO and READY
+        handshake_buffer_bytes: int = 1 << 20,  # their wire size
     ): ...
-    
-    # Properties
-    @property
-    def node_id(self) -> str: ...
-    
-    @property
-    def sink(self) -> rx.Subject[TaggedFrame[F]]: ...
-    
-    @property
-    def stream(self) -> rx.Observable[TaggedFrame[F]]: ...
-    
-    @property
-    def events(self) -> rx.Observable[tuple[str, Any]]: ...
-    
-    # Lifecycle
-    def start(self) -> None: ...
-    def stop(self) -> None: ...
-    async def connect_to(self, uri: str) -> bytes: ...
-    
-    # Connection Management
+
+    # Connections
+    def connect(self, host: str, port: int) -> bytes: ...   # returns the conn_id
+    def disconnect(self, conn_id: bytes) -> bool: ...
     def get_connection(self, conn_id: bytes) -> Connection | None: ...
-    def get_connected_peers(self) -> list[bytes]: ...
+    def get_ready_connections(self) -> dict[bytes, Connection]: ...
+    @property
+    def connections(self) -> dict[bytes, Connection]: ...  # a copy
+
+    # Frames
+    def send_to(self, conn_id: bytes, frame: F) -> bool: ...  # False unless READY
+    def broadcast(self, frame: F) -> int: ...                 # READY connections reached
+    @property
+    def sink(self) -> Observable[TaggedFrame[F]]: ...         # every inbound data frame
+
+    # Events
+    @property
+    def on_connection(self) -> Observable[Connection]: ...    # a connection became READY
+    @property
+    def on_disconnection(self) -> Observable[bytes]: ...      # conn_id; pairs with on_connection
+
+    def close(self) -> None: ...
 ```
 
 ## Dataflow Graph
@@ -267,19 +273,27 @@ sequenceDiagram
     participant A as Node A
     participant B as Node B
     
-    Note over A,B: Connection Establishment
+    Note over A,B: Connection Establishment (A dials B)
     A->>B: Connect (WebSocket)
+    A->>B: HELLO(node_id=A)
     B->>A: HELLO(node_id=B)
+    B->>A: HELLO_ACK(node_id=B)
     A->>B: HELLO_ACK(node_id=A)
-    
-    Note over A,B: Both nodes now CONNECTED
+
+    Note over A,B: Both connections READY
     A->>B: Application Frames
     B->>A: Application Frames
 ```
 
+The inbound side sends its HELLO in reply to the peer's HELLO, not when the socket opens: the dialling
+node subscribes to its new client's messages only after the client started, so an early HELLO could be
+missed. After a reconnect the outbound side starts a fresh handshake; its handshake state is reset only
+when a socket that was up drops, never by a replayed `CONNECTED` state.
+
 ## Logging (OpenTelemetry)
 
-Uses structured logging via `rxplus.telemetry`:
+With a `logger_provider`, the node logs through `rxplus.telemetry`. Without one it logs nothing (0.2;
+0.1 installed a console exporter by default).
 
 | Log Event | Level | Attributes |
 |-----------|-------|------------|

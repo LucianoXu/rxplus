@@ -28,12 +28,9 @@ Example:
 import threading
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Literal
 
 from ..telemetry import OTelLogger
-
-# Type alias for overflow strategies
-OverflowStrategy = Literal["drop_old", "drop_new", "buffer_k", "disconnect"]
+from .overflow import OverflowStrategy
 
 
 class StreamState(Enum):

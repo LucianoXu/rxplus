@@ -424,3 +424,17 @@ def test_values_sent_while_offline_without_buffering_are_counted_as_dropped():
         assert client.dropped == 5
     finally:
         client.on_completed()
+
+
+def test_a_frame_taken_but_not_sent_goes_back_to_the_front():
+    from rxplus.ws._sendqueue import SendQueue
+
+    async def run() -> list[str | bytes]:
+        q = SendQueue(2, "drop_old")
+        q.put(b"a")
+        q.put(b"b")
+        first = await q.get()
+        q.unget(first)  # the connection closed before it was handed over
+        return [await q.get(), await q.get()]
+
+    assert asyncio.run(run()) == [b"a", b"b"]

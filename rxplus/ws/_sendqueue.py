@@ -163,6 +163,17 @@ class SendQueue:
             self._ready.clear()
             await self._ready.wait()
 
+    def unget(self, frame: str | bytes) -> None:
+        """Put back, at the front, a frame taken by :meth:`get` that was not
+        sent (the connection closed first). It was counted when queued, so no
+        policy applies: the queue may hold one frame over its limit."""
+        self._frames.appendleft(frame)
+        self._bytes += len(frame)
+        # Its enter() token goes back with it (tokens stay aligned).
+        self._tokens.appendleft(self._taken)
+        self._taken = -1.0
+        self._ready.set()
+
     def reset(self) -> int:
         """Forget the overflow state and the queued frames; return how many
         frames were discarded."""
