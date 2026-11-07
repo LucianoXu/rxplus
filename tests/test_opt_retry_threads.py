@@ -172,7 +172,7 @@ def test_a_source_that_fails_on_subscribe_ends_wrapped_after_max_retries():
     errors: list[Exception] = []
     signals: list[object] = []
     rx.create(lambda o, s=None: o.on_error(TypeError("bad"))).pipe(
-        retry_with_signal(1000)
+        retry_with_signal(1000, max_sync_retries=10_000)
     ).subscribe(signals.append, errors.append)
     assert len(signals) == 1000
     (err,) = errors
@@ -191,5 +191,47 @@ def test_unlimited_zero_delay_retries_do_not_grow_the_stack():
             observer.on_completed()
 
     out: list[object] = []
-    rx.create(subscribe).pipe(retry_with_signal()).subscribe(out.append)
+    rx.create(subscribe).pipe(retry_with_signal(max_sync_retries=10_000)).subscribe(
+        out.append
+    )
     assert tries[0] == 5000 and out[-1] == "up"
+
+
+def test_a_source_that_always_fails_on_subscribe_ends_instead_of_hanging():
+    """Ruling on #31: unlimited retries (the default) must not hang in
+    subscribe(): consecutive synchronous failures without delay are bounded
+    by max_sync_retries, then the wrapped original error ends the stream."""
+    errors: list[Exception] = []
+    signals: list[object] = []
+    start = time.monotonic()
+    rx.create(lambda o, s=None: o.on_error(TypeError("bug"))).pipe(
+        retry_with_signal()
+    ).subscribe(signals.append, errors.append)
+    assert time.monotonic() - start < 1.0
+    assert len(signals) == 100
+    (err,) = errors
+    assert isinstance(err, RxException) and isinstance(err.exception, TypeError)
+
+
+def test_failures_after_subscribe_returned_are_not_bounded_by_max_sync_retries():
+    """Asynchronous failures reset the streak: still unlimited."""
+    from reactivex.scheduler import HistoricalScheduler
+
+    sched = HistoricalScheduler()
+    tries = [0]
+
+    def subscribe(observer, scheduler=None):
+        tries[0] += 1
+        if tries[0] <= 300:  # fails later, after subscribe() returned
+            sched.schedule(lambda *_: observer.on_error(OSError("down")))
+        else:
+            observer.on_next("up")
+
+    out: list[object] = []
+    errors: list[Exception] = []
+    rx.create(subscribe).pipe(retry_with_signal(max_sync_retries=5)).subscribe(
+        out.append, errors.append
+    )
+    for _ in range(400):
+        sched.advance_by(1.0)
+    assert not errors and out[-1] == "up" and tries[0] == 301

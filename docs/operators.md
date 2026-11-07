@@ -50,11 +50,13 @@ Restarts the upstream observable on error, emitting an `ErrorRestartSignal` befo
 | `scheduler` | `SchedulerBase \| None` | Where a delayed retry is scheduled (default `TimeoutScheduler`); nothing sleeps on the thread that delivered the error, and disposing cancels a waiting retry |
 | `reacting` | `Reporter \| Element \| None` | Report an operator element with one `attempt` span per subscription (`docs/reacting.md`, Components); `None` installs nothing |
 | `label` | `str` | The element's label (default `"retry_with_signal"`) |
+| `max_sync_retries` | `int` | Consecutive retries without delay whose resubscription fails synchronously (before `subscribe()` returns) before the stream ends with the wrapped error (default 100). Retries with a delay, and errors after a subscribe returned, do not count and end the streak |
 
 > **Bound your retries.** Every error is retried, including programming errors (`TypeError`,
 > `AttributeError`). With the defaults (`max_retries=None`, no `should_retry`) a source that always fails
-> is retried forever: with a delay, once per delay for the life of the subscription; without a delay, in a
-> loop on the subscribing thread, which then never returns from `subscribe()`. Pass `max_retries`, and a
+> is retried forever: with a delay, once per delay for the life of the subscription. Without a delay, a
+> source that fails synchronously on every subscribe ends after `max_sync_retries` (100) consecutive
+> attempts with the wrapped error, so `subscribe()` always returns. Pass `max_retries`, and a
 > `should_retry` that keeps bugs fatal, e.g. `should_retry=lambda e: isinstance(e.exception, (OSError,
 > TimeoutError))`. Retries without delay run in a loop, not by recursion, so the stack does not grow.
 >

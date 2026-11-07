@@ -137,6 +137,7 @@ def retry_with_signal[T](
     delay_s: float | Callable[[int, RxException], float] = 0.0,
     should_retry: Callable[[RxException], bool] | None = None,
     scheduler: SchedulerBase | None = None,
+    max_sync_retries: int = 100,
     reacting: "ReportTo | None" = None,
     label: str = "retry_with_signal",
 ) -> Callable[[Observable[T]], Observable[T | ErrorRestartSignal]]:
@@ -151,6 +152,11 @@ def retry_with_signal[T](
     - scheduler: where a delayed retry is scheduled (default
       ``TimeoutScheduler``); 0.1 slept on the thread that delivered the
       error. A retry without delay subscribes again at once.
+    - max_sync_retries: a source that fails synchronously (before its
+      ``subscribe`` returns) on that many consecutive retries without delay
+      ends the stream with the error: retrying it at once would loop
+      forever on the subscribing thread. Retries with a delay, and errors
+      after a subscribe returned, do not count (and reset the count).
     - reacting: report an operator element (``label``, kind
       ``rxplus.operator``) with one ``attempt`` span per subscription; a
       failed attempt ends with ``error`` and the class of the underlying
@@ -202,6 +208,7 @@ def retry_with_signal[T](
             scheduler: SchedulerBase | None = None,
         ) -> DisposableBase:
             attempts = 0
+            sync_failures = 0  # consecutive synchronous failures, no delay
             disposed = False
             element = _acquire()
             ended = [False]
@@ -254,6 +261,10 @@ def retry_with_signal[T](
             # RecursionError).
             trampoline = threading.local()
 
+            def _end_streak() -> None:
+                nonlocal sync_failures
+                sync_failures = 0
+
             def _run() -> None:
                 if getattr(trampoline, "active", False):
                     trampoline.pending = True
@@ -264,6 +275,10 @@ def retry_with_signal[T](
                     while trampoline.pending and not disposed:
                         trampoline.pending = False
                         _subscribe_once()
+                        if not trampoline.pending:
+                            # subscribe() returned without a synchronous
+                            # failure: the streak ends.
+                            _end_streak()
                 finally:
                     trampoline.active = False
 
@@ -311,6 +326,18 @@ def retry_with_signal[T](
                         _fail(err)
                         return
 
+                    nonlocal sync_failures
+                    delay = _delay(attempts + 1, err)
+                    if delay <= 0 and getattr(trampoline, "subscribing", False):
+                        # Failed before subscribe() returned, to be retried
+                        # at once: a source that always does so would loop.
+                        sync_failures += 1
+                        if sync_failures > max_sync_retries:
+                            _fail(err)
+                            return
+                    else:
+                        sync_failures = 0
+
                     attempts += 1
 
                     try:
@@ -328,14 +355,18 @@ def retry_with_signal[T](
                         return
 
                     if not disposed:
-                        _retry(_delay(attempts, err))
+                        _retry(delay)
 
-                subscription = source.subscribe(
-                    on_next=_on_next,
-                    on_error=_on_error,
-                    on_completed=_on_completed,
-                    scheduler=scheduler,
-                )
+                trampoline.subscribing = True
+                try:
+                    subscription = source.subscribe(
+                        on_next=_on_next,
+                        on_error=_on_error,
+                        on_completed=_on_completed,
+                        scheduler=scheduler,
+                    )
+                finally:
+                    trampoline.subscribing = False
                 previous: DisposableBase | None = None
                 with generation_lock:
                     # Stale: a retry took over while this attempt was
