@@ -38,7 +38,7 @@ stream.pipe(stream_print_out("[DEBUG] ")).subscribe(...)
 
 ---
 
-### `retry_with_signal(max_retries, delay_s, should_retry)`
+### `retry_with_signal(max_retries, delay_s, should_retry, reacting, label)`
 
 Restarts the upstream observable on error, emitting an `ErrorRestartSignal` before each retry.
 
@@ -47,6 +47,8 @@ Restarts the upstream observable on error, emitting an `ErrorRestartSignal` befo
 | `max_retries` | `int \| None` | Max attempts; `None` for unlimited |
 | `delay_s` | `float \| Callable[[int, RxException], float]` | Delay between retries |
 | `should_retry` | `Callable[[RxException], bool] \| None` | Predicate to decide retry |
+| `reacting` | `Reporter \| Element \| None` | Report an operator element with one `attempt` span per subscription (`docs/reacting.md`, Components); `None` installs nothing |
+| `label` | `str` | The element's label (default `"retry_with_signal"`) |
 
 ```python
 source.pipe(

@@ -10,6 +10,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
 
 import websockets
 from opentelemetry._logs import LoggerProvider
@@ -23,9 +24,21 @@ from websockets.protocol import State
 from ..mechanism import RxException
 from ..utils import get_full_error_info, get_short_error_info
 from ._otel_mixin import OTelLoggingMixin
-from ._sendqueue import QueueOverflow, SendOverflow, SendQueue
+from ._sendqueue import (
+    OFF,
+    LiveFlag,
+    QueueOverflow,
+    SendOverflow,
+    SendQueue,
+    wire_size,
+)
 from .codec import WSCodec
 from .datatypes import WSConnectionConfig, WSDatatypeName, codec_for
+
+if TYPE_CHECKING:
+    from ..reacting import ReportTo
+    from ..reacting._component import ComponentReport
+    from ..reacting.handles import Element, Link
 
 DEFAULT_MAX_SIZE = 1 << 20  # 1 MiB: largest incoming message by default
 
@@ -162,6 +175,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
         overflow: SendOverflow = "drop_old",
         send_queue_bytes: int | None = None,
         greeting: Callable[[], str | bytes] | None = None,
+        reacting: "ReportTo | None" = None,
     ):
         """Create a reconnecting WebSocket client.
 
@@ -183,6 +197,9 @@ class RxWSClient(Subject, OTelLoggingMixin):
                 returns (not encoded by ``datatype``) is sent first, ahead of
                 any queued frame (e.g. a protocol HELLO ahead of the offline
                 buffer).
+            reacting: Report to a :class:`~rxplus.reacting.Reporter` or under
+                an :class:`~rxplus.reacting.Element`; ``None`` installs
+                nothing. See ``docs/reacting.md`` (Components).
         """
         super().__init__()
         self.host = config.host
@@ -245,7 +262,57 @@ class RxWSClient(Subject, OTelLoggingMixin):
         # flag to signal shutdown - must be set before starting the thread
         self._shutdown_requested = False
 
+        # Reporting: the client's element and ports; while connected, a
+        # `socket` child with its links (loop thread).
+        self._report: ComponentReport | None = None
+        self._socket_element: Element | None = None
+        self._recv_link: Link | None = None
+        self._recv_st: LiveFlag = OFF  # its reporter's live state: one check
+        if reacting is not None:
+            from ..reacting import _component
+
+            self._report = _component.ComponentReport(
+                reacting,
+                name or f"RxWSClient {_component.path_label(self.path)}",
+                "rxplus.ws.client",
+                ("send", "recv"),
+            )
+
         self._start_loop_thread()
+
+    @property
+    def reacting_element(self) -> "Element | None":
+        """The client's element, when it reports (``reacting=``)."""
+        return None if self._report is None else self._report.element
+
+    def reacting_port(self, name: str) -> "Element | None":
+        """The ``"send"`` or ``"recv"`` port, to link your probes to."""
+        return None if self._report is None else self._report.port(name)
+
+    def _report_socket(self) -> None:
+        """Loop thread, on connect: the socket's element and links."""
+        report = self._report
+        if report is None or self.queue is None:
+            return
+        element = report.instance("socket", "rxplus.ws.socket")
+        self._socket_element = element
+        self.queue.bind(
+            report.link(report.ports["send"], element, capacity=self._send_queue)
+        )
+        self._recv_link = report.link(element, report.ports["recv"])
+        self._recv_st = self._recv_link._st
+
+    def _unreport_socket(self) -> None:
+        """Loop thread, on disconnect: the queued frames stay, unreported
+        until the next socket."""
+        if self.queue is not None:
+            self.queue.bind(None)
+        self._recv_link = None
+        self._recv_st = OFF
+        if self._socket_element is not None and self._report is not None:
+            # With its links, after the window that holds its last counts.
+            self._report.retire(self._socket_element, asyncio.get_running_loop())
+            self._socket_element = None
 
     @property
     def connection_state(self):
@@ -331,12 +398,14 @@ class RxWSClient(Subject, OTelLoggingMixin):
         assert queue is not None
         if queue.overflowed:
             self._count_dropped()  # disconnecting: the frame is lost
+            queue.lost()
             return
         # Offline there is no connection to drop: the buffer drops oldest.
         offline = self.ws is None or not self._connected
         before = queue.dropped
         if not queue.put(frame, "drop_old" if offline else None):
             self._count_dropped()
+            queue.lost()
             self._log(  # once per connection
                 f"Send queue overflowed ({queue.limit} frames); disconnecting", "WARN"
             )
@@ -412,6 +481,8 @@ class RxWSClient(Subject, OTelLoggingMixin):
             self._log("Closed.", "INFO")
             # Complete the connection state subject
             self._connection_state_subject.on_completed()
+            if self._report is not None:
+                self._report.remove()  # with its socket, ports and links
             if error is None:
                 super().on_completed()
             else:
@@ -474,19 +545,31 @@ class RxWSClient(Subject, OTelLoggingMixin):
                     "INFO",
                 )
 
+                connect_span = (
+                    None
+                    if self._report is None
+                    else self._report.element.span("connect")
+                )
                 try:
-                    # websockets.connect has its own open_timeout (default
-                    # 10 s); pass ours so None really means "no limit".
-                    self.ws = await asyncio.wait_for(
-                        websockets.connect(
-                            url,
-                            ping_interval=self.ping_interval,
-                            ping_timeout=self.ping_timeout,
-                            max_size=self._max_size,
-                            open_timeout=self._open_timeout,
-                        ),
-                        self._open_timeout,
-                    )
+                    try:
+                        # websockets.connect has its own open_timeout (default
+                        # 10 s); pass ours so None really means "no limit".
+                        self.ws = await asyncio.wait_for(
+                            websockets.connect(
+                                url,
+                                ping_interval=self.ping_interval,
+                                ping_timeout=self.ping_timeout,
+                                max_size=self._max_size,
+                                open_timeout=self._open_timeout,
+                            ),
+                            self._open_timeout,
+                        )
+                    except BaseException as e:
+                        if connect_span is not None:
+                            connect_span.end(e)  # error: the exception's class
+                        raise
+                    if connect_span is not None:
+                        connect_span.end()
 
                 except TimeoutError:
                     attempt += 1
@@ -545,6 +628,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
                     # what the overflow discarded.
                     self._count_dropped(self.queue.reset())
                 self._connected = True
+                self._report_socket()
                 self._set_connection_state(WSConnectionState.CONNECTED)
 
                 sender_task = asyncio.create_task(
@@ -564,10 +648,11 @@ class RxWSClient(Subject, OTelLoggingMixin):
 
                 await asyncio.gather(*pending, return_exceptions=True)
 
+                self._connected = False
+                self._unreport_socket()
                 for task in done:
                     task.result()
 
-                self._connected = False
                 self._set_connection_state(WSConnectionState.DISCONNECTED)
 
                 # A connection that stayed up resets the backoff and is
@@ -600,6 +685,7 @@ class RxWSClient(Subject, OTelLoggingMixin):
             super().on_error(e)
 
         finally:
+            self._unreport_socket()
             if self.ws is not None:
                 await self.ws.close()
                 self.ws = None
@@ -658,7 +744,10 @@ class RxWSClient(Subject, OTelLoggingMixin):
                     return
                 try:
                     await websocket.send(frame)
+                    self.queue.sent(frame)
                 except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                    self.queue.lost(taken=True)
+                    self._count_dropped()  # the frame in flight is lost
                     self._log(
                         f"Failed to send to server {remote_desc},"
                         f" connection broken: {get_short_error_info(e)}",
@@ -666,6 +755,8 @@ class RxWSClient(Subject, OTelLoggingMixin):
                     )
                     return
                 except websockets.exceptions.ConnectionClosed as e:
+                    self.queue.lost(taken=True)
+                    self._count_dropped()  # the frame in flight is lost
                     self._log(
                         f"Failed to send to server {remote_desc},"
                         f" connection closed: {get_short_error_info(e)}",
@@ -702,9 +793,12 @@ class RxWSClient(Subject, OTelLoggingMixin):
                     )
                     return
 
+                recv = self._recv_link
                 try:
                     payload = self.adapter.decode(data)
                 except Exception as e:
+                    if recv is not None:
+                        recv.drop()
                     self._count_dropped()
                     self._log(
                         f"Dropped a message from {remote_desc} that did not"
@@ -712,6 +806,8 @@ class RxWSClient(Subject, OTelLoggingMixin):
                         "ERROR",
                     )
                     continue
+                if self._recv_st.live and recv is not None:
+                    recv.deliver(1, bytes=wire_size(data))
                 try:
                     super().on_next(payload)
                 except Exception as e:

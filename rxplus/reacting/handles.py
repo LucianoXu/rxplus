@@ -10,6 +10,7 @@ does that.
 from __future__ import annotations
 
 import contextvars
+from collections import deque
 from collections.abc import Callable
 from types import TracebackType
 from typing import TYPE_CHECKING, Literal
@@ -37,7 +38,6 @@ class _Live:
         "T",
         "closed",
         "shards",
-        "epoch",
         "pending",
         "cap",
         "saturated",
@@ -57,7 +57,6 @@ class _Live:
         self.closed = 0  # windows of the session below this index are closed
         # shard.windows[k][ident]: the totals of element/link ident in window k
         self.shards = tuple(Shard() for _ in range(SHARDS))
-        self.epoch = 0  # incremented by a Loss: every depth state resets
         self.pending = 0  # totals held in the shards (approximate)
         self.cap = 100_000  # hard limit on `pending` (the reporter sets it)
         self.saturated = False  # a total was refused at the cap
@@ -143,7 +142,7 @@ class Element:
 class Link:
     """Handle of a link. Hot-path methods cost one check while not live."""
 
-    __slots__ = ("reporter", "id", "kind", "_acc", "_st")
+    __slots__ = ("reporter", "id", "kind", "_acc", "_st", "_tokens")
 
     def __init__(
         self, reporter: Reporter, ident: str, kind: LinkKind, acc: Accumulator
@@ -153,6 +152,8 @@ class Link:
         self.kind = kind
         self._acc = acc
         self._st = reporter._st
+        # FIFO of enter() tokens shared by the rx.enter/rx.leave probes
+        self._tokens: deque[float] | None = None
 
     def deliver(self, n: int = 1, *, bytes: int | None = None) -> None:
         """``n`` items were delivered at ``to`` (``bytes``: their total size)."""

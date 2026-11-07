@@ -35,7 +35,6 @@ class _Shared:
     def __init__(self) -> None:
         self.closed = 0
         self.shards = tuple(Shard() for _ in range(SHARDS))
-        self.epoch = 0
         self.pending = 0
         self.cap = 100_000
         self.saturated = False
@@ -886,3 +885,28 @@ def test_the_clock_thread_survives_an_exception_in_a_step(tmp_path, caplog):
     assert {e["label"] for e in after[0]["elements"]} == {"A", "B"}
     assert sum(f["items"] for f in after if f["type"] == "flow") == 3
     conform(sink, tmp_path, window=0.05)
+
+
+def test_a_loss_of_the_clock_keeps_backlogs_in_its_snapshot(tmp_path):
+    # Spec 5ad5cdb on the lag/cap Loss path (_shed): the backlog of an id
+    # not in the busy set was forgotten until its next hot-path call.
+    r, sink, clock = make(window=0.1)
+    r._st.cap = 5
+    a, b = r.element("A"), r.element("B")
+    held = r.link(a, b)
+    others = [r.link(r.element(f"X{i}"), r.element(f"Y{i}")) for i in range(10)]
+    r.poll()
+    held.enter()
+    held.enter()
+    clock.advance(0.1)
+    r.poll()  # window 0 closed: depth 2
+    for link in others:  # more totals than the cap: Loss at the next window end
+        link.deliver()
+    clock.advance(0.1)
+    r.poll()
+    snaps = [s for s in by_type(sink.signals(), "snapshot") if s["seq"] > 0]
+    assert snaps and snaps[-1]["backlogs"] == [{"id": held.id, "value": 2}]
+    clock.advance(0.1)
+    r.poll()
+    state = conform(sink, tmp_path)
+    assert state["backlog"][held.id]["value"] == 2

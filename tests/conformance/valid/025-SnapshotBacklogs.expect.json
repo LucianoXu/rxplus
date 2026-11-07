@@ -1,0 +1,41 @@
+{
+  "state": {
+    "sources": {
+      "bk": {
+        "backlog": {
+          "a": {
+            "value": 2
+          },
+          "l": {
+            "capacity": 16,
+            "value": 1
+          }
+        },
+        "elements": [
+          {
+            "id": "a",
+            "label": "A"
+          },
+          {
+            "id": "b",
+            "label": "B"
+          }
+        ],
+        "ended": [],
+        "label": "With backlogs",
+        "links": [
+          {
+            "from": "a",
+            "id": "l",
+            "kind": "data",
+            "to": "b"
+          }
+        ],
+        "lost": 0,
+        "spans": []
+      }
+    }
+  },
+  "valid": true,
+  "violations": []
+}

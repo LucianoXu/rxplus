@@ -59,6 +59,10 @@ if __name__ == '__main__':
     task_np_matrix_client.build_parser(subparsers)
     # ./main np_matrix_client --rows=4 --cols=4 --dtype=float32 --tx_fps=1.0
 
+    from tasks import task_reacting_pipeline
+    task_reacting_pipeline.build_parser(subparsers)
+    # ./main reacting_pipeline --hub ws://127.0.0.1:8787/source
+
     # Parse arguments
     args = parser.parse_args()
     

@@ -3,6 +3,7 @@
 import threading
 import time
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from attr import dataclass
 from opentelemetry.trace import Span, StatusCode
@@ -11,6 +12,12 @@ from reactivex.abc import DisposableBase
 from reactivex.disposable import Disposable
 
 from .mechanism import RxException
+
+if TYPE_CHECKING:
+    from .reacting import ReportTo
+    from .reacting._component import ComponentReport
+    from .reacting.handles import Element
+    from .reacting.handles import Span as ReactingSpan
 
 
 def stream_print_out(prompt: str = "Stream-Print-Out"):
@@ -113,6 +120,8 @@ def retry_with_signal[T](
     *,
     delay_s: float | Callable[[int, RxException], float] = 0.0,
     should_retry: Callable[[RxException], bool] | None = None,
+    reacting: "ReportTo | None" = None,
+    label: str = "retry_with_signal",
 ) -> Callable[[Observable[T]], Observable[T | ErrorRestartSignal]]:
     """
     Operator: on upstream error, emit a `ErrorRestartSignal` and retry.
@@ -120,7 +129,46 @@ def retry_with_signal[T](
     - max_retries: maximum number of retries before surfacing the error.
     - delay_s: fixed delay (seconds) or a function (attempt, error) -> seconds.
     - should_retry: predicate on the underlying Exception to decide retry.
+    - reacting: report an operator element (``label``, kind
+      ``rxplus.operator``) with one ``attempt`` span per subscription; a
+      failed attempt ends with ``error`` and the class of the underlying
+      exception. ``None`` installs nothing.
     """
+    # The operator element exists while at least one subscription is active
+    # and is removed (with its spans) when the last one ends.
+    report_lock = threading.Lock()
+    active = [0]
+    report: list[ComponentReport | None] = [None]
+
+    def _acquire() -> "Element | None":
+        if reacting is None:
+            return None
+        from .reacting import _component
+
+        with report_lock:
+            current = report[0]
+            if current is None:
+                current = report[0] = _component.ComponentReport(
+                    reacting, label, "rxplus.operator"
+                )
+            active[0] += 1
+            return current.element
+
+    def _release() -> None:
+        if reacting is None:
+            return
+        with report_lock:
+            active[0] -= 1
+            gone = report[0] if active[0] == 0 else None
+            if gone is not None:
+                report[0] = None
+        if gone is not None:
+            gone.remove()
+
+    def _end(span: "ReactingSpan | None", err: Exception | None = None) -> None:
+        if span is not None:
+            cause = err.exception if isinstance(err, RxException) else err
+            span.end(cause)
 
     def _op(
         source: Observable[T],
@@ -131,6 +179,25 @@ def retry_with_signal[T](
         ):
             attempts = 0
             disposed = False
+            element = _acquire()
+            ended = [False]
+
+            def _finish() -> None:
+                # Once per subscription: completed, failed or disposed.
+                with generation_lock:
+                    if ended[0]:
+                        return
+                    ended[0] = True
+                _release()
+
+            def _done() -> None:
+                _finish()
+                observer.on_completed()
+
+            def _fail(err: Exception) -> None:
+                _finish()
+                observer.on_error(err)
+
             # Incremented by every (re)subscription. A retry can start inside
             # source.subscribe() of the previous attempt (synchronous error);
             # the generation tells the outer call that it is no longer current.
@@ -144,6 +211,8 @@ def retry_with_signal[T](
             # lock, but always disposed outside it: a dispose may join the
             # thread that is delivering an error, which may need the lock.
             live: list[DisposableBase | None] = [None]
+            # The live attempt's span (reacting=): ended ok on dispose.
+            attempt_span: list[ReactingSpan | None] = [None]
 
             def _delay(attempt: int, err: RxException) -> None:
                 try:
@@ -163,27 +232,34 @@ def retry_with_signal[T](
                 with generation_lock:
                     generation += 1
                     my_generation = generation
+                span = None if element is None else element.span("attempt")
+                attempt_span[0] = span
 
                 def _on_next(v: T) -> None:
                     observer.on_next(v)
 
+                def _on_completed() -> None:
+                    _end(span)
+                    _done()
+
                 def _on_error(err: Exception) -> None:
+                    _end(span, err)
                     if not isinstance(err, RxException):
                         err = RxException(
                             err,
                             source="retry_with_signal",
                             note="Non-RxException in retry_with_signal",
                         )
-                        observer.on_error(err)
+                        _fail(err)
                         return
 
                     nonlocal attempts
                     if should_retry is not None and not should_retry(err):
-                        observer.on_error(err)
+                        _fail(err)
                         return
 
                     if max_retries is not None and attempts >= max_retries:
-                        observer.on_error(err)
+                        _fail(err)
                         return
 
                     attempts += 1
@@ -193,7 +269,7 @@ def retry_with_signal[T](
                             ErrorRestartSignal(error=err, attempts=attempts)
                         )
                     except Exception as e:
-                        observer.on_error(
+                        _fail(
                             RxException(
                                 e,
                                 source="retry_with_signal",
@@ -210,7 +286,7 @@ def retry_with_signal[T](
                 subscription = source.subscribe(
                     on_next=_on_next,
                     on_error=_on_error,
-                    on_completed=observer.on_completed,
+                    on_completed=_on_completed,
                     scheduler=scheduler,
                 )
                 previous: DisposableBase | None = None
@@ -237,6 +313,8 @@ def retry_with_signal[T](
                         current.dispose()
                     except Exception:
                         pass
+                _end(attempt_span[0])
+                _finish()
 
             return Disposable(_dispose)
 

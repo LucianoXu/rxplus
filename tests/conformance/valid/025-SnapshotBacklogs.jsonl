@@ -1,0 +1,5 @@
+{"source":"bk","seq":0,"t":1762430400.0,"type":"snapshot","protocol":"reacting/1","label":"With backlogs","backlogs":[{"id":"l","value":4,"capacity":16},{"id":"a","value":2},{"id":"c","value":5}],"elements":[{"id":"a","label":"A"},{"id":"b","label":"B"},{"id":"c","label":"C"}],"links":[{"id":"l","from":"a","to":"b","kind":"data"}]}
+{"source":"bk","seq":1,"t":1762430400.1,"type":"flow","link":"l","t0":1762430400.0,"items":3,"dropped":0,"coalesced":0}
+{"source":"bk","seq":2,"t":1762430400.1,"type":"depth","id":"l","value":1,"capacity":16}
+{"source":"bk","seq":3,"t":1762430400.15,"type":"remove","ids":["c"]}
+{"source":"bk","seq":4,"t":1762430400.2,"type":"depth","id":"l","value":1,"capacity":16}

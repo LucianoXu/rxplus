@@ -16,7 +16,7 @@ import itertools
 import socket
 import threading
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import websockets
 from opentelemetry._logs import LoggerProvider
@@ -27,7 +27,7 @@ from websockets import ClientConnection, Server, ServerConnection
 from ..mechanism import RxException
 from ..utils import TaggedData, get_short_error_info
 from ._otel_mixin import OTelLoggingMixin
-from ._sendqueue import QueueOverflow, SendOverflow, SendQueue
+from ._sendqueue import OFF, QueueOverflow, SendOverflow, SendQueue, wire_size
 from .codec import WSCodec
 from .datatypes import (
     DatatypeSpec,
@@ -36,6 +36,11 @@ from .datatypes import (
     codec_for,
     resolve_codecs,
 )
+
+if TYPE_CHECKING:
+    from ..reacting import ReportTo
+    from ..reacting._component import ComponentReport
+    from ..reacting.handles import Element, Link
 
 DEFAULT_MAX_SIZE = 1 << 20  # 1 MiB: largest incoming message by default
 
@@ -115,7 +120,7 @@ class WSChannels:
 class _Client:
     """A connected client: its socket, send queue and identity."""
 
-    __slots__ = ("websocket", "queue", "connection_id", "desc")
+    __slots__ = ("websocket", "queue", "connection_id", "desc", "element", "recv")
 
     def __init__(
         self, websocket: ServerConnection, queue: SendQueue, cid: int, desc: str
@@ -124,6 +129,9 @@ class _Client:
         self.queue = queue
         self.connection_id = cid
         self.desc = desc
+        # Reporting: the connection's element and its receive link.
+        self.element: Element | None = None
+        self.recv: Link | None = None
 
 
 class RxWSServer(Subject, OTelLoggingMixin):
@@ -149,6 +157,10 @@ class RxWSServer(Subject, OTelLoggingMixin):
             ``overflow`` applies when either bound is reached.
         overflow: ``"drop_old"``, ``"drop_new"`` or ``"disconnect"``.
 
+        reacting: Report to a :class:`~rxplus.reacting.Reporter` (top-level
+            element) or under an :class:`~rxplus.reacting.Element`; ``None``
+            installs nothing. See ``docs/reacting.md`` (Components).
+
     ``connections`` emits a :class:`WSConnectionEvent` when a client
     connects or disconnects. The server shuts down on ``on_completed`` and
     on ``on_error`` (which it then forwards to its subscribers).
@@ -172,6 +184,7 @@ class RxWSServer(Subject, OTelLoggingMixin):
         send_queue: int | None = 1024,
         overflow: SendOverflow = "drop_old",
         send_queue_bytes: int | None = None,
+        reacting: "ReportTo | None" = None,
     ):
         """Initialize the WebSocket server and start listening."""
         super().__init__()
@@ -227,7 +240,27 @@ class RxWSServer(Subject, OTelLoggingMixin):
 
         self.serve: Server | None = None
 
+        self._report: ComponentReport | None = None
+        if reacting is not None:
+            from ..reacting import _component
+
+            self._report = _component.ComponentReport(
+                reacting,
+                name or "RxWSServer",  # never the port: often ephemeral
+                "rxplus.ws.server",
+                ("send", "recv"),
+            )
+
         self._start_server_thread()
+
+    @property
+    def reacting_element(self) -> "Element | None":
+        """The server's element, when it reports (``reacting=``)."""
+        return None if self._report is None else self._report.element
+
+    def reacting_port(self, name: str) -> "Element | None":
+        """The ``"send"`` or ``"recv"`` port, to link your probes to."""
+        return None if self._report is None else self._report.port(name)
 
     @property
     def connections(self) -> Observable[WSConnectionEvent]:
@@ -305,9 +338,11 @@ class RxWSServer(Subject, OTelLoggingMixin):
     @property
     def dropped(self) -> int:
         """Items dropped so far: per-item failures (not ``TaggedData``,
-        cannot be encoded or decoded, a subscriber raising) plus frames
-        discarded by send-queue overflow. A reporter (X4) reports the same
-        counts as ``dropped`` on the component's links."""
+        cannot be encoded or decoded, a subscriber raising), frames
+        discarded by send-queue overflow, frames still queued when their
+        connection closed, and values for a path without clients. A reporter
+        reports the per-connection ones as ``dropped`` on that connection's
+        links (a path without clients has no link)."""
         with self._dropped_lock:
             return self._dropped
 
@@ -360,8 +395,13 @@ class RxWSServer(Subject, OTelLoggingMixin):
             return  # the loop closed meanwhile
 
     def _enqueue(self, ws_channels: WSChannels, frame: str | bytes) -> None:
-        """Loop thread: queue a frame for every client of a path."""
-        for client in ws_channels.get_queues_snapshot():
+        """Loop thread: queue a frame for every client of a path. A frame for
+        a path without clients is dropped (counted in ``dropped``)."""
+        clients = ws_channels.get_queues_snapshot()
+        if not clients:
+            self._count_dropped()
+            return
+        for client in clients:
             assert isinstance(client, _Client)
             self._put(client, frame)
 
@@ -372,10 +412,12 @@ class RxWSServer(Subject, OTelLoggingMixin):
         queue = client.queue
         if queue.overflowed:
             self._count_dropped()  # disconnecting: the frame is lost
+            queue.lost()
             return
         before = queue.dropped
         if not queue.put(frame):
             self._count_dropped()
+            queue.lost()
             self._log(  # once per connection
                 f"Send queue of {client.desc} overflowed"
                 f" ({queue.limit} frames); disconnecting",
@@ -416,6 +458,8 @@ class RxWSServer(Subject, OTelLoggingMixin):
             cid,
             remote_desc,
         )
+        if self._report is not None:
+            self._report_connection(client, path)
         ws_channels.add_client(websocket, client)
         with self._clients_lock:
             self._clients[cid] = (client, ws_channels)
@@ -425,7 +469,12 @@ class RxWSServer(Subject, OTelLoggingMixin):
             sender_task = asyncio.create_task(self._server_sender(client))
             receiver_task = asyncio.create_task(
                 self._server_receiver(
-                    websocket, path, ws_channels.adapter, remote_desc, cid
+                    websocket,
+                    path,
+                    ws_channels.adapter,
+                    remote_desc,
+                    cid,
+                    client.recv,
                 )
             )
             done, pending = await asyncio.wait(
@@ -452,12 +501,34 @@ class RxWSServer(Subject, OTelLoggingMixin):
             ws_channels.remove_client(websocket, client)
             with self._clients_lock:
                 self._clients.pop(cid, None)
+            # Frames still queued are never sent: dropped (on the link too).
+            self._count_dropped(client.queue.reset())
+            client.queue.bind(None)
+            if client.element is not None and self._report is not None:
+                # With its links, after the window that holds its last counts.
+                self._report.retire(client.element, asyncio.get_running_loop())
             try:
                 await asyncio.wait_for(websocket.close(), timeout=2.0)
             except TimeoutError:
                 websocket.transport.abort()
             self._log(f"Client {remote_desc} resources released.", "INFO")
             self._emit_event(WSConnectionEvent("closed", cid, path))
+
+    def _report_connection(self, client: _Client, path: str) -> None:
+        """One element per socket, labelled by its path (DESIGN §4.1: an
+        ``.instance``), linked from ``send`` and to ``recv``."""
+        from ..reacting._component import dynamic_label
+
+        report = self._report
+        assert report is not None
+        element = report.instance(
+            dynamic_label("connection", path), "rxplus.ws.connection"
+        )
+        client.element = element
+        client.queue.bind(
+            report.link(report.ports["send"], element, capacity=self._send_queue)
+        )
+        client.recv = report.link(element, report.ports["recv"])
 
     async def _server_sender(self, client: _Client) -> None:
         while True:
@@ -467,7 +538,10 @@ class RxWSServer(Subject, OTelLoggingMixin):
                 return  # overflow="disconnect": end this connection
             try:
                 await client.websocket.send(frame)
+                client.queue.sent(frame)
             except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                client.queue.lost(taken=True)
+                self._count_dropped()  # the frame in flight is lost
                 self._log(
                     f"Failed to send to client {client.desc},"
                     f" connection broken: {get_short_error_info(e)}",
@@ -475,6 +549,8 @@ class RxWSServer(Subject, OTelLoggingMixin):
                 )
                 return
             except websockets.exceptions.ConnectionClosed as e:
+                client.queue.lost(taken=True)
+                self._count_dropped()  # the frame in flight is lost
                 self._log(
                     f"Failed to send to client {client.desc},"
                     f" connection closed: {get_short_error_info(e)}",
@@ -489,7 +565,9 @@ class RxWSServer(Subject, OTelLoggingMixin):
         adapter: WSCodec[object],
         remote_desc: str,
         cid: int,
+        recv: "Link | None" = None,
     ) -> None:
+        st = OFF if recv is None else recv._st  # one check per message
         while True:
             try:
                 data = await websocket.recv()
@@ -510,8 +588,12 @@ class RxWSServer(Subject, OTelLoggingMixin):
             try:
                 payload = adapter.decode(data)
             except Exception as e:
+                if recv is not None:
+                    recv.drop()
                 self._drop(f"a message from {remote_desc} that did not decode", e)
                 continue
+            if st.live and recv is not None:
+                recv.deliver(1, bytes=wire_size(data))
             # A subscriber that raises is its problem, not the connection's;
             # each stream is protected separately.
             try:
@@ -711,6 +793,8 @@ class RxWSServer(Subject, OTelLoggingMixin):
                 self._thread.join(timeout=3.0)
 
             self._log("Closed.", "INFO")
+            if self._report is not None:
+                self._report.remove()  # with its connections, ports and links
             self._connections.on_completed()
             self._received.on_completed()
             if error is None:
