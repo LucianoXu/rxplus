@@ -19,7 +19,10 @@ pip install -e .
 #### Basic Installation (core features only)
 ```bash
 pip install git+https://github.com/LucianoXu/rxplus.git
+pip install "git+https://github.com/LucianoXu/rxplus.git@v0.2.0"   # pinned to a release
 ```
+
+Upgrading from 0.1? 0.2 is a breaking release: see [`docs/migration-0.2.md`](docs/migration-0.2.md).
 
 #### Installation with Optional Features
 ```bash
