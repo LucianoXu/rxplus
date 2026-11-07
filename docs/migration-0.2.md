@@ -2,8 +2,8 @@
 
 rxplus 0.2 is a breaking release (decision D3 of the Reacting project; design in
 `docs/proposals/2026-11-06-reacting-support.md`, section 3). This page lists every change you may have to act
-on, grouped by component. It grows with each pull request of the 0.2 batch; the PR that introduced each change
-is in the last column.
+on, grouped by component; the pull request that introduced each change is in the last column (A = #24,
+B = #26, C = #31).
 
 ## WebSocket (`rxplus.ws`)
 
