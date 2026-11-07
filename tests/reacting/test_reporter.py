@@ -309,3 +309,34 @@ def test_close_is_idempotent_and_final(tmp_path):
     assert not r.live
     assert by_type(sink.signals(), "flow")
     conform(sink, tmp_path)
+
+
+def test_a_recovery_snapshot_lists_the_backlogs(tmp_path):
+    # Spec 5ad5cdb: without them an observer shows every backlog as zero
+    # after a Loss until the next depth signal.
+    r, sink, clock = make(queue=5)
+    a, b = r.element("A"), r.element("B")
+    counted = r.link(a, b, capacity=10)
+    sampled = r.link(b, a, depth=lambda: 4)
+    r.poll()
+    tokens = [counted.enter() for _ in range(3)]
+    for i in range(12):  # overflow the queue: Loss
+        r.element(f"E{i}")
+    r.poll()
+    snaps = [s for s in by_type(sink.signals(), "snapshot") if s["seq"] > 0]
+    assert snaps
+    assert snaps[0]["backlogs"] == [
+        {"id": counted.id, "value": 3, "capacity": 10},
+        {"id": sampled.id, "value": 4},
+    ]
+    state = conform(sink, tmp_path)
+    assert state["backlog"][counted.id]["value"] == 3
+    # The depth rules continue from the listed value: a drain reports 0.
+    for token in tokens:
+        counted.leave(token)
+    clock.advance(0.1)
+    r.poll()
+    depths = [d for d in by_type(sink.signals(), "depth") if d["id"] == counted.id]
+    assert depths and depths[-1]["value"] == 0
+    state = conform(sink, tmp_path)
+    assert counted.id not in state["backlog"]

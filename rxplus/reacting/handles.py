@@ -37,7 +37,6 @@ class _Live:
         "T",
         "closed",
         "shards",
-        "epoch",
         "pending",
         "cap",
         "saturated",
@@ -57,7 +56,6 @@ class _Live:
         self.closed = 0  # windows of the session below this index are closed
         # shard.windows[k][ident]: the totals of element/link ident in window k
         self.shards = tuple(Shard() for _ in range(SHARDS))
-        self.epoch = 0  # incremented by a Loss: every depth state resets
         self.pending = 0  # totals held in the shards (approximate)
         self.cap = 100_000  # hard limit on `pending` (the reporter sets it)
         self.saturated = False  # a total was refused at the cap

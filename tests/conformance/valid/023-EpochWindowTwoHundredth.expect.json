@@ -1,0 +1,32 @@
+{
+  "state": {
+    "sources": {
+      "rx": {
+        "backlog": {
+          "op": {
+            "value": 2
+          }
+        },
+        "elements": [
+          {
+            "id": "op",
+            "label": "Operator"
+          }
+        ],
+        "ended": [],
+        "links": [
+          {
+            "from": "op",
+            "id": "q",
+            "kind": "data",
+            "to": "op"
+          }
+        ],
+        "lost": 0,
+        "spans": []
+      }
+    }
+  },
+  "valid": true,
+  "violations": []
+}

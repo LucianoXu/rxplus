@@ -101,13 +101,11 @@ class Shared(Protocol):
     """What accumulators share with their reporter.
 
     ``closed``: windows below it are closed (set by the clock thread before
-    it closes them). ``shards``: the open windows' totals. ``epoch``:
-    incremented by a Loss; the depth state of every accumulator resets.
+    it closes them). ``shards``: the open windows' totals.
     """
 
     closed: int
     shards: tuple[Shard, ...]
-    epoch: int
     pending: int  # totals held (approximate: updated without a common lock)
     cap: int  # the hard limit on `pending`
     saturated: bool  # a total was refused at the cap: the clock must Loss
@@ -132,7 +130,6 @@ class Accumulator:
         "_shared",
         "_backlog",
         "_last_nonzero",
-        "_epoch",
         "sampler",
         "capacity",
     )
@@ -152,7 +149,6 @@ class Accumulator:
         self._shared = shared
         self._backlog = 0  # counted backlog now
         self._last_nonzero = False  # the depth at the previous boundary was non-zero
-        self._epoch = shared.epoch
         self.sampler = sampler
         self.capacity = capacity
 
@@ -221,7 +217,6 @@ class Accumulator:
             self._session = session
             self._backlog = 0
             self._last_nonzero = False
-            self._epoch = self._shared.epoch
 
     def lock(self) -> threading.Lock:
         """The lock under which the clock thread reads this id's state (its
@@ -240,13 +235,7 @@ class Accumulator:
         ``later_delta`` is the backlog change recorded in later windows;
         ``sample`` the sampled backlog, for an accumulator with a sampler.
         """
-        if self._epoch != self._shared.epoch:
-            self._epoch = self._shared.epoch  # a Loss reset every backlog
-            self._last_nonzero = False
-        backlog = sample if sample is not None else self._backlog - later_delta
-        if self.capacity is not None and backlog > self.capacity:
-            backlog = self.capacity
-        backlog = max(backlog, 0)
+        backlog = self._backlog_at(later_delta, sample)
         if backlog != 0:
             value: int | None = backlog
         elif self._last_nonzero:
@@ -256,6 +245,22 @@ class Accumulator:
         self._last_nonzero = backlog != 0
         watched = self._last_nonzero or self._backlog != 0 or self.sampler is not None
         return Depth(value, watched)
+
+    def snapshot_backlog(self, sample: int | None) -> int:
+        """The backlog now, for a recovery snapshot (caller holds :meth:`lock`).
+
+        The depth rules continue from it: the observer holds this value, so
+        the next window end reports a change from it (a ``0`` when it was
+        non-zero and has drained)."""
+        backlog = self._backlog_at(0, sample)
+        self._last_nonzero = backlog != 0
+        return backlog
+
+    def _backlog_at(self, later_delta: int, sample: int | None) -> int:
+        backlog = sample if sample is not None else self._backlog - later_delta
+        if self.capacity is not None and backlog > self.capacity:
+            backlog = self.capacity
+        return max(backlog, 0)
 
     # ------------------------------------------------------------------- tests
 

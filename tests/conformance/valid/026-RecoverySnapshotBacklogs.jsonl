@@ -1,0 +1,7 @@
+{"source":"bk","seq":0,"t":1762430400.0,"type":"snapshot","protocol":"reacting/1","elements":[{"id":"a","label":"A"},{"id":"b","label":"B"}],"links":[{"id":"l","from":"a","to":"b","kind":"data"}]}
+{"source":"bk","seq":1,"t":1762430400.1,"type":"flow","link":"l","t0":1762430400.0,"items":3,"dropped":0,"coalesced":0}
+{"source":"bk","seq":2,"t":1762430400.1,"type":"depth","id":"l","value":3}
+{"source":"bk","seq":3,"t":1762430400.1,"type":"depth","id":"a","value":1}
+{"source":"bk","seq":9,"t":1762430400.35,"type":"snapshot","protocol":"reacting/1","backlogs":[{"id":"l","value":7},{"id":"a","value":2}],"elements":[{"id":"a","label":"A"},{"id":"b","label":"B"}],"links":[{"id":"l","from":"a","to":"b","kind":"data"}]}
+{"source":"bk","seq":10,"t":1762430400.4,"type":"depth","id":"a","value":0}
+{"source":"bk","seq":11,"t":1762430400.4,"type":"flow","link":"l","t0":1762430400.3,"items":1,"dropped":0,"coalesced":0}
