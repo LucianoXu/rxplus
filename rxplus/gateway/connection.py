@@ -2,7 +2,7 @@
 
 This module provides connection abstractions for peer-to-peer reactive
 communication:
-    - ConnectionState: Connection lifecycle states
+    - GatewayConnectionState: Connection lifecycle states
     - Connection: Base connection dataclass
     - HelloPayload: Handshake payload for HELLO/HELLO_ACK messages
 
@@ -14,7 +14,7 @@ Connection states:
     CONNECTING → CLOSED: Connection failed (outbound only)
 
 Example:
-    >>> from rxplus.gateway import Connection, ConnectionState, HelloPayload
+    >>> from rxplus.gateway import Connection, GatewayConnectionState, HelloPayload
     >>>
     >>> # Create connection record
     >>> conn = Connection(
@@ -24,7 +24,7 @@ Example:
     ... )
     >>>
     >>> # Update state after handshake
-    >>> conn.state = ConnectionState.READY
+    >>> conn.state = GatewayConnectionState.READY
     >>> conn.peer_node_id = received_node_id
 """
 
@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from ..ws import RxWSClient
 
 
-class ConnectionState(Enum):
+class GatewayConnectionState(Enum):
     """Connection lifecycle states.
 
     State transitions:
@@ -81,7 +81,7 @@ class Connection:
     conn_id: bytes
     direction: Literal["inbound", "outbound"]
     remote_addr: tuple[str, int]
-    state: ConnectionState = ConnectionState.CONNECTING
+    state: GatewayConnectionState = GatewayConnectionState.CONNECTING
     peer_node_id: bytes | None = None
     streams: StreamTable = field(default_factory=StreamTable)
     created_at: float = field(default_factory=time.time)
@@ -92,6 +92,15 @@ class Connection:
     _disposables: CompositeDisposable = field(
         default_factory=CompositeDisposable, repr=False
     )
+    _server_connection: int | None = field(default=None, repr=False)  # inbound
+    _ws_up: bool = field(default=False, repr=False)  # outbound socket connected
+    _hello_sent: bool = field(default=False, repr=False)  # inbound: HELLO sent
+    _was_ready: bool = field(default=False, repr=False)  # on_connection emitted
+    # Data frames that arrived before READY (e.g. a peer's offline buffer,
+    # flushed ahead of its HELLO after a reconnect); delivered once READY.
+    # Data frames between the peer's HELLO and READY, and their wire size.
+    _early: list[object] = field(default_factory=list, repr=False)
+    _early_bytes: int = field(default=0, repr=False)
     _hello_received: bool = field(default=False, repr=False)
     _hello_ack_received: bool = field(default=False, repr=False)
 

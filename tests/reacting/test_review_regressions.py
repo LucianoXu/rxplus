@@ -265,7 +265,7 @@ def test_submodules_are_attributes_and_concurrent_first_import_works():
         import importlib, threading, rxplus
         assert rxplus.ws.RxWSServer and rxplus.reacting.Reporter
         names = ["RxWSServer", "tag", "OTelLogger", "GatewayNode", "Duplex",
-                 "from_cli", "retry_with_signal", "WSStr", "BufferK"] * 3
+                 "from_cli", "retry_with_signal", "WSStr", "BoundedBuffer"] * 3
         errors = []
         barrier = threading.Barrier(len(names))
         def go(n):
@@ -795,6 +795,7 @@ def test_the_clock_waits_for_a_caller_write_in_progress(tmp_path):
     link = r.link(a, b)
     r.poll()
     clock.advance(0.05)
+    link.deliver()  # the shard holds a total: the clock must take its lock
     acc = link._acc
     shard = acc._shard
     shard.lock.acquire()  # a caller in record(), window 0, past reading `closed`
@@ -804,8 +805,7 @@ def test_the_clock_waits_for_a_caller_write_in_progress(tmp_path):
         closer.start()
         time.sleep(0.2)
         assert closer.is_alive()  # the clock waits for the write to finish
-        shard.windows.setdefault(0, {})[link.id] = Totals(items=5)
-        shard.count += 1
+        shard.windows[0][link.id].items += 5
     finally:
         shard.lock.release()
     closer.join(5.0)
@@ -814,7 +814,31 @@ def test_the_clock_waits_for_a_caller_write_in_progress(tmp_path):
         r.poll()
     r.close()
     flows = by_type(sink.signals(), "flow")
-    assert sum(f["items"] for f in flows if f["link"] == link.id) == 5
+    assert sum(f["items"] for f in flows if f["link"] == link.id) == 6
+    conform(sink, tmp_path)
+
+
+def test_a_total_created_while_the_clock_skips_its_empty_shard_counts_later(
+    tmp_path,
+):
+    # Issue #27: the clock skips a shard that holds nothing without its lock.
+    # A total a caller creates meanwhile, for a window being closed, counts
+    # in the next window the clock closes (R3), never lost.
+    r, sink, clock = make(window=0.1)
+    link = r.link(r.element("A"), r.element("B"))
+    r.poll()
+    clock.advance(0.15)
+    r.poll()  # window 0 closed; the shard was empty and skipped
+    shard = link._acc._shard
+    with shard.lock:  # what a caller that read `closed` = 0 does
+        shard.windows.setdefault(0, {})[link.id] = Totals(items=4)
+        shard.count += 1
+    for _ in range(2):
+        clock.advance(0.1)
+        r.poll()
+    r.close()
+    flows = [f for f in by_type(sink.signals(), "flow") if f["link"] == link.id]
+    assert sum(f["items"] for f in flows) == 4
     conform(sink, tmp_path)
 
 
@@ -862,11 +886,11 @@ def test_the_clock_thread_survives_an_exception_in_a_step(tmp_path, caplog):
     real = r._close_one
     armed = [True]
 
-    def close_one(k: int) -> bool:
+    def close_one(k: int, closing: dict) -> bool:
         if armed[0]:
             armed[0] = False
             raise RuntimeError("injected")
-        return real(k)
+        return real(k, closing)
 
     r._close_one = close_one  # type: ignore[method-assign]
     with caplog.at_level("ERROR", logger="rxplus.reacting"):

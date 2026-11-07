@@ -63,28 +63,15 @@ class Shard:
         self.windows: dict[int, dict[str, Totals]] = {}  # under `lock`
         self.count = 0  # totals in `windows` (under `lock`)
 
-    def take(self, k: int) -> list[dict[str, Totals]]:
-        """Move out the totals of window ``k`` and of any window below it."""
+    def take_below(self, end: int) -> dict[int, dict[str, Totals]]:
+        """Move out the totals of every window below ``end``: one lock per
+        shard for all the windows a clock step closes (issue #27)."""
         with self.lock:
             windows = self.windows
-            if not windows:
-                return []
-            out = []
-            w = windows.pop(k, None)
-            if w is not None:
-                out.append(w)
-            if windows and min(windows) < k:
-                for j in [j for j in windows if j < k]:
-                    out.append(windows.pop(j))
-            for w in out:
+            out = {j: windows.pop(j) for j in [j for j in windows if j < end]}
+            for w in out.values():
                 self.count -= len(w)
             return out
-
-    def first(self, below: int) -> int | None:
-        """The lowest window below ``below`` holding totals, if any."""
-        with self.lock:
-            found = [j for j, w in self.windows.items() if j < below and w]
-        return min(found, default=None)
 
     def clear(self) -> int:
         """Drop every total (O(1)); return how many were held."""
@@ -222,6 +209,24 @@ class Accumulator:
         """The lock under which the clock thread reads this id's state (its
         shard's lock)."""
         return self._lock
+
+    def quiet(self, closing: Totals | None) -> bool:
+        """Whether the depth at the end of the window being closed is
+        certainly nothing to report, decided without the lock (issue #27:
+        the clock thread stalls on a shard lock a preempted caller holds).
+
+        True when no sampler, no non-zero depth at the previous boundary
+        (only the clock thread writes that), no backlog change in the window
+        being closed (``closing``, already moved out of the shard) and no
+        backlog now. A change after the boundary does not alter the depth at
+        the boundary, and a later window that holds one visits this id again.
+        """
+        return (
+            self.sampler is None
+            and not self._last_nonzero
+            and (closing is None or closing.delta == 0)
+            and self._backlog == 0
+        )
 
     def later_delta(self) -> int:
         """The backlog change recorded in the windows still held (caller

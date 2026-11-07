@@ -87,7 +87,8 @@ The client automatically retries connection until the server is available.
 | `ping_timeout` | `30.0` | Heartbeat timeout (seconds) |
 | `name` | `None` | Custom name for log source identification |
 | `reacting` | `None` | Report to a `Reporter` or under an `Element` (`rxplus.reacting`): elements, ports, per-socket flow, backlog and latency; see `docs/reacting.md`, Components. `None` installs nothing |
-| `buffer_while_disconnected` | `False` | If `True`, queue messages while disconnected for delivery after reconnection. If `False`, messages are dropped when not connected. |
+| `buffer_while_disconnected` | `False` | If `True`, queue messages while disconnected for delivery after reconnection. If `False`, messages are dropped when not connected. A frame already taken for a socket that closed before it was handed over goes back to the front of the queue; one whose send failed part-way is not retried (no duplicates). |
+| `greeting` | `None` | Called on every new connection; the wire frame it returns (`str` or `bytes`, not encoded by `datatype`) is sent first, ahead of any queued frame (the gateway sends its HELLO this way). |
 
 ### `RxWSClientGroup`
 
@@ -179,6 +180,13 @@ Only lifecycle failures reach `on_error`: the server cannot bind its port, a cli
 `RxWSClientGroup.on_next` logs and drops a value that is not `TaggedData`, or one for a path whose datatype is refused. A fixed `datatype="object"` without `allow_pickle` is refused at construction; a per-path function can only be checked when the path is first used.
 
 `RxWSClientGroup` removes a child that ends with an error and emits `(path, error)` on `group.child_errors`; the group and its other children go on, and the next value for that path starts a new child. The group's own `on_completed` or `on_error` completes every child (children are shut down quietly, not errored), then ends the group's stream; values sent afterwards are ignored.
+
+### Per-connection API
+
+`server.received` emits `WSReceived(connection_id, path, value)` for every received value (the main stream
+carries `TaggedData(path, value)`). `server.send_to(connection_id, value)` sends to that one connection and
+returns `False` if it is unknown or closed. `server.close_connection(connection_id)` closes it. `GatewayNode`
+uses these to keep one connection per socket.
 
 ### Connection events
 

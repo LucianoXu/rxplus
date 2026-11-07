@@ -7,6 +7,7 @@ remote server on a background thread with automatic reconnection.
 import asyncio
 import random
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
@@ -18,6 +19,7 @@ from reactivex import Observable, Subject
 from reactivex import operators as ops
 from reactivex.subject import BehaviorSubject
 from websockets import ClientConnection
+from websockets.protocol import State
 
 from ..mechanism import RxException
 from ..utils import get_full_error_info, get_short_error_info
@@ -172,6 +174,7 @@ class RxWSClient(Subject[Any], OTelLoggingMixin):
         send_queue: int | None = 1024,
         overflow: SendOverflow = "drop_old",
         send_queue_bytes: int | None = None,
+        greeting: Callable[[], str | bytes] | None = None,
         reacting: "ReportTo | None" = None,
     ):
         """Create a reconnecting WebSocket client.
@@ -190,6 +193,10 @@ class RxWSClient(Subject[Any], OTelLoggingMixin):
             logger_provider: Optional OTel LoggerProvider for log emission.
             open_timeout: Maximum time in seconds for one connection attempt
                 (TCP connect plus handshake). ``None`` waits indefinitely.
+            greeting: Called on every new connection; the wire frame it
+                returns (not encoded by ``datatype``) is sent first, ahead of
+                any queued frame (e.g. a protocol HELLO ahead of the offline
+                buffer).
             reacting: Report to a :class:`~rxplus.reacting.Reporter` or under
                 an :class:`~rxplus.reacting.Element`; ``None`` installs
                 nothing. See ``docs/reacting.md`` (Components).
@@ -231,6 +238,7 @@ class RxWSClient(Subject[Any], OTelLoggingMixin):
         self.ping_timeout = ping_timeout
         self._open_timeout = open_timeout
         self._buffer_while_disconnected = buffer_while_disconnected
+        self._greeting = greeting
 
         # Outbound frames; created in _run_loop, used on the loop thread only
         self.queue: SendQueue | None = None
@@ -334,7 +342,9 @@ class RxWSClient(Subject[Any], OTelLoggingMixin):
             return
 
         if not self._connected and not self._buffer_while_disconnected:
-            # Drop message when not connected and buffering is disabled
+            # Not connected and not buffering: the value is dropped, and
+            # counted (0.2 review: the totals were short by these).
+            self._count_dropped()
             return
 
         try:
@@ -349,6 +359,7 @@ class RxWSClient(Subject[Any], OTelLoggingMixin):
             )
             return
         if not self._loop_ready.wait(timeout=5.0):
+            self._count_dropped()
             self._log("Dropped a value: the client event loop did not start", "ERROR")
             return
 
@@ -374,9 +385,12 @@ class RxWSClient(Subject[Any], OTelLoggingMixin):
 
     @property
     def dropped(self) -> int:
-        """Items dropped so far: values that could not be encoded, frames
-        that did not decode, subscribers raising, and frames discarded by the
-        send queue. A reporter (X4) reports them as ``dropped``."""
+        """Items dropped so far: values that could not be encoded, values
+        sent while disconnected without ``buffer_while_disconnected``, frames
+        that did not decode, subscribers raising, frames discarded by the
+        send queue, and the frame in flight when a send failed. A reporter
+        reports the per-socket ones as ``dropped`` on the socket's links
+        (while disconnected there is no socket)."""
         with self._dropped_lock:
             return self._dropped
 
@@ -702,6 +716,18 @@ class RxWSClient(Subject[Any], OTelLoggingMixin):
             assert self.queue is not None, (
                 "Queue must be initialized before _client_sender"
             )
+            if self._greeting is not None:
+                # Ahead of every queued frame; never re-queued (the next
+                # connection sends its own).
+                try:
+                    await websocket.send(self._greeting())
+                except (OSError, websockets.exceptions.ConnectionClosed) as e:
+                    self._log(
+                        f"Failed to greet server {remote_desc}:"
+                        f" {get_short_error_info(e)}",
+                        "WARN",
+                    )
+                    return
             while True:
                 try:
                     frame = await self.queue.get()  # encoded in on_next
@@ -710,9 +736,27 @@ class RxWSClient(Subject[Any], OTelLoggingMixin):
                     # one starts with an empty queue.
                     self._count_dropped(self.queue.reset())
                     return
+                if websocket.state is not State.OPEN:
+                    # Closed before this frame was handed over: keep it for
+                    # the next connection (the queue outlives this one). A
+                    # failure inside send() may follow a partial write, so
+                    # that frame is not retried (no duplicates).
+                    self.queue.unget(frame)
+                    self._log(
+                        f"Server {remote_desc} closed; the frame is kept"
+                        " for the next connection",
+                        "WARN",
+                    )
+                    return
                 try:
                     await websocket.send(frame)
                     self.queue.sent(frame)
+                except asyncio.CancelledError:
+                    # The connection is ending mid-send: the frame in flight
+                    # may be partly written, so it is lost, not re-sent.
+                    self.queue.lost(taken=True)
+                    self._count_dropped()
+                    raise
                 except (ConnectionResetError, BrokenPipeError, OSError) as e:
                     self.queue.lost(taken=True)
                     self._count_dropped()  # the frame in flight is lost

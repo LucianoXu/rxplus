@@ -39,6 +39,24 @@ is in the last column.
 | a value that could not be packaged ended the server/client via `on_error` | logged at ERROR and dropped | — | #11 |
 | a terminal error (retries exhausted, bind failure) left the loop thread running | the thread ends | — | #12 |
 
+## Gateway (`rxplus.gateway`)
+
+| 0.1 | 0.2 | What to do | PR |
+|---|---|---|---|
+| inbound connections keyed by request path, never closed; two peers on one path merged | one connection per server socket; closed (state `CLOSED`, `on_disconnection`) when the socket closes | nothing, unless you relied on the merging | B |
+| the inbound side sent HELLO when a path was first seen | it sends HELLO in reply to the peer's HELLO, then HELLO_ACK | custom peers must send HELLO first (as `GatewayNode` always did) | B |
+| `GatewayNode()` without `logger_provider` logged to the console | logs nothing | pass a `logger_provider` to see logs | B |
+| `ConnectionState` (`rxplus.ConnectionState`, `rxplus.gateway.ConnectionState`) | `GatewayConnectionState` | rename | B |
+| `DropOld`, `DropNew`, `BufferK`, `Disconnect`, `OverflowPolicy` | `BoundedBuffer(limit, strategy)` | `DropOld(n)` → `BoundedBuffer(n, "drop_old")`, etc. | B |
+| `buffer.pop()` / `peek()` returned `None` when empty | raise `IndexError` | check `len(buffer)` or catch `IndexError` | B |
+| `DropOld(max_size=n)`, `DropNew(max_size=n)`, `Disconnect(max_size=n)`, `BufferK(k=n)` | `BoundedBuffer(limit=n, strategy=...)` | rename the keyword to `limit` | B |
+| an inbound peer that reconnected kept its connection id (path-keyed) | a reconnect is a new socket: `on_disconnection(old id)`, then `on_connection` with a new id | key your state by `peer_node_id` if it must survive reconnects | B |
+| `on_disconnection` for inbound connections | fires only for inbound connections that reached READY (it pairs with `on_connection`); always for outbound ones | — | B |
+| an outbound connection whose client exhausted its retries stayed `CONNECTING` | closed: `CLOSED`, removed, `on_disconnection` | — | B |
+| a reconnecting outbound connection queued its HELLO behind the offline buffer, and the peer dropped that buffer | HELLO goes first; data between the peer's HELLO and READY is kept (`handshake_buffer=1024` frames, `handshake_buffer_bytes=1 MiB`; over either the connection closes) and delivered after `on_connection`; data before HELLO is still dropped; an outbound connection's send/offline queue is bounded the same way (drops the oldest beyond it, counted) | give peers the same limits | B |
+| `OverflowStrategy` defined in `gateway.stream` | defined in `gateway.overflow` (still exported by `rxplus.gateway`) | import from `rxplus.gateway` | B |
+| — | `RxWSServer.received` (values with their `connection_id`), `send_to(connection_id, value)`, `close_connection(connection_id)` | optional | B |
+
 ## Operators, utilities and package surface (PR-C)
 
 | 0.1 | 0.2 | What to do | PR |

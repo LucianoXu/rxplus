@@ -18,7 +18,7 @@ from .datatypes import (
     WSStr,
     wsdt_factory,
 )
-from .server import RxWSServer, WSChannels, WSConnectionEvent
+from .server import RxWSServer, WSChannels, WSConnectionEvent, WSReceived
 
 __all__ = [
     # datatypes and codecs
@@ -40,6 +40,7 @@ __all__ = [
     # server
     "WSChannels",
     "WSConnectionEvent",
+    "WSReceived",
     "RxWSServer",
     # client
     "WSConnectionState",

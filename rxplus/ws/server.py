@@ -73,6 +73,15 @@ class WSConnectionEvent:
     path: str
 
 
+@dataclass(frozen=True, slots=True)
+class WSReceived:
+    """A value received by an :class:`RxWSServer`, with its connection."""
+
+    connection_id: int
+    path: str
+    value: object
+
+
 class WSChannels:
     """Manages the websocket channels of the same path.
 
@@ -216,6 +225,12 @@ class RxWSServer(Subject[TaggedData[str, Any]], OTelLoggingMixin):
 
         self._connection_ids = itertools.count(1)
         self._connections: Subject[WSConnectionEvent] = Subject()
+        self._received: Subject[WSReceived] = Subject()
+        # connection_id -> (client, its path's channels); written on the loop
+        # thread, read by send_to from any thread.
+        self._clients_lock = threading.Lock()
+        self._clients: dict[int, tuple[_Client, WSChannels]] = {}
+        self._closing_tasks: set[asyncio.Task[None]] = set()
 
         # Private asyncio loop in a background thread
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -251,6 +266,60 @@ class RxWSServer(Subject[TaggedData[str, Any]], OTelLoggingMixin):
     def connections(self) -> Observable[WSConnectionEvent]:
         """Client connections opening and closing (emitted on the loop thread)."""
         return self._connections
+
+    @property
+    def received(self) -> Observable[WSReceived]:
+        """Every received value with the connection it came from (the main
+        stream carries ``TaggedData(path, value)`` without it)."""
+        return self._received
+
+    def send_to(self, connection_id: int, value: object) -> bool:
+        """Send ``value`` to one client connection only.
+
+        Returns False if the connection is unknown or closed, or the value
+        cannot be encoded (logged and dropped, as for ``on_next``).
+        """
+        with self._clients_lock:
+            entry = self._clients.get(connection_id)
+        loop = self._loop
+        if entry is None or loop is None or loop.is_closed():
+            return False
+        client, ws_channels = entry
+        try:
+            frame = ws_channels.adapter.encode(value)
+        except Exception as e:
+            self._drop(f"a value for connection {connection_id}", e)
+            return False
+        try:
+            loop.call_soon_threadsafe(self._enqueue_one, client, frame)
+        except RuntimeError:
+            return False
+        return True
+
+    def close_connection(self, connection_id: int) -> bool:
+        """Close one client connection; False if it is unknown."""
+        with self._clients_lock:
+            entry = self._clients.get(connection_id)
+        loop = self._loop
+        if entry is None or loop is None or loop.is_closed():
+            return False
+        websocket = entry[0].websocket
+
+        def start() -> None:
+            # Keep a reference until done: the loop holds tasks only weakly.
+            task = loop.create_task(websocket.close())
+            self._closing_tasks.add(task)
+            task.add_done_callback(self._closing_tasks.discard)
+
+        try:
+            loop.call_soon_threadsafe(start)
+        except RuntimeError:
+            return False
+        return True
+
+    def _enqueue_one(self, client: "_Client", frame: str | bytes) -> None:
+        """Loop thread: queue a frame for one client (see _put)."""
+        self._put(client, frame)
 
     def _get_path_channels(self, path: str) -> WSChannels:
         """Get the WSChannels instance for the given path.
@@ -334,28 +403,34 @@ class RxWSServer(Subject[TaggedData[str, Any]], OTelLoggingMixin):
             return
         for client in clients:
             assert isinstance(client, _Client)
-            queue = client.queue
-            if queue.overflowed:
-                self._count_dropped()  # disconnecting: the frame is lost
-                queue.lost()
-                continue
-            before = queue.dropped
-            if not queue.put(frame):
-                self._count_dropped()
-                queue.lost()
-                self._log(  # once per connection
-                    f"Send queue of {client.desc} overflowed"
-                    f" ({queue.limit} frames); disconnecting",
+            self._put(client, frame)
+
+    def _put(self, client: "_Client", frame: str | bytes) -> None:
+        """Loop thread: queue one frame for one client, applying its overflow
+        policy; drops are counted and logged (the first, every thousandth,
+        and a disconnect once)."""
+        queue = client.queue
+        if queue.overflowed:
+            self._count_dropped()  # disconnecting: the frame is lost
+            queue.lost()
+            return
+        before = queue.dropped
+        if not queue.put(frame):
+            self._count_dropped()
+            queue.lost()
+            self._log(  # once per connection
+                f"Send queue of {client.desc} overflowed"
+                f" ({queue.limit} frames); disconnecting",
+                "WARN",
+            )
+        elif queue.dropped != before:
+            self._count_dropped(queue.dropped - before)
+            if before == 0 or queue.dropped // 1000 != before // 1000:
+                self._log(
+                    f"Send queue of {client.desc} full; {queue.dropped}"
+                    f" frames dropped so far ({queue.overflow})",
                     "WARN",
                 )
-            elif queue.dropped != before:
-                self._count_dropped(queue.dropped - before)
-                if before == 0 or queue.dropped // 1000 != before // 1000:
-                    self._log(
-                        f"Send queue of {client.desc} full; {queue.dropped}"
-                        f" frames dropped so far ({queue.overflow})",
-                        "WARN",
-                    )
 
     def on_error(self, error: Exception) -> None:
         """Shut the server down, then forward the error to subscribers."""
@@ -386,15 +461,24 @@ class RxWSServer(Subject[TaggedData[str, Any]], OTelLoggingMixin):
         if self._report is not None:
             self._report_connection(client, path)
         ws_channels.add_client(websocket, client)
+        with self._clients_lock:
+            self._clients[cid] = (client, ws_channels)
+        tasks: list[asyncio.Task[None]] = []
         try:
             self._log(f"Client established from {remote_desc}", "INFO")
             self._emit_event(WSConnectionEvent("opened", cid, path))
             sender_task = asyncio.create_task(self._server_sender(client))
             receiver_task = asyncio.create_task(
                 self._server_receiver(
-                    websocket, path, ws_channels.adapter, remote_desc, client.recv
+                    websocket,
+                    path,
+                    ws_channels.adapter,
+                    remote_desc,
+                    cid,
+                    client.recv,
                 )
             )
+            tasks = [sender_task, receiver_task]
             done, pending = await asyncio.wait(
                 {sender_task, receiver_task}, return_when=asyncio.FIRST_COMPLETED
             )
@@ -417,6 +501,14 @@ class RxWSServer(Subject[TaggedData[str, Any]], OTelLoggingMixin):
             # Unregister first: no more frames for it. A peer that does not
             # read cannot finish the closing handshake, so bound the close.
             ws_channels.remove_client(websocket, client)
+            with self._clients_lock:
+                self._clients.pop(cid, None)
+            # When this handler is cancelled (the server closing), its sender
+            # may still be in a send: let it finish (and count the frame in
+            # flight) before the queue is dropped and unbound.
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             # Frames still queued are never sent: dropped (on the link too).
             self._count_dropped(client.queue.reset())
             client.queue.bind(None)
@@ -455,6 +547,12 @@ class RxWSServer(Subject[TaggedData[str, Any]], OTelLoggingMixin):
             try:
                 await client.websocket.send(frame)
                 client.queue.sent(frame)
+            except asyncio.CancelledError:
+                # The connection is being closed (e.g. the server ends while
+                # the peer has stopped reading): the frame in flight is lost.
+                client.queue.lost(taken=True)
+                self._count_dropped()
+                raise
             except (ConnectionResetError, BrokenPipeError, OSError) as e:
                 client.queue.lost(taken=True)
                 self._count_dropped()  # the frame in flight is lost
@@ -480,6 +578,7 @@ class RxWSServer(Subject[TaggedData[str, Any]], OTelLoggingMixin):
         path: str,
         adapter: WSCodec[object],
         remote_desc: str,
+        cid: int,
         recv: "Link | None" = None,
     ) -> None:
         st = OFF if recv is None else recv._st  # one check per message
@@ -509,11 +608,16 @@ class RxWSServer(Subject[TaggedData[str, Any]], OTelLoggingMixin):
                 continue
             if st.live and recv is not None:
                 recv.deliver(1, bytes=wire_size(data))
+            # A subscriber that raises is its problem, not the connection's;
+            # each stream is protected separately.
             try:
                 super().on_next(TaggedData(path, payload))
             except Exception as e:
-                # A subscriber raised: its problem, not the connection's;
-                # the item is counted as dropped.
+                # The item is counted as dropped.
+                self._drop(f"a message from {remote_desc}: a subscriber raised", e)
+            try:
+                self._received.on_next(WSReceived(cid, path, payload))
+            except Exception as e:
                 self._drop(f"a message from {remote_desc}: a subscriber raised", e)
 
     def _make_dual_stack_socket(self) -> socket.socket | None:
@@ -706,6 +810,7 @@ class RxWSServer(Subject[TaggedData[str, Any]], OTelLoggingMixin):
             if self._report is not None:
                 self._report.remove()  # with its connections, ports and links
             self._connections.on_completed()
+            self._received.on_completed()
             if error is None:
                 super().on_completed()
             else:
