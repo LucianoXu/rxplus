@@ -713,6 +713,12 @@ class RxWSClient(Subject, OTelLoggingMixin):
                 try:
                     await websocket.send(frame)
                     self.queue.sent(frame)
+                except asyncio.CancelledError:
+                    # The connection is ending mid-send: the frame in flight
+                    # may be partly written, so it is lost, not re-sent.
+                    self.queue.lost(taken=True)
+                    self._count_dropped()
+                    raise
                 except (ConnectionResetError, BrokenPipeError, OSError) as e:
                     self.queue.lost(taken=True)
                     self._count_dropped()  # the frame in flight is lost
