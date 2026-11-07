@@ -10,6 +10,7 @@ does that.
 from __future__ import annotations
 
 import contextvars
+from collections import deque
 from collections.abc import Callable
 from types import TracebackType
 from typing import TYPE_CHECKING, Literal
@@ -141,7 +142,7 @@ class Element:
 class Link:
     """Handle of a link. Hot-path methods cost one check while not live."""
 
-    __slots__ = ("reporter", "id", "kind", "_acc", "_st")
+    __slots__ = ("reporter", "id", "kind", "_acc", "_st", "_tokens")
 
     def __init__(
         self, reporter: Reporter, ident: str, kind: LinkKind, acc: Accumulator
@@ -151,6 +152,8 @@ class Link:
         self.kind = kind
         self._acc = acc
         self._st = reporter._st
+        # FIFO of enter() tokens shared by the rx.enter/rx.leave probes
+        self._tokens: deque[float] | None = None
 
     def deliver(self, n: int = 1, *, bytes: int | None = None) -> None:
         """``n`` items were delivered at ``to`` (``bytes``: their total size)."""
